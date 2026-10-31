@@ -47,7 +47,7 @@ jobs:
         with:
           egress-policy: audit
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
