@@ -1666,7 +1666,9 @@ defmodule ChaosChecker do
 
   defp produce_loop(state) do
     now = System.monotonic_time(:millisecond)
-    state = if now >= state.next_report, do: report_progress(state, now), else: state
+    # past the deadline only the last report is due, written once the final acknowledgements are in: a loop
+    # woken late (a busy host) would otherwise write a progress line right before it
+    state = if now < state.deadline and now >= state.next_report, do: report_progress(state, now), else: state
 
     cond do
       now >= state.deadline ->

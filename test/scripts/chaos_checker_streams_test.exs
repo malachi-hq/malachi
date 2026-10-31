@@ -113,6 +113,14 @@ defmodule ChaosCheckerStreamsTest do
     assert handed == Enum.sort(handed)
   end
 
+  test "a window woken past its deadline writes only the last report", ctx do
+    # the deadline has passed before the first turn of the loop, as when a busy host wakes it late, and a
+    # progress report is due at once
+    {0, []} = produce(ctx.router, ctx.topic, 0, 0)
+    assert [last] = reports()
+    assert last =~ ~r/^PRODUCE t=\d+s handed=0 acked=0 resend=0 /
+  end
+
   defp reports do
     receive do
       {:report, line} -> [line | reports()]
