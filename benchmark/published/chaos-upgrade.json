@@ -1,10 +1,10 @@
 {
   "meta": {
-    "timestamp": "2026-10-31T10:29:20Z",
+    "timestamp": "2026-11-01T11:18:41Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "ff0f1f4",
-    "git_ref_date": "2026-10-30T10:58:31Z",
-    "malachi_version": "0.22.5",
+    "git_ref": "a07cabb",
+    "git_ref_date": "2026-10-31T22:47:32Z",
+    "malachi_version": "0.22.6",
     "hardware": {
       "cpu": "x86_64",
       "cores": 4,
@@ -25,19 +25,19 @@
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 51557,
-    "post_chaos_records_per_s": 19927
+    "acked_writes": 54829,
+    "post_chaos_records_per_s": 2280
   },
   "failures": [
-    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1602)",
-    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 4645)",
+    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1293)",
+    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 3537)",
     "nodes 1 and 2 did not serve a clean produce while node 3 was down",
-    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 4645)"
+    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 3537)"
   ],
-  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261031T095504Z-ff0f1f4",
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261101T104556Z-a07cabb",
   "details": {
     "old_ref": "v0.22.4",
-    "old_rule": "the newest release whose code differs from this tree, which is release v0.22.5's",
+    "old_rule": "the newest release whose code differs from this tree, which is release v0.22.6's",
     "old_sha": "f5070bcb07367c783871697b8903ec750807c6b4",
     "old_version": "0.22.4",
     "old_machine_version": 7,
@@ -45,9 +45,9 @@
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 18823,
-      "phase2": 13081,
-      "phase3": 19653
+      "phase1": 19022,
+      "phase2": 13334,
+      "phase3": 22473
     },
     "vnodes": 4,
     "vnode_rule": "sharded: v0.22.4 resumes its vnode members after a restart",
