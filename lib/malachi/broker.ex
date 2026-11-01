@@ -1266,6 +1266,64 @@ defmodule Malachi.Broker do
     apply_metadata(broker, {:commit_offset, group, topic, offsets, generation})
   end
 
+  @typedoc """
+  A position as a client sent it back (`Malachi.Position`): the range whose read handed it out (its issuer)
+  and the position in that range's history.
+  """
+  @type issued_position :: {Metadata.range_id(), {non_neg_integer(), non_neg_integer()}}
+
+  @doc """
+  `commit_offset/5` for positions as clients send them back (`positions`, per range, each with its issuer):
+  every one must pass `position_lineage/4` on its range, or the commit is refused whole with `{broker,
+  {:error, :invalid_position}}` and nothing goes to the control plane. The control plane is handed the
+  bare `{source_index, offset}` positions, the shape `commit_offset/5` has always stored.
+  """
+  @spec commit_positions(
+          t(),
+          Metadata.group(),
+          Metadata.topic_name(),
+          %{Metadata.range_id() => issued_position()},
+          non_neg_integer()
+        ) :: {t(), term()}
+  def commit_positions(%__MODULE__{} = broker, group, topic, positions, generation) do
+    if Enum.all?(positions, fn {range_id, {issuer, at}} -> position_lineage(broker, range_id, issuer, at) == :ok end) do
+      offsets = Map.new(positions, fn {range_id, {_issuer, at}} -> {range_id, at} end)
+      commit_offset(broker, group, topic, offsets, generation)
+    else
+      {broker, {:error, :invalid_position}}
+    end
+  end
+
+  @doc """
+  Whether a position the read of `issuer` handed out names a place in `range_id`'s history: always when
+  `issuer` is the range itself (`consume_start/3` then checks it against the range's end); otherwise when
+  both ranges are known, the range's history starts with the issuer's (its `parents` begin with the
+  issuer's, then the issuer), its keyspace slice lies inside the issuer's, and the position is in one of
+  the sources the two share (`source_index` at most the issuer's own). So a split's child, a merge back
+  into exactly the issuer's block and their descendants go on from the issuer's position; a buddy, a
+  sibling or an unrelated range does not, nor a position past the issuer's own history.
+  `{:error, :invalid_position}` when it does not.
+  """
+  @spec position_lineage(t(), Metadata.range_id(), Metadata.range_id(), {non_neg_integer(), non_neg_integer()}) ::
+          :ok | {:error, :invalid_position}
+  def position_lineage(%__MODULE__{}, range_id, range_id, _at), do: :ok
+
+  def position_lineage(%__MODULE__{} = broker, range_id, issuer_id, at) do
+    range = DSRSM.get_range(broker.dsrsm, topic_of_range(range_id), range_id)
+    issuer = DSRSM.get_range(broker.dsrsm, topic_of_range(issuer_id), issuer_id)
+    if descends_at?(range, issuer, at), do: :ok, else: {:error, :invalid_position}
+  end
+
+  defp descends_at?(nil, _issuer, _at), do: false
+  defp descends_at?(_range, nil, _at), do: false
+
+  defp descends_at?(range, issuer, {index, _offset}) do
+    shared = issuer.parents ++ [issuer.id]
+
+    Enum.take(range.parents, length(shared)) == shared and index <= length(issuer.parents) and
+      issuer.key_start <= range.key_start and range.key_end <= issuer.key_end
+  end
+
   @doc """
   Opens consumer `group` of `topic` for a group coordinator through the control plane: `{broker, {:ok,
   epoch}}`, the group's next epoch, above every epoch an earlier coordinator of the group was given.
@@ -1521,11 +1579,13 @@ defmodule Malachi.Broker do
   Where a consumer of `range_id` starts, as a position in the range's history: `:earliest` its first
   source's start (a read clamps it to what retention left), `:latest` the end of the range's own durable
   records (`durable_end/2`), `{:position, position}` that position when it names one of the range's
-  sources and does not lie past the range's end as this frontend knows it, and `{:committed, group}` the
-  group's checkpoint for the range, held to the same rules as a position, or the start when the group has
-  none. `{:error, :invalid_position}` for a position (or a checkpoint) past the range's sources or its end;
-  `{:error, :metadata_unavailable}` for one on the range's own records while its end is not known yet (a
-  recovery could not learn it).
+  sources and does not lie past the range's end as this frontend knows it, `{:position, issuer, position}`
+  a position the read of range `issuer` handed out, which must pass `position_lineage/4` first and is then
+  held to the rules of `{:position, position}`, and `{:committed, group}` the group's checkpoint for the
+  range, held to the same rules as a position, or the start when the group has none.
+  `{:error, :invalid_position}` for a position (or a checkpoint) past the range's sources or its end, or
+  one whose issuer's history the range does not extend; `{:error, :metadata_unavailable}` for one on the
+  range's own records while its end is not known yet (a recovery could not learn it).
   """
   @spec consume_start(t(), Metadata.range_id(), term()) ::
           {:ok, {non_neg_integer(), non_neg_integer()}}
@@ -1546,6 +1606,7 @@ defmodule Malachi.Broker do
           {:position, {index, offset}} when index < own -> {:ok, {index, offset}}
           {:position, {^own, offset}} -> own_position(broker, range_id, own, offset)
           {:position, _past_the_sources} -> {:error, :invalid_position}
+          {:position, issuer, at} -> issued_start(broker, range_id, issuer, at)
           {:committed, group} -> committed_start(broker, group, topic, range_id)
         end
     end
@@ -1608,6 +1669,10 @@ defmodule Malachi.Broker do
   # A checkpoint is a position a member sent (`Malachi.Wire` 34), or one the retired data keys committed
   # before them and a log still holds, so it is checked as one: a checkpoint past the range's history must
   # not start a reader where it reads nothing forever.
+  defp issued_start(broker, range_id, issuer, at) do
+    with :ok <- position_lineage(broker, range_id, issuer, at), do: consume_start(broker, range_id, {:position, at})
+  end
+
   defp committed_start(broker, group, topic, range_id) do
     case Map.get(committed_offsets(broker, group, topic), range_id, :start) do
       :start -> {:ok, {0, 0}}

@@ -389,6 +389,21 @@ defmodule Malachi.BrokerServer do
   def commit_offset(server, group, topic, offsets, generation),
     do: GenServer.call(server, {:commit_offset, group, topic, offsets, generation})
 
+  @doc """
+  A group member's commit of positions as clients send them back, each with the range whose read issued
+  it (`Malachi.Broker.commit_positions/5`): `{:error, :invalid_position}` when one does not name a place in
+  its range's history (`Malachi.Broker.position_lineage/4`), else what `commit_offset/5` answers.
+  """
+  @spec commit_positions(
+          GenServer.server(),
+          Malachi.Metadata.group(),
+          Malachi.Metadata.topic_name(),
+          %{Malachi.Metadata.range_id() => Broker.issued_position()},
+          non_neg_integer()
+        ) :: term()
+  def commit_positions(server, group, topic, positions, generation),
+    do: GenServer.call(server, {:commit_positions, group, topic, positions, generation})
+
   @doc "Opens consumer `group` of `topic` for a group coordinator: `{:ok, epoch}` (`Malachi.Broker.open_group/3`)."
   @spec open_group(GenServer.server(), Malachi.Metadata.group(), Malachi.Metadata.topic_name()) :: term()
   def open_group(server, group, topic), do: GenServer.call(server, {:open_group, group, topic})
@@ -797,6 +812,11 @@ defmodule Malachi.BrokerServer do
 
   def handle_call({:commit_offset, group, topic, offsets, generation}, _from, state) do
     {broker, reply} = Broker.commit_offset(state.broker, group, topic, offsets, generation)
+    {:reply, reply, %{state | broker: broker}}
+  end
+
+  def handle_call({:commit_positions, group, topic, positions, generation}, _from, state) do
+    {broker, reply} = Broker.commit_positions(state.broker, group, topic, positions, generation)
     {:reply, reply, %{state | broker: broker}}
   end
 

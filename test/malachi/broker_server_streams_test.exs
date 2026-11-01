@@ -642,6 +642,75 @@ defmodule Malachi.BrokerServerStreamsTest do
       assert :sys.get_state(server).consume.waiters == %{}
     end
 
+    test "a position goes on in a split's child, and not past the issuer's history nor in a sibling", %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      produced(server, root, ["a", "b", "c"])
+      {:ok, left, right} = BrokerServer.split_range(server, root)
+
+      # the parent's read handed it out, and the child's history starts with the parent's
+      assert {:ok, _token, {0, 1}, _server} = BrokerServer.open_consume(server, left, {:position, root, {0, 1}})
+      assert {:ok, {0, 1}, _view, _reporter} = BrokerServer.fetch_range(server, right, {:position, root, {0, 1}}, 0)
+      # a position the child's own read handed out is checked against the child alone
+      assert {:ok, _token, {1, 0}, _server} = BrokerServer.open_consume(server, left, {:position, left, {1, 0}})
+
+      # index 1 is the child's own records, a source the parent's history never held
+      assert BrokerServer.open_consume(server, left, {:position, root, {1, 0}}) == {:error, :invalid_position}
+      assert BrokerServer.fetch_range(server, left, {:position, root, {1, 0}}, 0) == {:error, :invalid_position}
+      # a sibling's history is not the child's
+      assert BrokerServer.open_consume(server, right, {:position, left, {0, 1}}) == {:error, :invalid_position}
+      assert BrokerServer.open_consume(server, right, {:position, left, {1, 0}}) == {:error, :invalid_position}
+      # nor is that of a range the control plane does not know
+      assert BrokerServer.open_consume(server, left, {:position, {"events", 9}, {0, 0}}) == {:error, :invalid_position}
+      # an unknown range is still unknown
+      assert BrokerServer.open_consume(server, {"events", 9}, {:position, root, {0, 0}}) == {:error, :no_such_range}
+    end
+
+    test "a position goes on in a merge back into the issuer's block, never in a merge of its buddies", %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      produced(server, root, ["a", "b"])
+      {:ok, left, right} = BrokerServer.split_range(server, root)
+      {:ok, merged} = BrokerServer.merge_ranges(server, left, right)
+
+      # the merged range lists the root, then both buddies: it starts with the root's history, on its block
+      assert {:ok, _token, {0, 2}, _server} = BrokerServer.open_consume(server, merged, {:position, root, {0, 2}})
+
+      # a buddy's position names only its half of the merged block: reading on would skip the other half
+      assert BrokerServer.open_consume(server, merged, {:position, left, {1, 0}}) == {:error, :invalid_position}
+      assert BrokerServer.open_consume(server, merged, {:position, right, {1, 0}}) == {:error, :invalid_position}
+      assert BrokerServer.open_consume(server, merged, {:position, left, {0, 1}}) == {:error, :invalid_position}
+
+      # nor does the merged range's position go back to a buddy: its slice lies inside the merged block, but
+      # its history is not the merged range's (a retired buddy is answered moved before any start is read,
+      # so the check is asked of the broker itself)
+      broker = :sys.get_state(server).broker
+      assert Broker.position_lineage(broker, left, merged, {0, 1}) == {:error, :invalid_position}
+      assert Broker.position_lineage(broker, merged, root, {0, 1}) == :ok
+    end
+
+    test "a commit of issued positions stores bare positions, and refuses one its range does not descend from",
+         %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      {:ok, left, right} = BrokerServer.split_range(server, root)
+      committed = fn -> Malachi.Broker.committed_offsets(:sys.get_state(server).broker, "g", "events") end
+
+      assert BrokerServer.commit_positions(server, "g", "events", %{left => {root, {0, 1}}}, 0) == :ok
+      assert committed.() == %{left => {0, 1}}
+
+      # one bad position refuses the whole commit, the good one beside it included
+      positions = %{left => {left, {1, 5}}, right => {left, {0, 2}}}
+      assert BrokerServer.commit_positions(server, "g", "events", positions, 0) == {:error, :invalid_position}
+      assert committed.() == %{left => {0, 1}}
+
+      assert BrokerServer.commit_positions(server, "g", "events", %{right => {root, {1, 0}}}, 0) ==
+               {:error, :invalid_position}
+
+      # a range the control plane does not know descends from nothing
+      assert BrokerServer.commit_positions(server, "g", "events", %{{"events", 9} => {root, {0, 0}}}, 0) ==
+               {:error, :invalid_position}
+
+      assert committed.() == %{left => {0, 1}}
+    end
+
     test "the backlog past a position counts the range's own records exactly and its ancestors whole", %{tmp_dir: dir} do
       {server, root} = with_topic(dir)
       produced(server, root, ["p0", "p1", "p2"])

@@ -2148,6 +2148,44 @@ defmodule Malachi.BrokerTest do
       assert DSRSM.get_topic(Broker.replay_journal(drained, journaled).dsrsm, "orders") == nil
     end
 
+    test "a commit of issued positions journals and replays the bare positions the control plane stores" do
+      # The ra command keeps the shape it had before tokens: `replay_apply/2` takes the higher of two
+      # positions by term order, which holds only for `{source_index, offset}` pairs.
+      {broker, root_id} = broker_with_topic("events")
+      {broker, {:ok, left, _right}} = Broker.split_range(broker, root_id)
+      broker = Broker.journal(broker)
+      stale = broker.dsrsm
+
+      positions = %{left => {root_id, {0, 3}}}
+      {broker, :ok} = Broker.commit_positions(broker, "billing", "events", positions, 0)
+      {commands, broker} = Broker.take_journal(broker)
+
+      assert commands == [{:commit_offset, "billing", "events", %{left => {0, 3}}, 0}]
+      assert Broker.committed_offsets(broker, "billing", "events") == %{left => {0, 3}}
+
+      replayed = broker |> Broker.put_cache(stale, []) |> Broker.replay_journal(commands)
+      assert Broker.committed_offsets(replayed, "billing", "events") == %{left => {0, 3}}
+    end
+
+    test "a commit with one position its range does not descend from is refused whole and not journaled" do
+      {broker, root_id} = broker_with_topic("events")
+      {broker, {:ok, left, right}} = Broker.split_range(broker, root_id)
+      broker = Broker.journal(broker)
+
+      # the right child's position is one the left child's read handed out: a sibling, not an issuer
+      positions = %{left => {root_id, {0, 1}}, right => {left, {0, 1}}}
+      assert {broker, {:error, :invalid_position}} = Broker.commit_positions(broker, "billing", "events", positions, 0)
+      assert Broker.take_journal(broker) == {[], broker}
+      assert Broker.committed_offsets(broker, "billing", "events") == %{}
+    end
+
+    test "a checkpoint committed as the start before tokens still opens a read from the start" do
+      {broker, root_id} = broker_with_topic("events")
+      {broker, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => :start}, 0)
+
+      assert Broker.consume_start(broker, root_id, {:committed, "billing"}) == {:ok, {0, 0}}
+    end
+
     test "replaying a command whose topic no longer routes anywhere leaves the cache alone" do
       {broker, _root_id} = broker_with_topic("events")
       broker = Broker.journal(broker)
