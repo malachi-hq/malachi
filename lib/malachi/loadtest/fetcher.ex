@@ -5,9 +5,10 @@ defmodule Malachi.Loadtest.Fetcher do
   next fetch starts moves past each page it reads. What a page that brings nothing new does is the
   `:at_tail` option: `:restart` (the default, the load generator's) sends that range back to the start of
   its history, so a reader keeps pulling a backlog; `:wait` asks again from where the page says the next one
-  starts, so a reader that wants every record once (the chaos checker) asks from the end it reached. An
-  empty page can still move on: from a position in an ancestor's history that held nothing of the range's
-  slice, it names the range's own records next. Where a range with no ancestor read starts is the
+  starts, so a reader that wants every record once (the chaos checker) asks from the end it reached. Where
+  a fetch starts is the token the last page named (`Malachi.Position`), sent back as it came: the fetcher
+  never makes one. An empty page can still move on: from a position in an ancestor's history that held
+  nothing of the range's slice, it names the range's own records next. Where a range with no ancestor read starts is the
   `:start_from` option: `:earliest` (the default), or a group's checkpoint, `{:committed, group}`. Which
   ranges it reads is the `:ranges` option: every active one (`nil`, the default), or only those a group
   member was handed (their sequence numbers). As the Node fetcher (`scripts/lib/fetcher.js`) does all three.
@@ -45,8 +46,10 @@ defmodule Malachi.Loadtest.Fetcher do
   @typedoc """
   A page as `fetch_page/3` gives it: the range it came from (`range`, its number, and `block`, its keyspace
   block in a keyspace of `size` keys), the topic's active ranges by the routes it was fetched by (`active`),
-  where it was asked from (`from`: `:earliest`, `{:committed, group}` or `{:position, p}`) and where the range's next page starts
-  (`to`), and the values of the records new to this reader, in the order the range holds them.
+  where it was asked from (`from`: `:earliest`, `{:committed, group}` or `{:position, token}`) and where
+  the range's next page starts (`to`, a position token, `Malachi.Position`: opaque, compared with
+  `Malachi.Loadtest.Client.compare_positions/2` and resumed from, never computed), and the values of the
+  records new to this reader, in the order the range holds them.
   """
   @type fetched :: %{
           range: non_neg_integer(),
@@ -54,7 +57,7 @@ defmodule Malachi.Loadtest.Fetcher do
           block: {non_neg_integer(), pos_integer()},
           size: pos_integer(),
           from: term(),
-          to: Wire.position(),
+          to: Wire.token(),
           values: [binary()]
         }
 

@@ -15,6 +15,7 @@ defmodule Malachi.Loadtest.Client do
   alias Malachi.Loadtest.Producer
   alias Malachi.Loadtest.Router
   alias Malachi.Log.Record
+  alias Malachi.Position
   alias Malachi.Wire
 
   @enforce_keys [:router, :conn, :conn_opts]
@@ -95,14 +96,16 @@ defmodule Malachi.Loadtest.Client do
 
   `{:ok, %{values: values, positions: positions}}`, where `values` are in the order each range holds them
   and `positions` holds, by range read, where its next page starts: what a member commits once it has read
-  them. A member of a group of more than one reads with `ranges:`, since a commit naming a range the group
+  them. A position is an opaque token (`Malachi.Position`): it is compared (`compare_positions/2`), resumed
+  from and committed, never computed. A member of a group of more than one reads with `ranges:`, since a commit naming a range the group
   did not hand it is refused (`not_assigned`); one handed no range reads nothing; one handed any range a
   split retired, before or during the read, is answered `{:error, :stale_assignment}` and joins again for
   the ranges made of it. Routing answers (routes moved or held back, a dropped connection, no broker that
   takes one, routes not readable yet) are waited out until `opts[:timeout_ms]` (10 s unless given).
   `{:error, reason}` on any other refusal, or `{:error, :timeout}`.
   """
-  @spec read(t(), String.t(), keyword()) :: {:ok, %{values: [binary()], positions: map()}} | {:error, term()}
+  @spec read(t(), String.t(), keyword()) ::
+          {:ok, %{values: [binary()], positions: %{non_neg_integer() => Wire.token()}}} | {:error, term()}
   def read(%__MODULE__{} = client, topic, opts \\ []) do
     fetcher =
       Fetcher.new(client.router, client.conn_opts,
@@ -186,15 +189,26 @@ defmodule Malachi.Loadtest.Client do
   end
 
   @doc """
-  Commits `positions` (`%{range => position}`, as `read/3` gives them) of `group` for `topic` as `member`,
-  at `generation` (`commit_offsets`): `:ok`, or the refusal.
+  Commits `positions` (`%{range => position}`, the tokens `read/3` gives them as) of `group` for `topic` as
+  `member`, at `generation` (`commit_offsets`): `:ok`, or the refusal, `"invalid_position"` for a token the
+  range does not take (one another range's read handed out, other than an ancestor's whose history the
+  range goes on).
   """
-  @spec commit(t(), String.t(), String.t(), String.t(), non_neg_integer(), map()) :: :ok | {:error, String.t()}
+  @spec commit(t(), String.t(), String.t(), String.t(), non_neg_integer(), %{non_neg_integer() => Wire.token()}) ::
+          :ok | {:error, String.t()}
   def commit(%__MODULE__{} = client, topic, group, member, generation, positions) do
     positions = for {range, position} <- positions, do: %{range: range, position: position}
     req = %{topic: topic, group: group, member: member, generation: generation, positions: positions}
     client |> unary(Wire.commit_offsets_key(), Wire.encode_commit_offsets_req(req)) |> answer(fn _ -> :ok end)
   end
+
+  @doc """
+  The order of two positions `read/3` gave: `:lt`, `:eq` or `:gt` for two of one range's reads, else
+  `:incomparable` (`Malachi.Position.compare/2`, which says why two positions naming the same next record
+  can still compare `:lt`). The only thing a client does with a position besides handing it back.
+  """
+  @spec compare_positions(Wire.token(), Wire.token()) :: :lt | :eq | :gt | :incomparable
+  def compare_positions(a, b), do: Position.compare(a, b)
 
   @doc "Leaves `group` for `topic` as `member` (`leave_group`): `:ok`, or the refusal."
   @spec leave(t(), String.t(), String.t(), String.t()) :: :ok | {:error, String.t()}

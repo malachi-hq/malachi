@@ -1199,10 +1199,19 @@ defmodule ChaosChecker do
       "count=#{page.count} first=#{page.first} last=#{page.last}"
   end
 
-  # A position is the index of a source in the range's history and an offset in it (`Malachi.Wire`).
+  # A position is the opaque token the broker handed out (`Malachi.Position`). The checker computes nothing
+  # with it; the label shows what it holds, for an operator reading the trace: the range whose read minted
+  # it, then the index of a source in that range's history and an offset in it, as `issuer@source:offset`.
+  # A token that does not decode is shown as its bytes.
   defp position_label(:earliest), do: "start"
   defp position_label({:position, position}), do: position_label(position)
-  defp position_label({source, offset}), do: "#{source}:#{offset}"
+
+  defp position_label(token) when is_binary(token) do
+    case Malachi.Position.decode(token) do
+      {:ok, %{issuer: issuer, at: {source, offset}}} -> "#{issuer}@#{source}:#{offset}"
+      {:error, :invalid_position} -> "token:" <> Base.encode16(token, case: :lower)
+    end
+  end
 
   @doc """
   Where a scan walked past values it never returned, given its `pages` and the `missing` set: two

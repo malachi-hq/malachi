@@ -3,9 +3,11 @@ defmodule Malachi.Loadtest.Consumer do
   A consuming client as NorthGuard's (meetup transcript, 562 to 569): one consume stream per range
   (`Malachi.Wire` keys 29 and 30), opened where the range is read, pushing `records` pages with the position
   of every record, and a read ack after each page that names the position read and returns the credit, so
-  the broker keeps at most `window` records pushed and unread. It reads every active range of a topic, from
-  the start of each range's history (a load generator worker reads all of its topic, as a consumer in a
-  group of its own does).
+  the broker keeps at most `window` records pushed and unread. The ack carries the page's raw `ack`
+  position, as NorthGuard's read ack carries an offset; where the range is read from next is the page's
+  `next`, an opaque token (`Malachi.Position`) the consumer only hands back. It reads every active range
+  of a topic, from the start of each range's history (a load generator worker reads all of its topic, as a
+  consumer in a group of its own does).
 
   Event driven, as `Malachi.Loadtest.Producer` is: the connections are activated, their socket messages go
   to `handle_message/3`, and what comes back are events:
@@ -415,8 +417,8 @@ defmodule Malachi.Loadtest.Consumer do
     {put_lane(c, key, lane), events ++ [{:failed, key, reason}]}
   end
 
-  # A page: counted, its end acked at once (the credit it took comes back, the window as it is), and the
-  # range's position moved past it.
+  # A page: counted, its end acked at once with the raw position (the credit it took comes back, the window
+  # as it is), and the range's position moved past it, to the token the page names.
   defp push(c, events, address, {:records, %{stream_id: id} = page}) do
     case Map.fetch(c.streams, {address, id}) do
       {:ok, %{lane: key, corr: corr}} ->

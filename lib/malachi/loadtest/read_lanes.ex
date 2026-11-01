@@ -4,7 +4,7 @@ defmodule Malachi.Loadtest.ReadLanes do
   routes: the consumer (`Malachi.Loadtest.Consumer`) and the fetcher (`Malachi.Loadtest.Fetcher`) share it.
 
   A lane is a map with at least `:block` (its range's keyspace block, `{key_start, key_end}`) and `:start`
-  (where the next read of the range starts: `:earliest`, `{:position, position}`, or a marker of the
+  (where the next read of the range starts: `:earliest`, `{:position, token}`, or a marker of the
   client's own, the consumer's `:stopped`). When the routes no longer hold a range, its lane is retired and
   kept, with its start; a range the routes name with no lane yet gets one starting where its nearest retired
   ancestor stopped, or else from the start of its history, so a record is read at least once and never lost
@@ -18,8 +18,11 @@ defmodule Malachi.Loadtest.ReadLanes do
   is skipped, and at most some records are read again. A split's child goes on from where its parent was
   read, and so does a merge back into a block read before it was split, reading the children's records
   again; a merge of two ranges first read as they are starts from the start of its history, since neither
-  buddy's block holds the merged one. A start that is a marker carries over the same way: a range made of a
-  stopped one, by a split or by a merge back into exactly its block, is stopped too.
+  buddy's block holds the merged one. The token carried over is the one the ancestor's read handed out,
+  opaque here (`Malachi.Position`): the broker takes it on the new range for the same reason, its history
+  going on from the ancestor's on a block inside the ancestor's (`Malachi.Broker.position_lineage/4`). A
+  start that is a marker carries over the same way: a range made of a stopped one, by a split or by a merge
+  back into exactly its block, is stopped too.
   """
 
   @type key :: {String.t(), non_neg_integer()}

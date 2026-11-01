@@ -40,7 +40,7 @@ defmodule ChaosCheckerTest do
       block: {0, 256},
       size: 256,
       from: :earliest,
-      to: {0, length(values)},
+      to: Malachi.Position.encode({"t", range}, {0, length(values)}),
       values: values
     }
 
@@ -55,7 +55,7 @@ defmodule ChaosCheckerTest do
         block: {0, 256},
         size: 256,
         from: :earliest,
-        to: {0, 0},
+        to: Malachi.Position.encode({"t", 0}, {0, 0}),
         count: count,
         first: first,
         last: last,
@@ -245,12 +245,18 @@ defmodule ChaosCheckerTest do
       assert {before.last, following.first} == {"c-5", "c-10"}
     end
 
-    test "a page names its range, the start of the history and positions as source:offset" do
-      [line] = ChaosChecker.page_lines([pg(2, "c-1", "c-5", range: 3, from: :earliest, to: {1, 40})])
-      assert line == "PAGE range=3 from=start to=1:40 count=2 first=c-1 last=c-5"
+    test "a page names its range, the start of the history and positions as issuer@source:offset" do
+      to = Malachi.Position.encode({"t", 3}, {1, 40})
+      [line] = ChaosChecker.page_lines([pg(2, "c-1", "c-5", range: 3, from: :earliest, to: to)])
+      assert line == "PAGE range=3 from=start to=3@1:40 count=2 first=c-1 last=c-5"
 
-      [line] = ChaosChecker.page_lines([pg(1, "c-6", "c-6", from: {:position, {1, 40}}, to: {2, 0})])
-      assert line =~ "from=1:40 to=2:0"
+      from = {:position, Malachi.Position.encode({"t", 0}, {1, 40})}
+      [line] = ChaosChecker.page_lines([pg(1, "c-6", "c-6", from: from, to: Malachi.Position.encode({"t", 4}, {2, 0}))])
+      assert line =~ "from=0@1:40 to=4@2:0"
+
+      # a token the broker never mints is shown as its bytes, not taken apart
+      [line] = ChaosChecker.page_lines([pg(1, "c-7", "c-7", to: <<2, 255>>)])
+      assert line =~ "to=token:02ff "
     end
 
     test "renders one line per page, collapsing runs of empty polls" do

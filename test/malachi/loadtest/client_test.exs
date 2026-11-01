@@ -60,6 +60,26 @@ defmodule Malachi.Loadtest.ClientTest do
     assert map_size(positions) == 2
   end
 
+  test "positions are compared, never computed: a later read of a range is past an earlier one",
+       %{client: client, topic: topic} do
+    :ok = Client.create_topic(client, topic, 4)
+    {:ok, 3} = Client.produce(client, topic, records(["p1", "p2", "p3"]), 5_000)
+    {:ok, %{positions: %{0 => earlier}}} = Client.read(client, topic)
+    {:ok, 2} = Client.produce(client, topic, records(["p4", "p5"]), 5_000)
+    {:ok, %{positions: %{0 => later}}} = Client.read(client, topic)
+
+    assert Client.compare_positions(earlier, later) == :lt
+    assert Client.compare_positions(later, earlier) == :gt
+    assert Client.compare_positions(later, later) == :eq
+
+    # the children's positions are their own reads': neither orders against the other, nor the parent's
+    {:ok, _left, _right} = BrokerServer.split_range(DataPlaneRouter.shard_for(topic), {topic, 0})
+    {:ok, %{positions: children}} = Client.read(client, topic)
+    [left, right] = children |> Enum.sort() |> Enum.map(&elem(&1, 1))
+    assert Client.compare_positions(left, right) == :incomparable
+    assert Client.compare_positions(later, left) == :incomparable
+  end
+
   test "an append the node refuses is the produce's error, by reason", %{client: client} do
     assert {:error, %{acked: 0, failed: failed}} = Client.produce(client, "never_created", records(["x"]), 2_000)
     assert map_size(failed) == 1
