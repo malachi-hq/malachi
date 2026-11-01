@@ -26,6 +26,7 @@ defmodule Malachi.Test.StreamStub do
   of appends the broker did not take.
   """
 
+  alias Malachi.Position
   alias Malachi.Wire
   alias Malachi.Wire.Batch
 
@@ -262,14 +263,15 @@ defmodule Malachi.Test.StreamStub do
   # key 29 (`values` at offsets 0, 1, ... of source 0), a page of those at or past that position follows the
   # answer at once, as a broker with records to read pushes it, and none when it asks past them all.
   defp answer(stub, sock, 29, corr, payload, reply) do
-    %{start: start} = Wire.decode_open_consume_req(payload)
+    %{start: start, topic: topic, range: range} = Wire.decode_open_consume_req(payload)
 
     id =
       Agent.get_and_update(stub.state, fn s ->
         {s.next_stream, %{s | next_stream: s.next_stream + 1, streamers: Enum.uniq([sock | s.streamers])}}
       end)
 
-    :gen_tcp.send(sock, ok_body(corr, Wire.encode_open_consume_resp(%{stream_id: id, position: {0, 0}})))
+    opened = %{stream_id: id, position: Position.encode({topic, range}, {0, 0})}
+    :gen_tcp.send(sock, ok_body(corr, Wire.encode_open_consume_resp(opened)))
 
     with {:push_on_open, values} <- reply,
          from = from_offset(start),
@@ -281,17 +283,16 @@ defmodule Malachi.Test.StreamStub do
           :positioned
         )
 
-      page = %{next: {0, length(values)}, skip: 0, backlog: 0, expired: 0, expired_exact: true, batch: batch}
+      page = page({topic, range}, length(values), batch)
       :gen_tcp.send(sock, ok_body(corr, IO.iodata_to_binary(Wire.encode_push(:records, Map.put(page, :stream_id, id)))))
     end
   end
 
   # A fetch_range: an empty page, ending where it asked from.
   defp answer(stub, sock, 31, corr, payload, _reply) do
-    %{start: start} = Wire.decode_fetch_range_req(payload)
+    %{start: start, topic: topic, range: range} = Wire.decode_fetch_range_req(payload)
     Agent.update(stub.state, &%{&1 | fetched: &1.fetched + 1})
-    batch = Batch.encode([], :none, :positioned)
-    page = %{next: {0, from_offset(start)}, skip: 0, backlog: 0, expired: 0, expired_exact: true, batch: batch}
+    page = page({topic, range}, from_offset(start), Batch.encode([], :none, :positioned))
     :gen_tcp.send(sock, ok_body(corr, IO.iodata_to_binary(Wire.encode_page(page))))
   end
 
@@ -336,8 +337,27 @@ defmodule Malachi.Test.StreamStub do
     Agent.update(stub.state, &%{&1 | consumes: [{corr, start} | &1.consumes]})
   end
 
-  defp from_offset({:position, {0, offset}}), do: offset
+  # A position in the stub is an offset of source 0, its token minted as a broker mints one, with the range
+  # read as its issuer (`Malachi.Position`).
+  defp from_offset({:position, token}) do
+    {:ok, %{at: {0, offset}}} = Position.decode(token)
+    offset
+  end
+
   defp from_offset(_earliest_or_latest), do: 0
+
+  # A page ending at `offset` of source 0 of `range_id`.
+  defp page(range_id, offset, batch) do
+    %{
+      next: Position.encode(range_id, {0, offset}),
+      ack: {0, offset},
+      skip: 0,
+      backlog: 0,
+      expired: 0,
+      expired_exact: true,
+      batch: batch
+    }
+  end
 
   defp ok_body(corr, payload), do: <<corr::32, Wire.ok_code()::16, payload::binary>>
 

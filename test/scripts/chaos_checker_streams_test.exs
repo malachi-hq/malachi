@@ -82,7 +82,12 @@ defmodule ChaosCheckerStreamsTest do
     assert scan.status == :settled
     # the producer moved to the children: a child was read past records of its own (an offset above zero
     # in a source past its parent's history), which only an append after the split can have put there
-    assert Enum.any?(scan.pages, &(&1.range != 0 and match?({source, offset} when source >= 1 and offset > 0, &1.to)))
+    assert Enum.any?(
+             scan.pages,
+             &(&1.range != 0 and
+                 match?({:ok, %{at: {source, offset}}} when source >= 1 and offset > 0, Malachi.Position.decode(&1.to)))
+           )
+
     assert MapSet.subset?(MapSet.new(acked), read)
   end
 

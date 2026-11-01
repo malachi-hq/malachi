@@ -422,7 +422,7 @@ defmodule Malachi.Loadtest.Consumer do
       {:ok, %{lane: key, corr: corr}} ->
         {%{count: count}, _rest} = Batch.split(page.batch)
         %{conn: conn} = Map.fetch!(c.conns, address)
-        ack = Wire.encode_consume_ack_req(%{stream_id: id, position: page.next, window: 0})
+        ack = Wire.encode_consume_ack_req(%{stream_id: id, position: page.ack, window: 0})
         _ = Conn.send_frame(conn, Wire.consume_ack_key(), corr, ack)
         lane = %{Map.fetch!(c.lanes, key) | start: {:position, page.next}}
         {put_lane(c, key, lane), events ++ [{:records, key, max(0, count - page.skip)}]}

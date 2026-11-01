@@ -213,7 +213,7 @@ defmodule Malachi.RoutingKeysTest do
           group: "g",
           member: "m",
           generation: 0,
-          positions: [%{range: 0, position: {0, 1}}]
+          positions: [%{range: 0, position: Malachi.Position.encode({topic, 0}, {0, 1})}]
         })
 
       for {key, payload} <- [

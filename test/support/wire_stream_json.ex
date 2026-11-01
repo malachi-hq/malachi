@@ -8,9 +8,11 @@ defmodule Malachi.Test.WireStreamJson do
   `scripts/lib/wire_streams.selftest.js`. Bytes are frozen once shipped: never regenerate a fixture, add a
   case. `write!/3` exists to write a new fixture file, once.
 
-  In JSON, a position is `[source_index, offset]`, a record `{key, value, timestamp, headers}` with
-  `headers` as `[[name, value], ...]`, and a batch `{codec, layout, records}`, its entries
-  `{tombstone, record}`, or `{position, tombstone, record}` in a consume batch.
+  In JSON, a raw position (a `consume_ack`'s, a page's `ack`, a consume batch entry's) is
+  `[source_index, offset]`, and a position token (`Malachi.Position`) the lowercase hex of its bytes; a
+  record is `{key, value, timestamp, headers}` with `headers` as `[[name, value], ...]`, and a batch
+  `{codec, layout, records}`, its entries `{tombstone, record}`, or `{position, tombstone, record}` in a
+  consume batch.
   """
 
   alias Malachi.Log.Record
@@ -33,7 +35,7 @@ defmodule Malachi.Test.WireStreamJson do
   def encode("open_consume_req", v), do: Wire.encode_open_consume_req(consume_req(v))
 
   def encode("open_consume_resp", v),
-    do: Wire.encode_open_consume_resp(%{stream_id: v["stream_id"], position: pos(v["position"])})
+    do: Wire.encode_open_consume_resp(%{stream_id: v["stream_id"], position: token(v["position"])})
 
   def encode("consume_ack_req", v), do: Wire.encode_consume_ack_req(%{atomize(v) | position: pos(v["position"])})
   def encode("fetch_range_req", v), do: Wire.encode_fetch_range_req(consume_req(v))
@@ -65,14 +67,24 @@ defmodule Malachi.Test.WireStreamJson do
   end
 
   def decode("open_consume_req", b), do: b |> Wire.decode_open_consume_req() |> json()
-  def decode("open_consume_resp", b), do: b |> Wire.decode_open_consume_resp() |> json()
+
+  def decode("open_consume_resp", b) do
+    resp = Wire.decode_open_consume_resp(b)
+    %{"stream_id" => resp.stream_id, "position" => hex(resp.position)}
+  end
+
   def decode("consume_ack_req", b), do: b |> Wire.decode_consume_ack_req() |> json()
   def decode("fetch_range_req", b), do: b |> Wire.decode_fetch_range_req() |> json()
   def decode("page", b), do: b |> Wire.decode_page() |> page_json()
   def decode("join_group_req", b), do: b |> Wire.decode_join_group_req() |> json()
   def decode("group_heartbeat_req", b), do: b |> Wire.decode_group_heartbeat_req() |> json()
   def decode("assignment_resp", b), do: b |> Wire.decode_assignment_resp() |> json()
-  def decode("commit_offsets_req", b), do: b |> Wire.decode_commit_offsets_req() |> json()
+
+  def decode("commit_offsets_req", b) do
+    req = Wire.decode_commit_offsets_req(b)
+    positions = Enum.map(req.positions, &%{"range" => &1.range, "position" => hex(&1.position)})
+    %{req | positions: []} |> json() |> Map.put("positions", positions)
+  end
 
   @doc "A batch from its JSON value."
   @spec batch(map()) :: binary()
@@ -141,7 +153,7 @@ defmodule Malachi.Test.WireStreamJson do
 
   defp start("earliest"), do: :earliest
   defp start("latest"), do: :latest
-  defp start(%{"position" => position}), do: {:position, pos(position)}
+  defp start(%{"position" => position}), do: {:position, token(position)}
   defp start(%{"committed" => group}), do: {:committed, group}
 
   defp push("append_ack", v), do: %{atomize(v) | errors: Enum.map(v["errors"], &atomize/1)}
@@ -157,7 +169,8 @@ defmodule Malachi.Test.WireStreamJson do
 
   defp page(v) do
     %{
-      next: pos(v["next"]),
+      next: token(v["next"]),
+      ack: pos(v["ack"]),
       skip: v["skip"],
       backlog: v["backlog"],
       expired: v["expired"],
@@ -167,7 +180,7 @@ defmodule Malachi.Test.WireStreamJson do
   end
 
   defp commit(v) do
-    %{atomize(v) | positions: Enum.map(v["positions"], &%{range: &1["range"], position: pos(&1["position"])})}
+    %{atomize(v) | positions: Enum.map(v["positions"], &%{range: &1["range"], position: token(&1["position"])})}
   end
 
   defp entry(%{"tombstone" => t, "record" => r}, :plain), do: {record(r), t}
@@ -189,7 +202,8 @@ defmodule Malachi.Test.WireStreamJson do
 
   defp page_json(page) do
     %{
-      "next" => Tuple.to_list(page.next),
+      "next" => hex(page.next),
+      "ack" => Tuple.to_list(page.ack),
       "skip" => page.skip,
       "backlog" => page.backlog,
       "expired" => page.expired,
@@ -200,13 +214,16 @@ defmodule Malachi.Test.WireStreamJson do
 
   defp pos([source, offset]), do: {source, offset}
 
+  defp token(hex) when is_binary(hex), do: Base.decode16!(hex, case: :lower)
+  defp hex(token), do: Base.encode16(token, case: :lower)
+
   defp atomize(map), do: Map.new(map, fn {key, value} -> {String.to_existing_atom(key), value} end)
 
   # A decoded term as it is written in JSON: atoms other than booleans and nil as strings, tuples as lists
-  # (positions), {:position, p} and {:committed, g} starts as objects.
+  # (raw positions), {:position, token} and {:committed, g} starts as objects, a token as its hex.
   defp json(%{} = map), do: Map.new(map, fn {key, value} -> {to_string(key), json(value)} end)
   defp json(list) when is_list(list), do: Enum.map(list, &json/1)
-  defp json({:position, position}), do: %{"position" => json(position)}
+  defp json({:position, token}), do: %{"position" => hex(token)}
   defp json({:committed, group}), do: %{"committed" => group}
   defp json(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> json()
   defp json(value) when is_boolean(value) or is_nil(value), do: value

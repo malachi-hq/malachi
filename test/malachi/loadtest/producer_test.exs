@@ -81,7 +81,8 @@ defmodule Malachi.Loadtest.ProducerTest do
   defp records_page(stream_id),
     do: %{
       stream_id: stream_id,
-      next: {0, 0},
+      next: Malachi.Position.encode({"t", 0}, {0, 0}),
+      ack: {0, 0},
       skip: 0,
       backlog: 0,
       expired: 0,

@@ -29,6 +29,7 @@ defmodule Malachi.TCPProtocol do
   alias Malachi.Metadata
   alias Malachi.Metrics
   alias Malachi.Policies
+  alias Malachi.Position
   alias Malachi.ProducerStreams
   alias Malachi.RateLimiter
   alias Malachi.Routing
@@ -163,7 +164,7 @@ defmodule Malachi.TCPProtocol do
 
   def stream_opened(socket, transport, streams, :consumer, corr, opened) do
     {streams, stream_id} = ConnectionStreams.open_consumer(streams, Map.put(opened, :corr, corr))
-    resp = %{stream_id: stream_id, position: opened.position}
+    resp = %{stream_id: stream_id, position: Position.encode(opened.range_id, opened.position)}
     transport.send(socket, Wire.encode_ok(corr, Wire.encode_open_consume_resp(resp)))
     streams
   end
@@ -371,11 +372,12 @@ defmodule Malachi.TCPProtocol do
     req = Wire.decode_open_consume_req(payload)
 
     with :ok <- read_allowed(session, req),
+         {:ok, start} <- read_start(req),
          {:ok, %{version: version}} <- Routing.read_topic_routes(req.topic),
          :ok <- current_routes(version, req.routes_version),
          :ok <- rate_limit_check(:subscribe, session),
          {:ok, token, position, broker_pid} <-
-           BrokerServer.open_consume(broker_for(req.topic), {req.topic, req.range}, req.start, self()) do
+           BrokerServer.open_consume(broker_for(req.topic), {req.topic, req.range}, start, self()) do
       {:opened, :consumer, correlation_id,
        %{
          broker: broker_for(req.topic),
@@ -414,6 +416,7 @@ defmodule Malachi.TCPProtocol do
     req = Wire.decode_fetch_range_req(payload)
 
     with :ok <- read_allowed(session, req),
+         {:ok, start} <- read_start(req),
          {:ok, %{version: version}} <- Routing.read_topic_routes(req.topic),
          :ok <- current_routes(version, req.routes_version),
          :ok <- rate_limit_check(:subscribe, session) do
@@ -421,7 +424,7 @@ defmodule Malachi.TCPProtocol do
        %{
          broker: broker_for(req.topic),
          range_id: {req.topic, req.range},
-         start: req.start,
+         start: start,
          wait_ms: fetch_wait(req.wait_ms),
          max: fetch_max(req.max),
          max_bytes: page_bytes(req.max_bytes)
@@ -435,7 +438,10 @@ defmodule Malachi.TCPProtocol do
     with {:ok, position, view, reporter} <- reply,
          {:ok, page, _count} <-
            ConsumeStreams.read_page(view, fetch.range_id, position, fetch.max, fetch.max_bytes, reporter) do
-      Wire.encode_ok(correlation_id, IO.iodata_to_binary(Wire.encode_page(page)))
+      Wire.encode_ok(
+        correlation_id,
+        IO.iodata_to_binary(Wire.encode_page(ConsumeStreams.wire_page(page, fetch.range_id)))
+      )
     else
       {:moved, _reason, _targets} -> Wire.encode_error(correlation_id, :moved)
       {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
@@ -539,9 +545,8 @@ defmodule Malachi.TCPProtocol do
   # overwrite a later owner's. A control plane that does not answer in time is `timeout`, which the member
   # may retry, as the commit may or may not have been applied.
   defp commit_offsets(correlation_id, req, session) do
-    offsets = Map.new(req.positions, fn %{range: range, position: position} -> {{req.topic, range}, position} end)
-
     with :ok <- group_allowed(session, req.topic),
+         {:ok, positions} <- issued_positions(req),
          :ok <-
            ask_coordinator(fn ->
              GroupCoordinator.validate_commit(
@@ -550,10 +555,10 @@ defmodule Malachi.TCPProtocol do
                req.topic,
                req.member,
                req.generation,
-               Map.keys(offsets)
+               Map.keys(positions)
              )
            end),
-         :ok <- commit_fenced(req, offsets) do
+         :ok <- commit_fenced(req, positions) do
       Wire.encode_ok(correlation_id, <<>>)
     else
       # the control plane found the coordinator that handed this generation out superseded by another
@@ -568,9 +573,22 @@ defmodule Malachi.TCPProtocol do
     end
   end
 
-  defp commit_fenced(req, offsets) do
+  # The positions of a commit, by range, each the range whose read issued it and the position in that
+  # range's history; one token that does not decode, or that another topic's read minted, refuses the
+  # commit as `invalid_position`. Whether each names a place in its range's history the broker checks
+  # (`Malachi.BrokerServer.commit_positions/5`).
+  defp issued_positions(req) do
+    Enum.reduce_while(req.positions, {:ok, %{}}, fn %{range: range, position: token}, {:ok, positions} ->
+      case Position.resolve(token, req.topic) do
+        {:ok, issuer, at} -> {:cont, {:ok, Map.put(positions, {req.topic, range}, {issuer, at})}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp commit_fenced(req, positions) do
     Malachi.Application.group_command_reply(
-      BrokerServer.commit_offset(broker_for(req.topic), req.group, req.topic, offsets, req.generation)
+      BrokerServer.commit_positions(broker_for(req.topic), req.group, req.topic, positions, req.generation)
     )
   catch
     :exit, _reason -> {:error, :timeout}
@@ -599,6 +617,16 @@ defmodule Malachi.TCPProtocol do
       true -> :ok
     end
   end
+
+  # Where a read starts, as the broker takes it: a position token becomes the range that issued it and the
+  # position in that range's history (`Malachi.Position.resolve/2`), which the broker checks against the
+  # range read (`Malachi.Broker.consume_start/3`); a token that does not decode, or that another topic's
+  # read minted, is `invalid_position` here. Checked before the subscribe token is spent, as `read_allowed/2`.
+  defp read_start(%{start: {:position, token}, topic: topic}) do
+    with {:ok, issuer, at} <- Position.resolve(token, topic), do: {:ok, {:position, issuer, at}}
+  end
+
+  defp read_start(%{start: start}), do: {:ok, start}
 
   # Whether a consume stream on `topic` may still push: the consume permission.
   defp consume_allowed(session, topic) do

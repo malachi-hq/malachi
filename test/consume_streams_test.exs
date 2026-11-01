@@ -53,16 +53,20 @@ defmodule Malachi.ConsumeStreamsTest do
   describe "pushes" do
     test "a compressed batch reads back as the same records, each with its position, and the page's end", ctx do
       produce(ctx.producer, ctx.topic, ["a", "b", "c"])
-      {:ok, %{stream_id: id, position: {0, 0}}} = open_consume(ctx.consumer, ctx.topic)
+      {:ok, %{stream_id: id, position: position}} = open_consume(ctx.consumer, ctx.topic)
+      assert position_at(position, ctx.topic, 0) == {0, 0}
 
       page = records_push(ctx.consumer)
       assert page.stream_id == id
       assert page_records(page) == [{{0, 0}, "a"}, {{0, 1}, "b"}, {{0, 2}, "c"}]
-      assert %{next: {0, 3}, skip: 0, backlog: 0, expired: 0, expired_exact: true} = page
+      # the page's end, raw to ack with and as the token to resume from
+      assert %{ack: {0, 3}, skip: 0, backlog: 0, expired: 0, expired_exact: true} = page
+      assert page.next == token(ctx.topic, 0, {0, 3})
     end
 
     test "records produced after the stream caught up are pushed as they land", ctx do
-      {:ok, %{position: {0, 0}}} = open_consume(ctx.consumer, ctx.topic)
+      {:ok, %{position: position}} = open_consume(ctx.consumer, ctx.topic)
+      assert position_at(position, ctx.topic, 0) == {0, 0}
       assert {:error, :timeout} = TCPHelper.recv_frame(ctx.consumer, timeout: 200)
 
       produce(ctx.producer, ctx.topic, ["late"])
@@ -79,8 +83,8 @@ defmodule Malachi.ConsumeStreamsTest do
       assert [{{0, 1}, "v2"}] = page_records(second)
       assert {:error, :timeout} = TCPHelper.recv_frame(ctx.consumer, timeout: 300)
 
-      # an ack at the first page's end frees one record of credit, and widens the window to 3
-      consume_ack(ctx.consumer, id, first.next, 3)
+      # an ack at the first page's end, raw, frees one record of credit, and widens the window to 3
+      consume_ack(ctx.consumer, id, first.ack, 3)
       assert [{{0, 2}, "v3"}] = page_records(records_push(ctx.consumer))
       assert [{{0, 3}, "v4"}] = page_records(records_push(ctx.consumer))
       assert {:error, :timeout} = TCPHelper.recv_frame(ctx.consumer, timeout: 300)
@@ -103,7 +107,7 @@ defmodule Malachi.ConsumeStreamsTest do
       {:ok, _resp} = open_consume(ctx.consumer, ctx.topic, max_bytes: 10)
 
       assert [{{0, 0}, _large}] = page_records(first = records_push(ctx.consumer))
-      assert first.next == {0, 1}
+      assert first.ack == {0, 1}
       assert first.backlog == 2
     end
   end
@@ -144,28 +148,99 @@ defmodule Malachi.ConsumeStreamsTest do
     end
 
     test "latest starts past the records the range holds", ctx do
-      {:ok, %{position: {0, 3}}} = open_consume(ctx.consumer, ctx.topic, start: :latest)
+      {:ok, %{position: position}} = open_consume(ctx.consumer, ctx.topic, start: :latest)
+      assert position_at(position, ctx.topic, 0) == {0, 3}
       assert {:error, :timeout} = TCPHelper.recv_frame(ctx.consumer, timeout: 200)
     end
 
     test "a position starts there", ctx do
-      {:ok, %{position: {0, 1}}} = open_consume(ctx.consumer, ctx.topic, start: {:position, {0, 1}})
+      start = token(ctx.topic, 0, {0, 1})
+      {:ok, %{position: ^start}} = open_consume(ctx.consumer, ctx.topic, start: {:position, start})
       assert [{{0, 1}, "r1"}, {{0, 2}, "r2"}] = page_records(records_push(ctx.consumer))
     end
 
     test "a position past the range's sources is refused", ctx do
-      assert open_consume(ctx.consumer, ctx.topic, start: {:position, {5, 0}}) == {:error, "invalid_position"}
+      assert open_consume(ctx.consumer, ctx.topic, start: {:position, token(ctx.topic, 0, {5, 0})}) ==
+               {:error, "invalid_position"}
+    end
+
+    test "a token another topic's read minted, or one the server never mints, is invalid_position", ctx do
+      for start <- [
+            token("cstream_elsewhere", 0, {0, 1}),
+            <<>>,
+            binary_part(token(ctx.topic, 0, {0, 1}), 0, 18),
+            token(ctx.topic, 0, {0, 1}) <> <<0>>,
+            :binary.copy(<<1>>, 64)
+          ] do
+        assert open_consume(ctx.consumer, ctx.topic, start: {:position, start}) == {:error, "invalid_position"}
+        assert fetch_range(ctx.consumer, ctx.topic, start: {:position, start}) == {:error, "invalid_position"}
+      end
+
+      # and the connection lives on
+      assert {:ok, %{ack: {0, 3}}} = fetch_range(ctx.consumer, ctx.topic)
+    end
+
+    test "after a split a child takes its parent's token, never its sibling's", ctx do
+      {:ok, {_, left}, {_, right}} = BrokerServer.split_range(DataPlaneRouter.shard_for(ctx.topic), {ctx.topic, 0})
+
+      parents = token(ctx.topic, 0, {0, 1})
+
+      assert {:ok, %{position: position}} =
+               open_consume(ctx.consumer, ctx.topic, range: right, start: {:position, parents})
+
+      assert position_at(position, ctx.topic, right) == {0, 1}
+
+      # a connection of its own for the reads after: the stream above pushes on this one
+      reader = connect()
+
+      assert {:ok, %{ack: {_source, _offset}}} =
+               fetch_range(reader, ctx.topic, range: right, start: {:position, parents})
+
+      siblings = token(ctx.topic, left, {0, 1})
+
+      assert open_consume(reader, ctx.topic, range: right, start: {:position, siblings}) ==
+               {:error, "invalid_position"}
+
+      assert fetch_range(reader, ctx.topic, range: right, start: {:position, siblings}) ==
+               {:error, "invalid_position"}
+    end
+
+    test "a start token longer than a frame carries is malformed_request", ctx do
+      req = %{
+        topic: ctx.topic,
+        range: 0,
+        routes_version: routes(ctx.consumer, ctx.topic).version,
+        start: {:position, :binary.copy(<<1>>, 64)},
+        window: 1,
+        max: 1,
+        max_bytes: 1_024,
+        accept: [:none]
+      }
+
+      # the 64-byte token's length byte made 65, and one more byte for it to hold
+      head = 1 + 4 + byte_size(ctx.topic) + 4 + 8
+      <<before::binary-size(head), 2, 64, token::binary-size(64), tail::binary>> = Wire.encode_open_consume_req(req)
+      payload = <<before::binary, 2, 65, token::binary, 1, tail::binary>>
+
+      assert_raise FunctionClauseError, fn ->
+        Wire.encode_open_consume_req(%{req | start: {:position, :binary.copy(<<1>>, 65)}})
+      end
+
+      assert {code, reason} = TCPHelper.request(ctx.consumer, Wire.open_consume_key(), 20, payload)
+      assert {code, Wire.decode_error_reason(reason)} == {Wire.error_code(), "malformed_request"}
     end
 
     test "a group's checkpoint starts where it committed, and a group with none at the start", ctx do
       broker = DataPlaneRouter.shard_for(ctx.topic)
       :ok = BrokerServer.commit_offset(broker, "g1", ctx.topic, %{{ctx.topic, 0} => {0, 2}}, 1)
 
-      {:ok, %{position: {0, 2}}} = open_consume(ctx.consumer, ctx.topic, start: {:committed, "g1"})
+      {:ok, %{position: position}} = open_consume(ctx.consumer, ctx.topic, start: {:committed, "g1"})
+      assert position == token(ctx.topic, 0, {0, 2})
       assert [{{0, 2}, "r2"}] = page_records(records_push(ctx.consumer))
 
       other = connect()
-      {:ok, %{position: {0, 0}}} = open_consume(other, ctx.topic, start: {:committed, "never"})
+      {:ok, %{position: position}} = open_consume(other, ctx.topic, start: {:committed, "never"})
+      assert position == token(ctx.topic, 0, {0, 0})
     end
 
     test "after a split a group's children start from the start of their history, so between them they read every record once",
@@ -182,7 +257,7 @@ defmodule Malachi.ConsumeStreamsTest do
         for child <- [left, right] do
           socket = connect()
           {:ok, %{position: start}} = open_consume(socket, ctx.topic, range: child, start: {:committed, "gs"})
-          assert start == {0, 0}
+          assert position_at(start, ctx.topic, child) == {0, 0}
           socket |> records_push() |> page_records() |> Enum.map(&elem(&1, 1))
         end
 
@@ -218,7 +293,8 @@ defmodule Malachi.ConsumeStreamsTest do
 
       {:ok, page} = fetch_range(ctx.consumer, ctx.topic, max: 2)
       assert page_records(page) == [{{0, 0}, "f0"}, {{0, 1}, "f1"}]
-      assert page.next == {0, 2} and page.backlog == 1
+      assert page.ack == {0, 2} and page.backlog == 1
+      assert page.next == token(ctx.topic, 0, {0, 2})
     end
 
     test "waits for records past its start, and answers as soon as they land", ctx do
@@ -232,7 +308,7 @@ defmodule Malachi.ConsumeStreamsTest do
 
     test "after its wait without records, answers an empty page at its start", ctx do
       {:ok, page} = fetch_range(ctx.consumer, ctx.topic, start: :latest, wait_ms: 200)
-      assert page_records(page) == [] and page.next == {0, 0}
+      assert page_records(page) == [] and page.ack == {0, 0}
     end
   end
 
@@ -338,9 +414,11 @@ defmodule Malachi.ConsumeStreamsTest do
       assert Enum.map(targets, & &1.range) == [elem(left, 1), elem(right, 1)]
 
       # the parent's position names the same record in a child, so a child read from it repeats nothing and
-      # goes on with the child's own records
-      {:ok, %{position: {0, 1}}} =
+      # goes on with the child's own records; the child answers with a token of its own
+      {:ok, %{position: position}} =
         open_consume(ctx.consumer, ctx.topic, range: elem(left, 1), start: {:position, page.next})
+
+      assert position == token(ctx.topic, elem(left, 1), {0, 1})
 
       # a connection of its own: the first producer's stream was moved by the split too
       writer = connect()

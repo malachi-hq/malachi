@@ -11,7 +11,13 @@
  *
  * A string is length-prefixed with a presence flag (0 => null, 1 => <len:u32><bytes>). Records travel in
  * batches (`encodeBatch`), on producer and consume streams and in `fetch_range` pages, where a record read
- * carries its position in its range.
+ * carries its raw position in its range.
+ *
+ * A position travels in two forms (see lib/malachi/wire.ex). Raw, [sourceIndex, offset]: what a
+ * consume_ack carries and what a consume batch puts beside each record, transport a reader keeps to itself.
+ * As a token, opaque: what an application holds, resumes from and commits, never computes. Here a token is
+ * the lowercase hex of its bytes (at most 64 bytes), handed back to the server as it came; the server mints
+ * every token, this module never builds one.
  */
 
 const API = {
@@ -448,7 +454,8 @@ function putList(items, put) {
   return Buffer.concat([u16(items.length), ...items.map(put)]);
 }
 
-// A position is [sourceIndex, offset]: the source in a range's history (an ancestor, or the range itself).
+// A raw position is [sourceIndex, offset]: the source in a range's history (an ancestor, or the range
+// itself) and an offset in it.
 function putPosition([source, offset]) {
   return Buffer.concat([u16(source), u64(offset)]);
 }
@@ -457,11 +464,30 @@ function readPosition(r) {
   return [r.u16(), r.num64()];
 }
 
-// Where a consume starts: 'earliest', 'latest', { position: [source, offset] } or { committed: group }.
+// The longest token a frame carries, in bytes.
+const MAX_TOKEN_BYTES = 64;
+
+// A position token: <len:u8> <token>, the token given as the lowercase hex of its bytes.
+function putToken(token) {
+  if (typeof token !== 'string' || !/^([0-9a-f]{2})*$/.test(token) || token.length > 2 * MAX_TOKEN_BYTES) {
+    throw new Error(`a position token is the hex of at most ${MAX_TOKEN_BYTES} bytes, not ${JSON.stringify(token)}`);
+  }
+  const bytes = Buffer.from(token, 'hex');
+  return Buffer.concat([u8(bytes.length), bytes]);
+}
+
+function readToken(r) {
+  const len = r.u8();
+  if (len > MAX_TOKEN_BYTES) throw new Error(`a position token of ${len} bytes, past ${MAX_TOKEN_BYTES}`);
+  if (r.pos + len > r.buf.length) throw new Error('a position token cut short');
+  return r.bytes(len).toString('hex');
+}
+
+// Where a consume starts: 'earliest', 'latest', { position: token } or { committed: group }.
 function putStart(start) {
   if (start === 'earliest') return u8(0);
   if (start === 'latest') return u8(1);
-  if (start && typeof start === 'object' && start.position) return Buffer.concat([u8(2), putPosition(start.position)]);
+  if (start && typeof start === 'object' && 'position' in start) return Buffer.concat([u8(2), putToken(start.position)]);
   if (start && typeof start === 'object' && 'committed' in start) return Buffer.concat([u8(3), putStr(start.committed)]);
   throw new Error(`unknown start ${JSON.stringify(start)}`);
 }
@@ -572,11 +598,12 @@ function encodeOpenConsumeReq(req) {
 
 function decodeOpenConsumeResp(payload) {
   const r = new Reader(payload);
-  const resp = { stream_id: r.u32(), position: readPosition(r) };
+  const resp = { stream_id: r.u32(), position: readToken(r) };
   expectEnd(r);
   return resp;
 }
 
+// A read ack names the raw position read up to (a page's `ack`), as NorthGuard's read ack carries an offset.
 function encodeConsumeAckReq(req) {
   return Buffer.concat([u32(req.stream_id), putPosition(req.position), u32(req.window)]);
 }
@@ -594,10 +621,13 @@ function encodeFetchRangeReq(req) {
   ]);
 }
 
-// A page (fetch_range's answer, and the body of a records push): the batch stays encoded, for decodeBatch.
+// A page (fetch_range's answer, and the body of a records push): where the next page starts, as the token to
+// resume from and commit (`next`) and as the raw position to ack with (`ack`); the batch stays encoded, for
+// decodeBatch.
 function readPage(r) {
   const page = {
-    next: readPosition(r),
+    next: readToken(r),
+    ack: readPosition(r),
     skip: r.u32(),
     backlog: r.num64(),
     expired: r.num64(),
@@ -659,7 +689,7 @@ function decodeAssignmentResp(payload) {
 }
 
 function encodeCommitOffsetsReq(req) {
-  const positions = putList(req.positions, (p) => Buffer.concat([u32(p.range), putPosition(p.position)]));
+  const positions = putList(req.positions, (p) => Buffer.concat([u32(p.range), putToken(p.position)]));
   return Buffer.concat([encodeJoinGroupReq(req), u64(req.generation), positions]);
 }
 

@@ -45,6 +45,7 @@ defmodule Malachi.ConsumeStreams do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Position
   alias Malachi.Retention.SkipReporter
   alias Malachi.StreamMoves
   alias Malachi.Telemetry
@@ -359,9 +360,19 @@ defmodule Malachi.ConsumeStreams do
     {drop(state, stream), [Wire.encode_error(stream.corr, reason)]}
   end
 
-  defp records_frame(stream, page),
-    do:
-      Wire.encode_ok(stream.corr, IO.iodata_to_binary(Wire.encode_push(:records, Map.put(page, :stream_id, stream.id))))
+  defp records_frame(stream, page) do
+    push = page |> wire_page(stream.range_id) |> Map.put(:stream_id, stream.id)
+    Wire.encode_ok(stream.corr, IO.iodata_to_binary(Wire.encode_push(:records, push)))
+  end
+
+  @doc """
+  A page `read_page/6` read of `range_id`, as the wire carries it (`Malachi.Wire.encode_page/1`): its raw
+  `next` becomes the page's `ack`, and its `next` the token of that position minted with `range_id` as the
+  issuer (`Malachi.Position`).
+  """
+  @spec wire_page(map(), Metadata.range_id()) :: map()
+  def wire_page(%{next: next} = page, range_id),
+    do: %{page | next: Position.encode(range_id, next)} |> Map.put(:ack, next)
 
   # The position right after a page's last record, nil for a page without one.
   defp records_end([]), do: nil

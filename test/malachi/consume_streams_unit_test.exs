@@ -10,6 +10,7 @@ defmodule Malachi.ConsumeStreamsUnitTest do
   alias Malachi.BrokerServer
   alias Malachi.ConsumeStreams
   alias Malachi.Log.Record
+  alias Malachi.Position
   alias Malachi.Wire
   alias Malachi.Wire.Batch
 
@@ -84,7 +85,12 @@ defmodule Malachi.ConsumeStreamsUnitTest do
     {streams, []} = ConsumeStreams.ack(streams, 1, {0, 1}, 0)
     assert streams.streams[1].in_flight == 2
 
-    {streams, frames} = ConsumeStreams.ack(streams, 1, page.next, 0)
+    # a page carries where the next starts as the raw position a consumer acks with, and as the token a
+    # client resumes from, minted with the range read as its issuer
+    assert page.ack == {0, 2}
+    assert page.next == Position.encode(ctx.root, {0, 2})
+
+    {streams, frames} = ConsumeStreams.ack(streams, 1, page.ack, 0)
     assert [{:records, next}] = Enum.map(frames, &push/1)
     assert values(next) == [{{0, 2}, "c"}, {{0, 3}, "d"}]
     assert streams.streams[1].in_flight == 2
@@ -200,7 +206,8 @@ defmodule Malachi.ConsumeStreamsUnitTest do
 
     {streams, [{:records, page}]} = step(ConsumeStreams.open(ConsumeStreams.new(), opened))
     assert values(page) == [{{0, 0}, "left"}]
-    assert page.next > {0, 1}
+    assert page.ack > {0, 1}
+    assert page.next == Position.encode(left, page.ack)
     assert streams.streams[1].in_flight == 1
 
     {streams, _frames} = ConsumeStreams.ack(streams, 1, {0, 1}, 0)
@@ -215,7 +222,7 @@ defmodule Malachi.ConsumeStreamsUnitTest do
     {streams, _token} = open(ctx, max_bytes: 1)
     {streams, [{:records, first}]} = step(streams)
     assert values(first) == [{{0, 0}, "v1"}]
-    assert first.expired == 0 and first.next == {0, 1}
+    assert first.expired == 0 and first.ack == {0, 1}
 
     assert_received {:consume_continue, 1}
     {_streams, frames} = ConsumeStreams.handle_message(streams, {:consume_continue, 1})
@@ -234,7 +241,7 @@ defmodule Malachi.ConsumeStreamsUnitTest do
     {streams, _token} = open(ctx)
     {_streams, [{:records, page}]} = step(streams)
     assert values(page) == []
-    assert page.expired == 1 and page.next == {0, 1}
+    assert page.expired == 1 and page.ack == {0, 1}
   end
 
   test "a stream whose access was revoked is answered with the refusal and closed", ctx do

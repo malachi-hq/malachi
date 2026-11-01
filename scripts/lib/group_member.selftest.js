@@ -14,6 +14,9 @@ const { Links } = require('./links');
 const { GroupMember } = require('./group_member');
 const { FakeBroker } = require('./testing/fake_broker');
 
+// The token the broker hands out for `position` read in `range` of topic t: what a member commits.
+const token = (range, position) => FakeBroker.mint('t', range, position);
+
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 const conn = { user: 'u', pass: 'p', timeout: 500 };
 
@@ -260,7 +263,7 @@ check('a member leaves over a new connection when the one it had was dropped', (
     broker.group = { generation: 1, session_ms: 3000, ranges: [0] };
     await member.join();
     broker.groupPolicy = ({ call }) => (call === 'commit' ? 'drop' : 'ok');
-    assert.strictEqual(await member.commit([{ range: 0, position: [0, 1] }]), false);
+    assert.strictEqual(await member.commit([{ range: 0, position: token(0, [0, 1]) }]), false);
     broker.groupPolicy = () => 'ok';
     await member.leave();
     assert.strictEqual(calls(broker, 'leave').length, 1);
@@ -356,20 +359,20 @@ check('a commit carries the ranges still held, at the generation, and says wheth
     broker.group = { generation: 4, session_ms: 3000, ranges: [0, 1] };
     await member.join();
     assert.strictEqual(await member.commit([]), true);
-    assert.strictEqual(await member.commit([{ range: 0, position: [0, 3] }]), true);
+    assert.strictEqual(await member.commit([{ range: 0, position: token(0, [0, 3]) }]), true);
     assert.deepStrictEqual(calls(broker, 'commit').at(-1), {
       call: 'commit',
       topic: 't',
       group: 'g',
       member: 'm',
       generation: 4,
-      positions: [{ range: 0, position: [0, 3] }],
+      positions: [{ range: 0, position: token(0, [0, 3]) }],
     });
     // a range handed on is not committed: the member holding it next does that
-    assert.strictEqual(await member.commit([{ range: 1, position: [0, 1] }, { range: 5, position: [0, 9] }]), false);
-    assert.deepStrictEqual(calls(broker, 'commit').at(-1).positions, [{ range: 1, position: [0, 1] }]);
+    assert.strictEqual(await member.commit([{ range: 1, position: token(1, [0, 1]) }, { range: 5, position: token(5, [0, 9]) }]), false);
+    assert.deepStrictEqual(calls(broker, 'commit').at(-1).positions, [{ range: 1, position: token(1, [0, 1]) }]);
     const before = calls(broker, 'commit').length;
-    assert.strictEqual(await member.commit([{ range: 5, position: [0, 9] }]), false);
+    assert.strictEqual(await member.commit([{ range: 5, position: token(5, [0, 9]) }]), false);
     assert.strictEqual(calls(broker, 'commit').length, before, 'nothing of its own to commit: nothing sent');
   }),
 );
@@ -378,7 +381,7 @@ check('a commit the group refuses for a rebalance, an eviction, a move or a time
   withMember(async ({ broker, member }) => {
     broker.group = { generation: 1, session_ms: 3000, ranges: [0] };
     await member.join();
-    const one = [{ range: 0, position: [0, 1] }];
+    const one = [{ range: 0, position: token(0, [0, 1]) }];
     for (const reason of ['stale_generation', 'not_assigned', 'unknown_member', 'not_owner', 'migrating', 'timeout']) {
       broker.groupPolicy = ({ call }) => (call === 'commit' ? { refuse: reason } : 'ok');
       assert.strictEqual(await member.commit(one), false, reason);
@@ -392,7 +395,7 @@ check('a commit whose connection drops is false, and the next one connects again
   withMember(async ({ broker, member }) => {
     broker.group = { generation: 1, session_ms: 3000, ranges: [0] };
     await member.join();
-    const one = [{ range: 0, position: [0, 1] }];
+    const one = [{ range: 0, position: token(0, [0, 1]) }];
     broker.groupPolicy = ({ call }) => (call === 'commit' ? 'drop' : 'ok');
     assert.strictEqual(await member.commit(one), false);
     broker.groupPolicy = () => 'ok';
@@ -406,7 +409,7 @@ check('a member that left asks nothing more and commits nothing', () =>
     await member.leave();
     assert.strictEqual(calls(broker, 'leave').length, 1);
     const asked = broker.groupCalls.length;
-    assert.strictEqual(await member.commit([{ range: 0, position: [0, 1] }]), false);
+    assert.strictEqual(await member.commit([{ range: 0, position: token(0, [0, 1]) }]), false);
     await tick(400);
     assert.strictEqual(broker.groupCalls.length, asked);
   }),

@@ -5,8 +5,11 @@ defmodule Malachi.Position do
   compare and resume from, never compute (meetup transcript, 862 to 872, 1018 to 1023, 1065 to 1075):
   there is no arithmetic on a position, so the server is free to change what one holds.
 
-  Inside the server a position stays the `{source_index, offset}` pair of the range's history
-  (`Malachi.Broker.consume_start/3`), and the control plane stores it so.
+  The broker mints a token for each position it hands out: the `next` of a page, the `position` an
+  `open_consume` answers (`Malachi.Wire`, keys 29 and 31), and it reads one back as the start of a read or
+  a group's checkpoint (`commit_offsets`, 34). Inside the server a position stays the
+  `{source_index, offset}` pair of the range's history (`Malachi.Broker.consume_start/3`), and the control
+  plane stores it so.
 
   Version 1 is 19 bytes, big-endian:
 

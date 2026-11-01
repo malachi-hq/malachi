@@ -21,6 +21,7 @@ defmodule Malachi.Loadtest.ConsumerTest do
   alias Malachi.Loadtest.Router
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Position
   alias Malachi.TCPAcceptorPool
   alias Malachi.Test.RouterTopology
   alias Malachi.Test.StreamStub
@@ -260,11 +261,12 @@ defmodule Malachi.Loadtest.ConsumerTest do
 
       {f, {:page, page}} = Fetcher.fetch_page(f, ctx.topic, now())
       assert Enum.sort(page.values) == Enum.sort(for i <- 1..5, do: "v#{i}")
-      assert %{range: 0, block: {0, 256}, size: 256, from: :earliest, to: {0, 5}} = page
+      at_end = Position.encode({ctx.topic, 0}, {0, 5})
+      assert %{range: 0, block: {0, 256}, size: 256, from: :earliest, to: ^at_end} = page
 
       # nothing new: the next page is asked from where the last one ended, and stays there
-      {f, {:page, %{values: [], from: {:position, {0, 5}}}}} = Fetcher.fetch_page(f, ctx.topic, now())
-      {_f, {:page, %{values: [], from: {:position, {0, 5}}}}} = Fetcher.fetch_page(f, ctx.topic, now())
+      {f, {:page, %{values: [], from: {:position, ^at_end}}}} = Fetcher.fetch_page(f, ctx.topic, now())
+      {_f, {:page, %{values: [], from: {:position, ^at_end}}}} = Fetcher.fetch_page(f, ctx.topic, now())
     end
 
     test "at_tail must be :restart or :wait", ctx do
@@ -321,7 +323,8 @@ defmodule Malachi.Loadtest.ConsumerTest do
       {f, right_pages} = fetch_pages_of(f, ctx.topic, right, 2)
       assert [%{values: [], from: :earliest, to: own}, %{from: second_from}] = right_pages
       assert second_from == {:position, own}
-      assert elem(own, 0) == 1, "the right child's own records come after its one ancestor"
+      # the right child's own records come after its one ancestor
+      assert {:ok, {_topic, ^right}, {1, _offset}} = Position.resolve(own, ctx.topic)
       Fetcher.close(f)
     end
 
@@ -574,7 +577,8 @@ defmodule Malachi.Loadtest.ConsumerTest do
 
       page = %{
         stream_id: 99,
-        next: {0, 1},
+        next: Position.encode({"t", 0}, {0, 1}),
+        ack: {0, 1},
         skip: 0,
         backlog: 0,
         expired: 0,
@@ -611,7 +615,8 @@ defmodule Malachi.Loadtest.ConsumerTest do
 
       # once the backoff is over, the range opens again past the three it read, and reads none of them again
       {c, events, :idle} = Consumer.await(c, 2_000, &(map_size(&1.streams) == 1))
-      assert [{^corr, :earliest}, {_reopen, {:position, {0, 3}}}] = StreamStub.consumes(stub)
+      read = Position.encode({"t", 0}, {0, 3})
+      assert [{^corr, :earliest}, {_reopen, {:position, ^read}}] = StreamStub.consumes(stub)
       {_c, more, _} = Consumer.await(c, 100, fn _ -> false end)
       assert records(events ++ more) == 0
     end

@@ -18,6 +18,8 @@ const { Consumer } = require('./consumer');
 const readLanes = require('./read_lanes');
 const { FakeBroker } = require('./testing/fake_broker');
 
+// The token the broker hands out for `position` read in `range` of topic t: what a reader must send back.
+const token = (range, position) => FakeBroker.mint('t', range, position);
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 const conn = { user: 'u', pass: 'p', timeout: 2000 };
 
@@ -121,14 +123,16 @@ check('a fetcher pages every range in turn, then starts each over (restart) or w
       assert.ok(answers.every((a) => Number.isInteger(a.latencyUs)));
       // after an empty page each range goes back to its start
       const starts = broker.fetches.map((x) => [x.range, x.start]);
-      assert.deepStrictEqual(starts.slice(2), [[1, { position: [0, 2] }], [2, { position: [0, 1] }]]);
+      assert.deepStrictEqual(starts.slice(2), [[1, { position: token(1, [0, 2]) }], [2, { position: token(2, [0, 1]) }]]);
+      // each range's read mints its own tokens: the issuer, bytes 5 to 8, is the range read
+      assert.deepStrictEqual(starts.slice(2).map(([, start]) => start.position.slice(10, 18)), ['00000001', '00000002']);
       await f.fetch('t');
       assert.deepStrictEqual(broker.fetches[4].start, 'earliest');
 
       const waiting = make((router) => new Fetcher(router, conn, { max: 10, atTail: 'wait' }));
       broker.fetches = [];
       for (let i = 0; i < 6; i++) await waiting.fetch('t');
-      assert.deepStrictEqual(broker.fetches[4].start, { position: [0, 2] }, 'waits where it reached');
+      assert.deepStrictEqual(broker.fetches[4].start, { position: token(1, [0, 2]) }, 'waits where it reached');
     },
     [
       [1, 0, 8, 'self'],
@@ -146,9 +150,9 @@ check('fetchPage gives the values with the range, its block, the active ranges a
     const { values, records: read, ...shape } = first.page;
     assert.deepStrictEqual(values.map(String), ['x']);
     assert.deepStrictEqual(read.map((r) => String(r.value)), ['x'], 'the records whole, for a reader that prints keys');
-    assert.deepStrictEqual(shape, { range: 0, active: [0], block: [0, 16], size: 16, from: 'earliest', to: [0, 1] });
+    assert.deepStrictEqual(shape, { range: 0, active: [0], block: [0, 16], size: 16, from: 'earliest', to: token(0, [0, 1]) });
     const second = await f.fetchPage('t');
-    assert.deepStrictEqual(second.page.from, { position: [0, 1] });
+    assert.deepStrictEqual(second.page.from, { position: token(0, [0, 1]) });
   }),
 );
 
@@ -314,7 +318,7 @@ check('a follower moves on to where an empty page says the next one starts', () 
     await f.fetch('t');
     broker.fetchPolicy = () => 'ok';
     await f.fetch('t');
-    assert.deepStrictEqual(broker.fetches[1].start, { position: [1, 0] });
+    assert.deepStrictEqual(broker.fetches[1].start, { position: token(0, [1, 0]) });
   }),
 );
 
@@ -402,8 +406,8 @@ check('a split moves the stream: the children open from where the parent was rea
     assert.deepStrictEqual(
       broker.consumes.slice(1).map((x) => [x.range, x.start]).sort(),
       [
-        [1, { position: [0, 2] }],
-        [2, { position: [0, 2] }],
+        [1, { position: token(0, [0, 2]) }],
+        [2, { position: token(0, [0, 2]) }],
       ],
     );
     assert.strictEqual(c.statsNow().moved, 1);
@@ -418,7 +422,7 @@ check('a dropped connection reads on from where it stopped', () =>
     await untilTrue(() => records(c.events) === 2);
     broker.dropConnections();
     await untilTrue(() => broker.consumes.length === 2, 3000);
-    assert.deepStrictEqual(broker.consumes[1].start, { position: [0, 2] });
+    assert.deepStrictEqual(broker.consumes[1].start, { position: token(0, [0, 2]) });
     assert.strictEqual(c.statsNow().dropped, 1);
   }),
 );

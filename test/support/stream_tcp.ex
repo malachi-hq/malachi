@@ -7,6 +7,7 @@ defmodule Malachi.Test.StreamTCP do
   import ExUnit.Assertions
 
   alias Malachi.Log.Record
+  alias Malachi.Position
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
   alias Malachi.Wire.Batch
@@ -80,6 +81,16 @@ defmodule Malachi.Test.StreamTCP do
       {30, 0, payload} -> {:ok, Wire.decode_page(payload)}
       {30, 1, payload} -> {:error, Wire.decode_error_reason(payload)}
     end
+  end
+
+  # A position token for `at` in the history of `range` of `topic`, minted as the broker mints one when a
+  # read of that range hands it out (`Malachi.Position`): what a test sends where a client sends a token.
+  def token(topic, range, at), do: Position.encode({topic, range}, at)
+
+  # The position a token the broker handed out names, asserting it was minted for `range` of `topic`.
+  def position_at(token, topic, range) do
+    assert {:ok, {^topic, ^range}, at} = Position.resolve(token, topic)
+    at
   end
 
   def consume_ack(socket, stream_id, position, window \\ 0) do

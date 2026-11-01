@@ -8,6 +8,7 @@ defmodule Malachi.Loadtest.ClientTest do
   alias Malachi.DataPlaneRouter
   alias Malachi.Loadtest.Client
   alias Malachi.Log.Record
+  alias Malachi.Position
   alias Malachi.TCPAcceptorPool
   alias Malachi.Test.RouterTopology
   alias Malachi.Test.StreamStub
@@ -134,7 +135,9 @@ defmodule Malachi.Loadtest.ClientTest do
 
   test "a commit the group refuses is the commit's error", %{client: client, topic: topic} do
     :ok = Client.create_topic(client, topic, 4)
-    assert {:error, "unknown_member"} = Client.commit(client, topic, "rg", "ghost", 0, %{0 => {0, 0}})
+
+    assert {:error, "unknown_member"} =
+             Client.commit(client, topic, "rg", "ghost", 0, %{0 => Position.encode({topic, 0}, {0, 0})})
   end
 
   test "a read the node refuses is the read's error", %{topic: topic, client: admin} do

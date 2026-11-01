@@ -413,7 +413,8 @@ defmodule Malachi.LoadtestTest do
 
             page = %{
               stream_id: StreamStub.opened(stub),
-              next: {0, 3},
+              next: Malachi.Position.encode({"t", 0}, {0, 3}),
+              ack: {0, 3},
               skip: 0,
               backlog: 0,
               expired: 0,

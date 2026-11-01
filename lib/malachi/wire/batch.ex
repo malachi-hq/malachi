@@ -13,6 +13,10 @@ defmodule Malachi.Wire.Batch do
       plain:       <<flags::8, record>>
       positioned:  <<source_index::16, offset::64, flags::8, record>>
 
+  A record's position is raw, `{source_index, offset}`, not the opaque token a page's `next` is
+  (`Malachi.Position`): it is transport, what a reader acks with and counts by, and a client must not hand
+  it to an application as a place to resume from.
+
   Flag bit 0 marks a tombstone (#206), the delete marker log compaction keeps, so a producer can append one
   and a consumer is told of one. The other bits are reserved: a batch that sets one is refused as
   malformed, so a flag added later fails loudly on a reader that does not know it.

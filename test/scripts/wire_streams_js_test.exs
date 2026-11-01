@@ -16,7 +16,7 @@ defmodule WireStreamsJsTest do
 
   test "the Node codecs and keyspace hash agree with every golden frame and vector", ctx do
     assert {output, 0} = System.cmd(ctx.node, [@selftest], stderr_to_stdout: true)
-    assert output =~ "passed 32 golden frames and 426 keyspace positions"
+    assert output =~ "passed 33 golden frames and 426 keyspace positions"
   end
 
   test "a zstd batch Node compressed reads back here record for record", ctx do

@@ -369,11 +369,11 @@ class Consumer {
     if (!this.streams.has(stream)) return;
     const lane = this.lanes.get(stream.key);
     if (kind === 'records') {
-      // counted, its end acked at once (the credit it took comes back, the window as it is), and the range's
-      // position moved past it
+      // counted, its end acked at once with the raw position (the credit it took comes back, the window as it
+      // is), and the range's position moved past it, as the token to resume from
       const count = Math.max(0, wire.batchHeader(push.batch).count - push.skip);
       try {
-        stream.client.sendOnStream(wire.API.consumeAck, stream.correlationId, wire.encodeConsumeAckReq({ stream_id: stream.id, position: push.next, window: 0 }));
+        stream.client.sendOnStream(wire.API.consumeAck, stream.correlationId, wire.encodeConsumeAckReq({ stream_id: stream.id, position: push.ack, window: 0 }));
       } catch (_gone) {
         // the connection is gone: its close reaches `_dropped`
       }

@@ -692,8 +692,10 @@ defmodule LoadtestJsTest do
       assert run["code"] == 0
       report = Jason.decode!(run["stdout"])
       assert %{"dropped" => 1, "errors" => 0, "records" => 50} = report
-      # opened from the start, then again from past the 50 records it read
-      assert run["consumes"] == ["earliest", %{"position" => [0, 50]}]
+      # opened from the start, then again from past the 50 records it read: the token the fake broker
+      # minted for range 0
+      assert ["earliest", %{"position" => token}] = run["consumes"]
+      assert {:ok, %{issuer: 0, at: {0, 50}}} = token |> Base.decode16!(case: :lower) |> Malachi.Position.decode()
     end
 
     test "a consume stream refused during the warmup is counted in the report all the same", ctx do

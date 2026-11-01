@@ -68,7 +68,7 @@ defmodule Malachi.GroupKeysTest do
       group: ctx.group,
       member: member,
       generation: generation,
-      positions: for({range, position} <- positions, do: %{range: range, position: position})
+      positions: for({range, at} <- positions, do: %{range: range, position: token(ctx.topic, range, at)})
     }
 
     ctx.socket
@@ -105,7 +105,7 @@ defmodule Malachi.GroupKeysTest do
 
   defp commit_calls(broker) do
     {:messages, messages} = Process.info(broker, :messages)
-    Enum.count(messages, &match?({:"$gen_call", _from, {:commit_offset, _, _, _, _}}, &1))
+    Enum.count(messages, &match?({:"$gen_call", _from, {:commit_positions, _, _, _, _}}, &1))
   end
 
   defp wait_until(check, tries \\ 100) do
@@ -118,7 +118,7 @@ defmodule Malachi.GroupKeysTest do
 
   defp committed_start(ctx, range) do
     {:ok, %{position: position}} = open_consume(connect(), ctx.topic, range: range, start: {:committed, ctx.group})
-    position
+    position_at(position, ctx.topic, range)
   end
 
   test "a lone member is handed every range, the session to heartbeat within and a generation of this coordinator's epoch",
@@ -158,6 +158,59 @@ defmodule Malachi.GroupKeysTest do
     assert commit(ctx, "m1", generation, [{left, {0, 2}}, {right, {0, 1}}]) == {:ok, :ok}
     assert committed_start(ctx, left) == {0, 2}
     assert committed_start(ctx, right) == {0, 1}
+  end
+
+  test "a checkpoint is a token: one minted for another range's history, another topic or no one is refused",
+       ctx do
+    {:ok, %{generation: generation}} = join(ctx, "m1")
+    [left, right] = ctx.ranges
+    assert commit(ctx, "m1", generation, [{left, {0, 2}}]) == {:ok, :ok}
+
+    refused = [
+      # the sibling's read handed it out: the right range's history is not the left one's
+      [%{range: right, position: token(ctx.topic, left, {0, 1})}],
+      # minted for a range of another topic
+      [%{range: left, position: token("elsewhere", left, {0, 1})}],
+      # one byte short of a token, and no token at all: framed, but nothing the server minted
+      [%{range: left, position: binary_part(token(ctx.topic, left, {0, 1}), 0, 18)}],
+      [%{range: left, position: <<>>}],
+      # a good position beside a bad one refuses the whole commit
+      [%{range: left, position: token(ctx.topic, left, {0, 3})}, %{range: right, position: token(ctx.topic, 0, {1, 0})}]
+    ]
+
+    for positions <- refused do
+      req = %{topic: ctx.topic, group: ctx.group, member: "m1", generation: generation, positions: positions}
+
+      assert ctx.socket
+             |> TCPHelper.request(Wire.commit_offsets_key(), 5, Wire.encode_commit_offsets_req(req))
+             |> answer(fn <<>> -> :ok end) == {:error, "invalid_position"}
+    end
+
+    assert committed_start(ctx, left) == {0, 2}
+    assert committed_start(ctx, right) == {0, 0}
+
+    # the parent's read handed it out, and a child goes on from it
+    req = %{
+      topic: ctx.topic,
+      group: ctx.group,
+      member: "m1",
+      generation: generation,
+      positions: [%{range: right, position: token(ctx.topic, 0, {0, 1})}]
+    }
+
+    assert {0, <<>>} = TCPHelper.request(ctx.socket, Wire.commit_offsets_key(), 5, Wire.encode_commit_offsets_req(req))
+    assert committed_start(ctx, right) == {0, 1}
+  end
+
+  test "a checkpoint the start was committed as before tokens opens with a token of the range read", ctx do
+    [range | _] = ctx.ranges
+    shard = DataPlaneRouter.shard_for(ctx.topic)
+    :ok = BrokerServer.commit_offset(shard, ctx.group, ctx.topic, %{{ctx.topic, range} => :start}, 0)
+
+    assert {:ok, %{position: position}} =
+             open_consume(connect(), ctx.topic, range: range, start: {:committed, ctx.group})
+
+    assert position == token(ctx.topic, range, {0, 0})
   end
 
   test "a rebalance that leaves a member's range with it does not fence its commits", ctx do
@@ -240,7 +293,7 @@ defmodule Malachi.GroupKeysTest do
         group: ctx.group,
         member: "m1",
         generation: generation,
-        positions: [%{range: range, position: {0, offset}}]
+        positions: [%{range: range, position: token(ctx.topic, range, {0, offset})}]
       }
 
       :ok =
@@ -281,7 +334,7 @@ defmodule Malachi.GroupKeysTest do
       group: ctx.group,
       member: "m1",
       generation: generation,
-      positions: [%{range: range, position: {0, 1}}]
+      positions: [%{range: range, position: token(ctx.topic, range, {0, 1})}]
     }
 
     :ok =
@@ -360,7 +413,7 @@ defmodule Malachi.GroupKeysTest do
       group: ctx.group,
       member: "m1",
       generation: generation,
-      positions: [%{range: range, position: {0, 1}}]
+      positions: [%{range: range, position: token(ctx.topic, range, {0, 1})}]
     }
 
     rejoin = Wire.encode_join_group_req(%{topic: ctx.topic, group: ctx.group, member: "m1"})
@@ -403,7 +456,7 @@ defmodule Malachi.GroupKeysTest do
       group: ctx.group,
       member: "m1",
       generation: generation,
-      positions: [%{range: range, position: {0, 1}}]
+      positions: [%{range: range, position: token(ctx.topic, range, {0, 1})}]
     }
 
     :ok =
@@ -442,7 +495,7 @@ defmodule Malachi.GroupKeysTest do
       group: ctx.group,
       member: "m1",
       generation: generation,
-      positions: [%{range: range, position: {0, 1}}]
+      positions: [%{range: range, position: token(ctx.topic, range, {0, 1})}]
     }
 
     leave = Wire.encode_leave_group_req(ctx.topic, ctx.group, "m1")
@@ -476,7 +529,7 @@ defmodule Malachi.GroupKeysTest do
       group: ctx.group,
       member: "m1",
       generation: generation,
-      positions: [%{range: range, position: {0, 1}}]
+      positions: [%{range: range, position: token(ctx.topic, range, {0, 1})}]
     }
 
     late = Wire.encode_join_group_req(%{topic: ctx.topic, group: ctx.group, member: "late"})
@@ -585,7 +638,7 @@ defmodule Malachi.GroupKeysTest do
       group: ctx.group,
       member: "m1",
       generation: generation,
-      positions: [%{range: range, position: {0, 1}}]
+      positions: [%{range: range, position: token(ctx.topic, range, {0, 1})}]
     }
 
     :ok =

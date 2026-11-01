@@ -162,6 +162,18 @@ function main(args) {
     assert.throws(() => wire.encodeOpenStreamReq({ ...stream, window_appends: bad, window_bytes: 1 }), /from 1 to 4294967295/);
     assert.throws(() => wire.encodeOpenStreamReq({ ...stream, window_appends: 1, window_bytes: bad }), /from 1 to 4294967295/);
   }
+  // A position token goes out as the hex of at most 64 bytes, and one the server sends longer, or cut
+  // short, is refused rather than half read.
+  const fetch = { topic: 't', range: 0, routes_version: 0, max: 1, max_bytes: 1, wait_ms: 0, accept: ['none'] };
+  for (const bad of ['ab'.repeat(65), 'ABCD', 'abc', 'zz', 42, null, undefined, [0, 1]]) {
+    assert.throws(() => wire.encodeFetchRangeReq({ ...fetch, start: { position: bad } }), /position token is the hex/);
+    assert.throws(() => wire.encodeCommitOffsetsReq({ topic: 't', group: 'g', member: 'm', generation: 0, positions: [{ range: 0, position: bad }] }), /position token is the hex/);
+  }
+  assert.strictEqual(wire.encodeFetchRangeReq({ ...fetch, start: { position: '' } }).toString('hex').slice(36, 40), '0200');
+  const openResp = (len, body) => Buffer.concat([u32(9), Buffer.from([len]), body]);
+  assert.throws(() => wire.decodeOpenConsumeResp(openResp(65, Buffer.alloc(65))), /65 bytes, past 64/);
+  assert.throws(() => wire.decodeOpenConsumeResp(openResp(19, Buffer.alloc(18))), /cut short/);
+  assert.deepStrictEqual(wire.decodeOpenConsumeResp(openResp(64, Buffer.alloc(64, 0xab))), { stream_id: 9, position: 'ab'.repeat(64) });
   const routes = read('route_frames.json').cases.find((c) => c.codec === 'topic_routes_resp');
   assert.throws(() => wire.decodeTopicRoutesResp(Buffer.concat([Buffer.from(routes.hex, 'hex'), Buffer.from([0])])), /trailing bytes/);
   assert.throws(() => keyspace.positionOf('k', 0), /out of range/);

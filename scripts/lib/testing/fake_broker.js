@@ -8,9 +8,14 @@
  * an error frame under a stream's correlation id). What is appended is kept per range, in one source, and
  * read back by `fetch_range` and the consume streams. The Node twin of test/support/stream_stub.ex. Never
  * used outside tests.
+ *
+ * As a server, it mints the position tokens it hands out (`FakeBroker.mint`), version 1 as
+ * lib/malachi/position.ex lays it out, with the range read as the issuer; the client side (../wire.js)
+ * never builds one.
  */
 
 const net = require('net');
+const zlib = require('zlib');
 const wire = require('../wire');
 
 const BROKER_STATUSES = ['alive', 'suspect', 'dead'];
@@ -331,7 +336,7 @@ FakeBroker.prototype._group = function (call, payload, reply) {
   if (call === 'heartbeat' || call === 'commit') req.generation = r.u64();
   if (call === 'commit') {
     const count = r.u16();
-    req.positions = Array.from({ length: count }, () => ({ range: r.u32(), position: [r.u16(), r.u64()] }));
+    req.positions = Array.from({ length: count }, () => ({ range: r.u32(), position: readToken(r) }));
   }
   this.groupCalls.push(req);
   const policy = this.groupPolicy(req, reply.socket);
@@ -347,27 +352,64 @@ FakeBroker.prototype._group = function (call, payload, reply) {
   answer();
 };
 
-// A start as Malachi.Wire encodes it: 0 earliest, 1 latest, 2 a position (source u16, offset u64), 3 a
-// group's checkpoint (read here as earliest: this broker keeps no checkpoints).
+// The version 1 token of position `at` ([source, offset]) in the history of `range` of `topic`, as hex:
+// <<1, crc32(topic):u32, range:u32, source:u16, offset:u64>> (lib/malachi/position.ex).
+function mint(topic, range, [source, offset]) {
+  return Buffer.concat([u8(1), u32(zlib.crc32(topic)), u32(range), u16(source), u64(offset)]).toString('hex');
+}
+
+// What a token holds, or null for one this broker never mints.
+function unmint(token) {
+  const b = Buffer.from(token, 'hex');
+  if (b.length !== 19 || b[0] !== 1) return null;
+  return { tag: b.readUInt32BE(1), issuer: b.readUInt32BE(5), at: [b.readUInt16BE(9), Number(b.readBigUInt64BE(11))] };
+}
+
+// A position token on the wire: <len:u8> <token>, read back as its hex.
+function readToken(r) {
+  const len = r.u8();
+  const token = r.buf.subarray(r.pos, r.pos + len).toString('hex');
+  r.pos += len;
+  return token;
+}
+
+const putToken = (token) => Buffer.concat([u8(token.length / 2), Buffer.from(token, 'hex')]);
+
+// A start as Malachi.Wire encodes it: 0 earliest, 1 latest, 2 a position token, 3 a group's checkpoint
+// (read here as earliest: this broker keeps no checkpoints).
 function readStart(r) {
   const kind = r.u8();
   if (kind === 0) return 'earliest';
   if (kind === 1) return 'latest';
   if (kind === 3) return { committed: r.str() };
-  const position = [r.buf.readUInt16BE(r.pos), Number(r.buf.readBigUInt64BE(r.pos + 2))];
-  r.pos += 10;
-  return { position };
+  return { position: readToken(r) };
 }
 
-// A page of `values` from `offset` on, in the one source this broker keeps.
-function page(values, offset, max) {
+// A page of `values` of `topic`'s `range` from `offset` on, in the one source this broker keeps: its next
+// as the token this broker mints and as the raw position to ack, `next` ([source, offset]) when given, the
+// first `skip` records ones the reader already had.
+function page(topic, range, values, offset, max, { skip = 0, next } = {}) {
   const taken = values.slice(offset, offset + max);
   const entries = taken.map((value, i) => ({ position: [0, offset + i], tombstone: false, record: { key: null, value, timestamp: 1 } }));
-  const next = Buffer.concat([u16(0), u64(offset + taken.length)]);
-  return Buffer.concat([next, u32(0), u64(values.length - offset - taken.length), u64(0), u8(0), wire.encodeBatch(entries, 'none', 'positioned')]);
+  const end = next || [0, offset + taken.length];
+  return Buffer.concat([
+    putToken(mint(topic, range, end)),
+    u16(end[0]),
+    u64(end[1]),
+    u32(skip),
+    u64(values.length - offset - taken.length),
+    u64(0),
+    u8(0),
+    wire.encodeBatch(entries, 'none', 'positioned'),
+  ]);
 }
 
-const offsetOf = (start, values) => (start === 'latest' ? values.length : start.position ? start.position[1] : 0);
+// Where a start reads from in the one source this broker keeps; a token it never minted reads from 0.
+function offsetOf(start, values) {
+  if (start === 'latest') return values.length;
+  const held = start.position === undefined ? null : unmint(start.position);
+  return held ? held.at[1] : 0;
+}
 
 FakeBroker.prototype._openConsume = function (socket, corr, payload, reply) {
   const r = new Reader(payload);
@@ -394,8 +436,8 @@ FakeBroker.prototype._consumeOpened = function (socket, corr, { id, topic, range
   const values = this.log.get(`${topic}/${range}`) || [];
   const offset = offsetOf(start, values);
   // the answer and its first page in one write, so the client reads them together, as it can from a server
-  const answer = responseFrame(corr, wire.OK, Buffer.concat([u32(id), u16(0), u64(offset)]));
-  const first = offset < values.length ? [responseFrame(corr, wire.OK, Buffer.concat([u8(PUSH_KINDS.records), u32(id), page(values, offset, max)]))] : [];
+  const answer = responseFrame(corr, wire.OK, Buffer.concat([u32(id), putToken(mint(topic, range, [0, offset]))]));
+  const first = offset < values.length ? [responseFrame(corr, wire.OK, Buffer.concat([u8(PUSH_KINDS.records), u32(id), page(topic, range, values, offset, max)]))] : [];
   socket.write(Buffer.concat([answer, ...first]));
   if (policy.dropAfterMs !== undefined) {
     this.consumePolicy = () => 'ok';
@@ -408,9 +450,7 @@ FakeBroker.prototype._consumeOpened = function (socket, corr, { id, topic, range
 FakeBroker.prototype.pushRecords = function (id, offset, max = 1000, skip = 0) {
   const s = this.streams.get(id);
   const values = this.log.get(`${s.topic}/${s.range}`) || [];
-  const body = page(values, offset, max);
-  // the skip field sits after the next position (u16 + u64)
-  body.writeUInt32BE(skip, 10);
+  const body = page(s.topic, s.range, values, offset, max, { skip });
   s.socket.write(responseFrame(s.corr, wire.OK, Buffer.concat([u8(PUSH_KINDS.records), u32(id), body])));
 };
 
@@ -435,18 +475,15 @@ FakeBroker.prototype._fetchRange = function (payload, reply) {
   if (policy.refuse) return reply(wire.ERROR, str(policy.refuse));
   if (policy === 'drop') return reply.socket.destroy();
   if (policy === 'silent') return;
-  const body = page(values, Math.min(offsetOf(start, values), values.length), max);
-  // a page whose first `skip` records the reader already had
-  if (policy.skip) body.writeUInt32BE(policy.skip, 10);
-  // a page naming another position next, as one read from an ancestor's history names the range's own records
-  if (policy.next) {
-    body.writeUInt16BE(policy.next[0], 0);
-    body.writeBigUInt64BE(BigInt(policy.next[1]), 2);
-  }
+  // a page whose first `skip` records the reader already had, or naming another position next, as one read
+  // from an ancestor's history names the range's own records
+  const body = page(topic, range, values, Math.min(offsetOf(start, values), values.length), max, { skip: policy.skip, next: policy.next });
   if (policy.delayMs) return setTimeout(() => reply(wire.OK, body), policy.delayMs);
   // nothing to read: held for the wait asked (not woken by a write, which a test makes before it fetches)
   if (offsetOf(start, values) >= values.length && waitMs > 0) return setTimeout(() => reply(wire.OK, body), waitMs);
   reply(wire.OK, body);
 };
+
+FakeBroker.mint = mint;
 
 module.exports = { FakeBroker };

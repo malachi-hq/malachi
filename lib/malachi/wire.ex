@@ -72,16 +72,27 @@ defmodule Malachi.Wire do
   stream; its payload starts with a kind byte (`append_ack`, `moved`,
   `records`) and the stream id. Records travel in a batch (`Malachi.Wire.Batch`): a codec byte, the record
   count, the inflated size, and the payload, compressed or not. A range travels as its sequence number
-  within the topic, a segment likewise, a position as the index of its source in the range's history (an
-  ancestor before a split, or the range itself) and an offset in that source. A range's history lists its
-  sources oldest first, and a split only extends it, so a child's history starts with its parent's: a
-  position read in the parent names the same record in the child. A merge does not keep that for its
-  buddies: the merged range lists the first buddy's ancestors, then the second's not listed yet, then both
-  buddies, so a position read in one of them does not carry over to it; one read in an ancestor both
-  buddies share does, since their common history comes first. That ordering is part of the contract. A
-  consumer of a range a split or merge just made starts from the start of its history, or from a position
-  read in one of its ancestors, so it reads its share of the ancestors' records again: at least once, never
-  lost.
+  within the topic, a segment likewise.
+
+  A position travels in two forms. Raw, `<<source_index::16, offset::64>>`: the index of a source in the
+  range's history (an ancestor before a split, or the range itself) and an offset in that source. A
+  `consume_ack` and the positions beside the records of a consume batch carry it, as NorthGuard's pushes
+  and read acks carry offsets (transcript 562 to 569); it is transport, which a client keeps to itself. As
+  a token (`Malachi.Position`), `<<len::8, token::binary-size(len)>>` with `len` at most 64: what an
+  application holds, compares and resumes from, and never computes (transcript 862 to 872, 1018 to 1023).
+  The start of an `open_consume` or a `fetch_range`, the position an `open_consume` answers, a page's
+  `next` and a checkpoint carry it. A frame with a longer token is `malformed_request`; a well-framed token
+  the server did not mint (another version, another length), minted for another topic, or naming no place
+  in the range's history is answered `invalid_position`.
+
+  A range's history lists its sources oldest first, and a split only extends it, so a child's history
+  starts with its parent's: a token read in the parent is taken by the child and names the same record in
+  it. A merge does not keep that for its buddies: the merged range lists the first buddy's ancestors, then
+  the second's not listed yet, then both buddies, so a token read in one of them is refused on it; one read
+  in an ancestor both buddies share is taken, since their common history comes first. That ordering is
+  part of the contract (`Malachi.Broker.position_lineage/4`). A consumer of a range a split or merge just
+  made starts from the start of its history, or from a token read in one of its ancestors, so it reads its
+  share of the ancestors' records again: at least once, never lost.
 
   A window is counted in appends and bytes on a producer stream and in records on a consume stream. The
   window an `open_stream` or `open_consume` asks for is an integer from 1 to 2^32 - 1 in each count, since a
@@ -556,17 +567,28 @@ defmodule Malachi.Wire do
   # ---- streams, routing and groups (keys 24 to 34) ----
 
   @broker_statuses %{alive: 0, suspect: 1, dead: 2}
+  # the longest position token a frame carries (`put_token/1`)
+  @max_token 64
   @range_states %{active: 0, sealed: 1}
   @push_kinds %{append_ack: 0, moved: 1, records: 2}
 
-  @typedoc "Where a range read starts or resumes: `{source_index, offset}` in the range's history."
+  @typedoc """
+  A raw position in a range's history, `{source_index, offset}`: what a `consume_ack` carries and what a
+  consume batch puts beside each record. A client hands neither to an application (see the moduledoc).
+  """
   @type position :: {non_neg_integer(), non_neg_integer()}
+
+  @typedoc """
+  An opaque position token (`Malachi.Position`), at most 64 bytes: where a read starts or resumes, as a
+  page's `next`, an `open_consume` answer and a checkpoint carry it.
+  """
+  @type token :: binary()
 
   @typedoc "A range's active segment and its primary, or `nil` while the range has none yet."
   @type route_segment :: %{segment: non_neg_integer(), primary: String.t()} | nil
 
-  @typedoc "Where a consume begins: the oldest record, the next one produced, a position, or a group's checkpoint."
-  @type consume_start :: :earliest | :latest | {:position, position()} | {:committed, String.t()}
+  @typedoc "Where a consume begins: the oldest record, the next one produced, a position token, or a group's checkpoint."
+  @type consume_start :: :earliest | :latest | {:position, token()} | {:committed, String.t()}
 
   @doc "`cluster_state` (24) asks for nothing."
   @spec encode_cluster_state_req() :: binary()
@@ -722,23 +744,24 @@ defmodule Malachi.Wire do
     }
   end
 
-  @doc "The consumer stream the server opened, and the position its first push starts at."
+  @doc "The consumer stream the server opened, and the position (a token) its first push starts at."
   @spec encode_open_consume_resp(map()) :: binary()
   def encode_open_consume_resp(%{stream_id: stream_id, position: position}),
-    do: <<stream_id::32, put_position(position)::binary>>
+    do: <<stream_id::32, put_token(position)::binary>>
 
   @spec decode_open_consume_resp(binary()) :: map()
   def decode_open_consume_resp(<<stream_id::32, rest::binary>>) do
-    {position, <<>>} = take_position(rest)
+    {position, <<>>} = take_token(rest)
     %{stream_id: stream_id, position: position}
   end
 
   @doc """
   `consume_ack` (30): the consumer read everything before `position` on the stream (the read ack, transcript
   569), and moves its window to `window` records (0 leaves it as it is: see the moduledoc). No response:
-  the ack shows up as pushes. It frees every page whose last record ends at or before `position`, so either
-  the position right after a page's last record or the page's `next` frees it. It returns credit only;
-  checkpointing a group's position is `commit_offsets`.
+  the ack shows up as pushes. `position` is raw, `{source_index, offset}`, as NorthGuard's read ack carries
+  an offset: it frees every page whose last record ends at or before it, so either the position right after
+  a page's last record or the page's `ack` frees it. It returns credit only; checkpointing a group's
+  position is `commit_offsets`, with the page's `next` token.
   """
   @spec encode_consume_ack_req(map()) :: binary()
   def encode_consume_ack_req(%{stream_id: stream_id, position: position, window: window}),
@@ -776,20 +799,38 @@ defmodule Malachi.Wire do
 
   @doc """
   A page of one range, as `fetch_range` answers it and as a `records` push carries it: where the next page
-  starts, how many leading records of the batch the reader already had (`skip`, for a position inside a
-  stored batch), how many records the range still holds past this page (`backlog`), the records retention
-  removed before this page (`expired`, exact or an upper bound), and the batch of positioned records.
+  starts twice, as the token a reader resumes from and commits (`next`) and as the raw position it acks
+  with (`ack`, see `encode_consume_ack_req/1`), how many leading records of the batch the reader already
+  had (`skip`, for a position inside a stored batch), how many records the range still holds past this page
+  (`backlog`), the records retention removed before this page (`expired`, exact or an upper bound), and the
+  batch of positioned records.
+
+      <<len::8, next::binary-size(len), ack_source::16, ack_offset::64, skip::32, backlog::64, expired::64,
+        expired_exact::8, batch::binary>>
   """
   @spec encode_page(map()) :: iodata()
-  def encode_page(%{next: next, skip: skip, backlog: backlog, expired: expired, expired_exact: exact, batch: batch}) do
-    [<<put_position(next)::binary, skip::32, backlog::64, expired::64, bool(exact)::8>>, batch]
+  def encode_page(%{next: next, ack: ack, skip: skip, backlog: backlog, expired: expired, expired_exact: exact} = page) do
+    [
+      <<put_token(next)::binary, put_position(ack)::binary, skip::32, backlog::64, expired::64, bool(exact)::8>>,
+      page.batch
+    ]
   end
 
   @spec decode_page(binary()) :: map()
   def decode_page(payload) do
-    {next, <<skip::32, backlog::64, expired::64, exact::8, batch::binary>>} = take_position(payload)
+    {next, rest} = take_token(payload)
+    {ack, <<skip::32, backlog::64, expired::64, exact::8, batch::binary>>} = take_position(rest)
     {_header, <<>>} = Batch.split(batch)
-    %{next: next, skip: skip, backlog: backlog, expired: expired, expired_exact: from_bool(exact), batch: batch}
+
+    %{
+      next: next,
+      ack: ack,
+      skip: skip,
+      backlog: backlog,
+      expired: expired,
+      expired_exact: from_bool(exact),
+      batch: batch
+    }
   end
 
   @doc """
@@ -877,11 +918,14 @@ defmodule Malachi.Wire do
     %{generation: generation, session_ms: session_ms, ranges: ranges}
   end
 
-  @doc "`commit_offsets` (34): checkpoints a member's position in each of its ranges. Answered with an empty ok."
+  @doc """
+  `commit_offsets` (34): checkpoints a member's position in each of its ranges, each a token a read handed
+  out. Answered with an empty ok.
+  """
   @spec encode_commit_offsets_req(map()) :: binary()
   def encode_commit_offsets_req(%{positions: positions, generation: generation} = req) do
     positions =
-      put_list(positions, fn %{range: range, position: position} -> <<range::32, put_position(position)::binary>> end)
+      put_list(positions, fn %{range: range, position: position} -> <<range::32, put_token(position)::binary>> end)
 
     <<encode_join_group_req(req)::binary, generation::64, positions::binary>>
   end
@@ -894,7 +938,7 @@ defmodule Malachi.Wire do
 
     {positions, <<>>} =
       take_list(rest, fn <<range::32, rest::binary>> ->
-        {position, rest} = take_position(rest)
+        {position, rest} = take_token(rest)
         {%{range: range, position: position}, rest}
       end)
 
@@ -941,17 +985,24 @@ defmodule Malachi.Wire do
   defp put_position({source, offset}), do: <<source::16, offset::64>>
   defp take_position(<<source::16, offset::64, rest::binary>>), do: {{source, offset}, rest}
 
+  # A token is opaque here: framed as <<len::8, token::binary-size(len)>>, at most @max_token bytes, and
+  # read back as the bytes it was sent as (`Malachi.Position` says what they hold). A longer one raises.
+  defp put_token(token) when is_binary(token) and byte_size(token) <= @max_token,
+    do: <<byte_size(token)::8, token::binary>>
+
+  defp take_token(<<len::8, token::binary-size(len), rest::binary>>) when len <= @max_token, do: {token, rest}
+
   defp put_start(:earliest), do: <<0::8>>
   defp put_start(:latest), do: <<1::8>>
-  defp put_start({:position, position}), do: <<2::8, put_position(position)::binary>>
+  defp put_start({:position, token}), do: <<2::8, put_token(token)::binary>>
   defp put_start({:committed, group}), do: <<3::8, put_str(group)::binary>>
 
   defp take_start(<<0::8, rest::binary>>), do: {:earliest, rest}
   defp take_start(<<1::8, rest::binary>>), do: {:latest, rest}
 
   defp take_start(<<2::8, rest::binary>>) do
-    {position, rest} = take_position(rest)
-    {{:position, position}, rest}
+    {token, rest} = take_token(rest)
+    {{:position, token}, rest}
   end
 
   defp take_start(<<3::8, rest::binary>>) do
