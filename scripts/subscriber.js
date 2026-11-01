@@ -10,6 +10,9 @@
  * --group it is a member of that consumer group (./lib/group_member.js): the group hands it a share of the
  * topic's ranges, it opens each from the group's checkpoint and commits its position after every page, and
  * it follows every rebalance, so several subscribers with the same --group split the topic between them.
+ * A position is the opaque token the broker handed out with the page: it is committed as it came, never
+ * computed; each page is acked with the raw position the page names for that, as NorthGuard's read ack
+ * carries an offset.
  *
  * Usage:
  *   node subscriber.js [topic]                    # stream every range of <topic>

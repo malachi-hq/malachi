@@ -14,7 +14,9 @@
  * The retired ranges of the topic whose block holds a new range's are its ancestors, and the nearest is the
  * one the topic made last, which is the highest range number: a topic numbers its ranges in the order it
  * makes them. A position read in an ancestor names, in the new range, the same record or one before it, so
- * nothing past what was read is skipped and at most some records are read again.
+ * nothing past what was read is skipped and at most some records are read again. A position is the opaque
+ * token the ancestor's read handed out, carried as it is: the broker takes it on the new range because the
+ * new range's history goes on from the ancestor's (Malachi.Broker.position_lineage/4).
  */
 
 const laneKey = (topic, range) => `${topic}\u0000${range}`;

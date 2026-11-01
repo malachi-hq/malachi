@@ -101,10 +101,10 @@ class GroupMember {
     }
   }
 
-  // Checkpoints `positions` ([{ range, position }]) at the member's generation, those of ranges it still
-  // holds. Resolves true when the group took every one; false when some were of a range it no longer holds,
-  // or the group refused them (REFUSED), or no broker answered: whoever holds those ranges next reads past
-  // them again and commits them.
+  // Checkpoints `positions` ([{ range, position }], each the token a read handed out) at the member's
+  // generation, those of ranges it still holds. Resolves true when the group took every one; false when some
+  // were of a range it no longer holds, or the group refused them (REFUSED), or no broker answered: whoever
+  // holds those ranges next reads past them again and commits them.
   async commit(positions) {
     if (positions.length === 0) return true;
     if (!this.joined) return false;

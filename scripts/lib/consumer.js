@@ -5,12 +5,15 @@
  * Malachi.Loadtest.Consumer is: one consume stream per range (keys 29 and 30), opened where the range is
  * read, pushing `records` pages with the position of every record, and a read ack after each page that
  * names the position read and returns the credit, so the broker keeps at most `window` records pushed and
- * unread. It reads every active range of a topic, from the start of each range's history.
+ * unread. The ack carries the page's raw `ack` position, as NorthGuard's read ack carries an offset; where
+ * the range is read from next is the page's `next`, an opaque token (see ./wire.js) the consumer only hands
+ * back. It reads every active range of a topic, from the start of each range's history.
  *
  * Its events are queued (`takeEvents`) and, with an `onEvent` option, handed to it as they come:
  *
  *   - `{ kind: 'records', key, count, next }`: a page of `count` records new to this consumer (a page's
- *     leading records it already had, `skip`, are not counted), `next` where the range's next page starts,
+ *     leading records it already had, `skip`, are not counted), `next` where the range's next page starts
+ *     (a token: compared with wire.comparePositions, committed, never computed),
  *     and with the `decode` option `records`, those records whole (a load generator counts, a CLI prints);
  *   - `{ kind: 'failed', key, reason }`: an open, or a stream, the broker refused for a reason that is not a
  *     redirect; the range opens again after a backoff, or, with `onRefusal: 'stop'`, is not read again, nor

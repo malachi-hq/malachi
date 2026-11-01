@@ -6,7 +6,9 @@
  * routes say serves the range. Where a range's next fetch starts moves past each page it reads. What a page
  * that brings nothing new does is the `atTail` option: 'restart' (the default, the load generator's) sends
  * that range back to the start of its history, so a reader keeps pulling a backlog; 'wait' keeps it where it
- * is, so a reader that wants every record once asks again from the end it reached.
+ * is, so a reader that wants every record once asks again from the end it reached. Where a fetch starts is
+ * the token the last page named (`to` of a page), sent back as it came: an opaque position, compared with
+ * wire.comparePositions and committed, never computed.
  *
  * Fetches asked at once are answered one at a time, in order: a fetcher is one closed loop, and an open loop
  * that asks faster than it is answered waits in this queue, which is what its latency then shows.

@@ -9,7 +9,8 @@
  * --group it is a member of that consumer group (./lib/group_member.js): the group hands it a share of the
  * topic's ranges, it starts each from the group's checkpoint and commits its position after every page,
  * and it follows every rebalance, so several members with the same --group split the topic between them
- * and a member that restarts resumes where the group left off.
+ * and a member that restarts resumes where the group left off. A position is the opaque token the broker
+ * handed out with the page: it is committed as it came, never computed.
  *
  * Usage:
  *   node consumer.js [topic]                # read the topic once from the start

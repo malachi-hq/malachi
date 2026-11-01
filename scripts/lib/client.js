@@ -253,7 +253,8 @@ class MalachiClient {
     return wire.decodeAssignmentResp(await this._request(wire.API.groupHeartbeat, req));
   }
 
-  // Checkpoints `positions` ([{ range, position }]) for `member` at `generation`.
+  // Checkpoints `positions` ([{ range, position }], each the token a read handed out) for `member` at
+  // `generation`.
   async commitOffsets(topic, group, member, generation, positions) {
     await this._request(wire.API.commitOffsets, wire.encodeCommitOffsetsReq({ topic, group, member, generation, positions }));
   }

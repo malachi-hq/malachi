@@ -483,6 +483,18 @@ function readToken(r) {
   return r.bytes(len).toString('hex');
 }
 
+// The order of two position tokens: 'lt', 'eq' or 'gt' when both are version 1 tokens (19 bytes, the first
+// 1) of one topic and one issuer, the first 9 bytes, else 'incomparable', as Malachi.Position.compare/2
+// answers. Then the order of the rest is the order of their positions. Two tokens are compared as they
+// are, never taken apart: the end of one source and the start of the next name the same next record and
+// still compare 'lt'.
+function comparePositions(a, b) {
+  const v1 = (t) => typeof t === 'string' && /^01[0-9a-f]{36}$/.test(t);
+  if (!v1(a) || !v1(b) || a.slice(0, 18) !== b.slice(0, 18)) return 'incomparable';
+  if (a === b) return 'eq';
+  return a < b ? 'lt' : 'gt';
+}
+
 // Where a consume starts: 'earliest', 'latest', { position: token } or { committed: group }.
 function putStart(start) {
   if (start === 'earliest') return u8(0);
@@ -822,6 +834,7 @@ module.exports = {
   encodeGroupHeartbeatReq,
   decodeAssignmentResp,
   encodeCommitOffsetsReq,
+  comparePositions,
   encodeBatch,
   decodeBatch,
   batchHeader,
@@ -848,6 +861,25 @@ if (require.main === module) {
   const framed = encodeFrame(body);
   const decoded = decodeFrame(framed);
   assert.ok(decoded && decoded.body.equals(body), 'a normal frame decodes unchanged');
+
+  // Two tokens of one topic and issuer order as their positions do; any other pair is incomparable. The
+  // tokens are written out by hand, as a broker mints them: version 1, crc32('orders'), issuer, source,
+  // offset.
+  const token = (issuer, source, offset) =>
+    Buffer.concat([Buffer.from([1]), u32(3845127662), u32(issuer), u16(source), u64(offset)]).toString('hex');
+  assert.strictEqual(comparePositions(token(3, 0, 5), token(3, 0, 6)), 'lt');
+  assert.strictEqual(comparePositions(token(3, 1, 0), token(3, 0, 2 ** 40)), 'gt', 'the source orders first');
+  assert.strictEqual(comparePositions(token(3, 0, 256), token(3, 0, 255)), 'gt', 'as numbers, not as digits');
+  assert.strictEqual(comparePositions(token(3, 2, 9), token(3, 2, 9)), 'eq');
+  assert.strictEqual(comparePositions(token(3, 0, 10), token(3, 1, 0)), 'lt', 'one source ends, the next starts: still lt');
+  assert.strictEqual(comparePositions(token(3, 0, 5), token(4, 0, 5)), 'incomparable', 'another issuer');
+  const otherTopic = '01' + 'ffffffff' + token(3, 0, 5).slice(10);
+  assert.strictEqual(comparePositions(token(3, 0, 5), otherTopic), 'incomparable', 'another topic');
+  const v2 = '02' + token(3, 0, 5).slice(2);
+  assert.strictEqual(comparePositions(v2, v2), 'incomparable', 'another version');
+  for (const bad of [token(3, 0, 5).slice(0, 36), token(3, 0, 5) + '00', token(3, 0, 5).toUpperCase(), null, [0, 5]]) {
+    assert.strictEqual(comparePositions(bad, token(3, 0, 5)), 'incomparable', `not a token: ${JSON.stringify(bad)}`);
+  }
 
   console.log('wire.js self-test passed');
 }
