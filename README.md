@@ -1058,7 +1058,7 @@ mix deps.unlock --check-unused
 The project uses GitHub Actions for continuous integration:
 
 - ✅ **Automated Tests** - Run on every commit
-- ✅ **Multiple Elixir/OTP Versions** - Tested on 3 versions
+- ✅ **Elixir/OTP Version** - Tested on Elixir 1.19 / OTP 28
 - ✅ **Code Quality** - Credo, formatting, security checks
 - ✅ **Docker Build** - Verified on every PR
 - ✅ **Automatic Releases** - On merge to main

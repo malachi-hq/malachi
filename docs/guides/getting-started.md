@@ -3,7 +3,7 @@
 This guide takes you from a clone to your first appended and consumed record, first in-process and then
 over the network.
 
-Requires Elixir `~> 1.19` / OTP 26+.
+Requires Elixir `~> 1.19` / OTP 28+.
 
 ## Run the broker
 
