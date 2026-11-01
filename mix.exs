@@ -375,14 +375,23 @@ defmodule Malachi.MixProject do
   end
 
   defp description do
-    "A High-performance message system"
+    "A high-performance message broker on the BEAM, with a Raft control plane (ra) and a web dashboard."
   end
 
+  # What Hex publishes. `files` is an explicit allow-list so a build never ships tests, benchmarks, the TUI or
+  # generated docs; test/scripts/hex_package_test.exs asserts what the list must contain and what it must exclude.
   defp package do
     [
       name: "malachi",
+      description: description(),
       licenses: ["MIT"],
-      links: %{"GitHub" => @source_url}
+      maintainers: ["Hector Cardoso"],
+      files: ~w(lib priv config rel mix.exs README.md LICENSE SECURITY.md),
+      links: %{
+        "Documentation" => @site_url,
+        "GitHub" => @source_url,
+        "Releases" => @source_url <> "/releases"
+      }
     ]
   end
 end
