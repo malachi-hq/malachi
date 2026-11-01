@@ -288,10 +288,11 @@ defmodule Malachi.Broker do
   error NOTHING was dispatched, so the original broker is returned untouched (stronger atomicity than
   the executing variant, which may have committed earlier groups).
 
-  Committing before durability is what makes the frontend non-blocking, and it is safe because clients
-  never see offsets (positions travel in opaque cursors): a dispatch that later fails burns its
-  offsets, the client gets the error and retries, and the local counters stay in lockstep with the
-  primary's log, which appended the batch even when its quorum did not close.
+  Committing before durability is what makes the frontend non-blocking, and it is safe because no client
+  is handed an offset for a produce (an append is answered by its sequence, never an offset) and a reader
+  sees only the offsets of records that were stored: a dispatch that later fails burns its offsets, the
+  client gets the error and retries, and the local counters stay in lockstep with the primary's log, which
+  appended the batch even when its quorum did not close.
   """
   @spec produce_plan(t(), Metadata.topic_name(), [Record.t()]) ::
           {t(), {:ok, placements(), [dispatch()]} | {:error, term()}}
@@ -1055,9 +1056,9 @@ defmodule Malachi.Broker do
   Set, not `max`. A batch the fence refused, or one that never reached the primary at all, burned
   reserved offsets, so the local counter can sit ABOVE the fence's end; opening the next segment there
   would be rejected by the tiling rule and the range would wedge. The rewind is invisible to clients,
-  because positions travel in opaque cursors and every burned offset belonged to a produce that
-  returned an error. It is safe precisely because the fence is a latch: after it, nothing can land in
-  this segment.
+  because a reader sees only the offsets of records that were stored and every burned offset belonged to
+  a produce that returned an error. It is safe precisely because the fence is a latch: after it, nothing
+  can land in this segment.
 
   A `{:already_sealed, existing}` conflict (a roll fence racing a failover seal) converges on the
   winner rather than wedging: this broker adopts `existing` as the length and reports `:ok`.

@@ -53,6 +53,13 @@ answers `503` as described below.
   `Authorization: Bearer` or the `malachi_token` cookie a login on the dashboard sets, which the browser
   also sends to the console's port on the same host. Each route requires a console role
   ([console roles](authentication.md#console-roles)), and `GET /api/v1/me` says who the session is.
+- **Producers.** `GET /api/v1/producers`, at the `viewer` role, lists the producer streams open on the
+  node that answers, oldest first: each stream's topic, range, segment and primary, the label the client
+  opened it with, the client's address, its window, its next and acknowledged sequences and what it has
+  in flight. It pages with `page_size` (100 by default, at most 1000) and `page_token`; a connection that
+  does not answer in time is counted in `unanswered_connections` and makes the listing `complete: false`.
+  It lists one node's streams, so ask every node for the whole cluster's. The same streams are counted by
+  `malachi_producer_streams_open` and `malachi_producer_streams_total{event}`.
 
 ## Health checks
 

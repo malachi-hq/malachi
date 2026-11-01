@@ -5,7 +5,7 @@
 [![Docker Image Size](https://img.shields.io/docker/image-size/hectorcardoso/malachi/latest)](https://hub.docker.com/r/hectorcardoso/malachi)
 [![License](https://img.shields.io/github/license/HectorIFC/malachi)](https://github.com/HectorIFC/malachi/blob/main/LICENSE)
 
-**Malachi** is an open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-storage architecture: a CP, horizontally-scalable **log broker**. Clients speak topics, keys, and opaque cursors, never partitions or offsets, so the broker can split and restripe its storage underneath without breaking them. The control plane is replicated by quorum (Raft via `ra`).
+**Malachi** is an open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-storage architecture: a CP, horizontally-scalable **log broker**. Clients speak topics, keys, and positions in a range's history, never a fixed partition count, so the broker can split and restripe its storage underneath without breaking them. The control plane is replicated by quorum (Raft via `ra`).
 
 ## Features
 
@@ -36,15 +36,20 @@ docker run \
   -p 127.0.0.1:4041:4041 \
   -e MALACHI_ADMIN_PASS="your_secure_password" \
   -e MALACHI_REQUIRE_TLS=false \
+  -e MALACHI_ADVERTISED_HOST=127.0.0.1 \
   hectorcardoso/malachi:latest
 ```
 
-Two parts of that command are not decoration. The image runs the production release, and production
+Three parts of that command are not decoration. The image runs the production release, and production
 requires TLS unless told otherwise, so without `MALACHI_REQUIRE_TLS=false` the container exits at
 once with `TLS certificate file not configured`. And because it is then serving plaintext, the ports
 are bound to `127.0.0.1`: a bare `-p 4040:4040` publishes on every interface your machine has, which
 on a shared network hands out an unencrypted broker. Change the prefix deliberately, with TLS and
-real credentials, rather than by deleting it. See [TLS Configuration](#tls-configuration).
+real credentials, rather than by deleting it. See [TLS Configuration](#tls-configuration). And a client
+reads the cluster's routes first and then connects to the address each broker advertises
+(`MALACHI_ADVERTISED_HOST`, with `MALACHI_ADVERTISED_PORT` when it differs from the listener's port):
+left unset, a single node advertises its node name's host, the container's hostname, which a client on
+your machine cannot resolve.
 
 **Note**: The image automatically detects your platform (AMD64 or ARM64) and uses the appropriate build.
 
@@ -108,6 +113,7 @@ docker run \
   -p 127.0.0.1:4041:4041 \
   -e MALACHI_ADMIN_PASS="your_secure_password" \
   -e MALACHI_REQUIRE_TLS=false \
+  -e MALACHI_ADVERTISED_HOST=127.0.0.1 \
   -e MALACHI_LOG_DATA_DIR=/app/data/log \
   -e MALACHI_RA_DATA_DIR=/app/data/ra \
   -v malachi-data:/app/data \
@@ -129,6 +135,7 @@ docker run \
   -e MALACHI_ADMIN_PASS="your_secure_password" \
   -e MALACHI_TLS_CERTFILE=/app/priv/cert/server.crt \
   -e MALACHI_TLS_KEYFILE=/app/priv/cert/server.key \
+  -e MALACHI_ADVERTISED_HOST=broker.example.com \
   -v /path/to/certs:/app/priv/cert:ro \
   hectorcardoso/malachi:latest
 ```
@@ -233,9 +240,13 @@ which is the difference between this and `docker-compose.cluster.yml`: that one 
 and keeps its data on tmpfs so fsync cost stays uniform across runs, and tmpfs is remounted empty on
 every restart.
 
-Only node 1 publishes to the host, so it is the only one a client on your machine can reach. The three
-are interchangeable to a client **on the compose network**, which is the sense that matters for how
-the cluster behaves: produce through any of them and the write is quorum-replicated across all three. Publish the other two if you want to exercise that from outside. Prometheus scrapes all three,
+Only node 1 publishes to the host. A client bootstraps from any node and then connects to the broker
+that leads each range, at the address that broker advertises: here `malachi1`, `malachi2` and
+`malachi3` (`MALACHI_ADVERTISED_HOST`), names only the compose network resolves. So run clients on that
+network; one on your machine can read the routes through node 1 but cannot reach the brokers they name.
+To drive the cluster from outside, publish every node's port and advertise addresses your machine
+resolves (`MALACHI_ADVERTISED_HOST`, and `MALACHI_ADVERTISED_PORT` for a port published under another
+number). Every write is quorum-replicated across all three. Prometheus scrapes all three,
 because most Malachi series are per-node facts (BEAM memory, connections, the integrity scrub's
 progress over *that* node's disk) and scraping one would report a third of the cluster while looking
 complete. It uses one scrape job per node, each with its own token: users, ACLs and lockouts are
@@ -272,16 +283,19 @@ that does.
 
 ## Client protocol
 
-Malachi speaks a length-framed **binary** protocol on the TCP port: a connection authenticates first, then
-exchanges topic, produce, fetch, commit, and subscribe frames. Positions are opaque cursors, never offsets.
-Clients do not hand-write frames.
+Malachi speaks a length-framed **binary** protocol on the TCP port: a connection authenticates first,
+reads the cluster state and a topic's routes, and then writes and reads each range at the broker that
+leads it, on producer streams, consume streams and `fetch_range`, with consumer groups on keys of their
+own. Every record read comes with its position in its range's history. Clients do not hand-write frames.
 
 Use one of the supported clients instead:
 
 - the reference **Node CLI** in [`scripts/`](https://github.com/HectorIFC/malachi/tree/main/scripts)
   (`producer.js`, `consumer.js`, `subscriber.js`), which reads `MALACHI_HOST`, `MALACHI_PORT`,
   `MALACHI_USER`, `MALACHI_PASS`, `MALACHI_TOPIC`;
-- the in-process Elixir API (`Malachi.LogApi`) for embedded use.
+- `Malachi.Loadtest.Client`, a small Elixir client of the same keys, which `bin/malachi rpc` can drive
+  inside the container (connect, create a topic, produce, read, join, commit, leave), as
+  `scripts/docker-regression-test.sh` does.
 
 See the [guides](https://hectorifc.github.io/malachi) for producing, consuming, consumer groups, and
 streaming with backpressure.

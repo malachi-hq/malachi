@@ -2,8 +2,8 @@
 
 Malachi is a CP (consistent, partition-tolerant), horizontally scalable **log broker**, written entirely
 in Elixir on the BEAM. It follows LinkedIn's NorthGuard log-storage design: clients speak topics, keys, and
-opaque cursors, never partitions or offsets, so the broker can split, merge, and restripe its storage
-underneath without breaking them. The control plane (metadata) is replicated by quorum through Raft (the
+positions in a range's history, never a fixed partition count, so the broker can split, merge, and
+restripe its storage underneath without breaking them. The control plane (metadata) is replicated by quorum through Raft (the
 `ra` library); the data plane (records) uses its own quorum replication; cluster membership uses SWIM.
 
 This document describes how the system is built and the reasons behind the load-bearing choices. For how to
@@ -23,10 +23,11 @@ Records with the same key land in the same range and are ordered relative to eac
 
 **Range split and merge are purely logical metadata operations.** Segments are never physically combined or
 copied; a merge happens only between buddy ranges (buddy-allocator style). Total ordering is preserved
-through happens-before on splits and merges. A consumer's position is `{source_index, offset}`: an offset
-in one source of the range's history, which lists the range's ancestors oldest first and then the range.
-A split only extends that history, so a position read in a parent names the same record in its
-children; a merge lists both buddies, so a position read in one does not carry over to the merged range. Either
+through happens-before on splits and merges. A consumer holds its position as an opaque token
+(`Malachi.Position`) that names `{source_index, offset}`: an offset in one source of the range's history,
+which lists the range's ancestors oldest first and then the range. A split only extends that history, so a
+token read in a parent is taken by its children and names the same record there; a merge lists both
+buddies, so a token read in one is refused on the merged range. Either
 way a consumer of the new ranges starts from the start of their history, so it reads its share of the
 ancestors' records again: at least once, never lost (decision 4).
 
@@ -216,7 +217,7 @@ flowchart LR
 
 The wire protocol is length-framed binary, owned by `Malachi.Wire`: `<<len::32, body>>` carrying
 `<<api_key::16, correlation_id::32, payload>>`. The `correlation_id` matches each response to its request,
-so a connection pipelines without a session layer. The protocol covers the log, consumer groups,
+so a connection pipelines without a session layer. The protocol covers routing, the log, consumer groups,
 authentication (password, mTLS, token), and per-topic ACLs across its api_keys.
 
 ```mermaid
@@ -232,8 +233,16 @@ flowchart LR
 
 - **Metadata operations are unary** (one request, one response): create, delete, topic metadata, segment
   metadata. Any broker can act as a proxy and route to the vnode leader using the gossiped state.
+- **Clients route themselves.** A client reads the cluster's minimal state from any node (`cluster_state`:
+  every broker with the address it advertises, `MALACHI_ADVERTISED_HOST`), resolves a topic to its ranges
+  and each range's active segment and primary (`topic_routes`), and then writes and reads each range at
+  the broker that leads it. No node forwards records for another: a stream opened elsewhere is answered
+  `moved`, and an append that reaches a broker that does not lead the segment is refused `not_primary`
+  with nothing stored, so the client reads the routes again and sends it where they say.
 - **Data operations are streaming** (produce, consume, replication) with pipelining and windowing for flow
-  control. A zero-copy consume via `:file.sendfile` is a **future optimization, not implemented**:
+  control: a producer stream per range with a window in appends and inflated bytes that the broker
+  grants and adjusts on every ack, a consume stream per range with a credit window in records, and group
+  membership on unary keys beside them (`join_group`, `group_heartbeat`, `commit_offsets`). A zero-copy consume via `:file.sendfile` is a **future optimization, not implemented**:
   today the wire ships records in a compact offset-less encoding distinct from the on-disk frame (see
   `Malachi.Wire`), so consumes read, decode, and re-encode through the BEAM, and sendfile would first
   require aligning the fetch encoding with the on-disk frame. Every published throughput number
@@ -298,15 +307,20 @@ Four choices shape everything above. Each is stated with its reason and the code
    adding api_keys. See `Malachi.Wire`.
 
 4. **A position is an offset in a range's history, never a partition.** A consumer's position in a range
-   is `{source_index, offset}`. The `fetch` cursor (`Malachi.LogApi`, `@type cursor :: String.t()`)
-   carries one per range, opaque to the client. What keeps resharding safe is the order of a range's
+   is `{source_index, offset}` inside the server, and an opaque token to a client, as NorthGuard hands its
+   applications: a page's `next`, the start of a read and a group's checkpoint (`commit_offsets`, one per
+   range) carry a token, which a client compares and hands back but never computes (`Malachi.Position`).
+   The raw pair travels beside every record a consume stream or `fetch_range` serves, and in
+   `consume_ack` (`Malachi.Wire`).
+   What keeps resharding safe is the order of a range's
    history, oldest source first, which a split only extends: a child's history starts with its parent's,
    so a position read before the split means the same record after it. A merge lists both buddies, so it
-   does not carry a position over. A consumer of a range a split or merge just made starts from the start
+   does not carry a buddy's token over. A consumer of a range a split or merge just made starts from the start
    of its history and reads its share of the ancestors' records again (at least once, never lost).
-   Because the cursor returns from an untrusted client, `decode_cursor/1` deserializes with
-   `binary_to_term(_, [:safe])` and validates the shape, so a forged cursor cannot mint a new atom or an
-   arbitrary term.
+   A token from a client is a fixed binary layout of at most 64 bytes, decoded by a plain binary match, so
+   decoding one cannot mint an atom or an arbitrary term; a broker takes one only when it minted it for the
+   range read or for an ancestor whose history the range's starts with and whose keys hold the range's,
+   and answers any other `invalid_position`.
 
 ## What we do not replicate
 

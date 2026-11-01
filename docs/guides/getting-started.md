@@ -23,36 +23,43 @@ listed in the
 
 Prefer containers? See [Running with Docker](../DOCKER_README.md).
 
-## Your first records (in-process)
+## Your first records (from `iex`)
 
-The quickest way to see the model is the in-process API in that `iex` session:
+The quickest way to see the model is a client in that `iex` session. `Malachi.Loadtest.Client` speaks the
+binary protocol over the network, as every client does: it reads the cluster state and the topic's routes
+from the node it connects to, then writes and reads each range at the broker that leads it. The `app`
+user is seeded in development only (see below):
 
 ```elixir
-alias Malachi.LogApi
-broker = Malachi.LogBroker
+alias Malachi.Loadtest.Client
+alias Malachi.Log.Record
 
-LogApi.create_topic(broker, "events")
+{:ok, client} =
+  Client.connect(host: "127.0.0.1", port: Malachi.TCPAcceptorPool.port(), user: "app", pass: "app123")
 
-# produce by key: no partitions, no offsets exposed
-LogApi.produce(broker, "events", [
-  %{"key" => "user-1", "value" => "hello"},
-  %{"key" => "user-2", "value" => "world"}
-])
+# the keyspace size is the server's to choose: it ignores the 8 asked for here
+:ok = Client.create_topic(client, "events", 8)
 
-# consume from the start: records + an opaque cursor to resume from
-{:ok, records, cursor} = LogApi.fetch(broker, "events", :start, 100)
-Enum.map(records, & &1.value)        #=> ["hello", "world"]
+# produce by key: no partitions, the key picks the range
+{:ok, 2} =
+  Client.produce(client, "events", [Record.new("hello", key: "user-1"), Record.new("world", key: "user-2")], 5_000)
 
-# resume by passing the cursor back, nothing new yet
-{:ok, [], _cursor} = LogApi.fetch(broker, "events", cursor, 100)
+# consume from the start of every range
+{:ok, %{values: values, positions: positions}} = Client.read(client, "events")
+values        #=> ["hello", "world"]
+positions     #=> %{0 => <<1, ...>>}: an opaque token for where range 0's next page starts
 ```
 
 Two things to notice, because they are the whole design:
 
 1. You addressed records by **key**, never by partition.
-2. You resumed with a **cursor the server gave you**, never with an offset you computed.
+2. A read hands back, per range, an opaque **position in the range's history**, which keeps its meaning
+   when the range splits. You compare two (`Client.compare_positions/2`) and hand one back, never compute
+   one. A consumer group checkpoints those positions on the server
+   ([Produce and consume](produce-and-consume.md) shows how).
 
-See `Malachi.LogApi` for the full API.
+`Malachi.Loadtest.Client` is a small client for checks like this one (`connect/1`, `create_topic/3`,
+`produce/4`, `read/3`, `join/4`, `commit/6`, `leave/4`); see its documentation for every return shape.
 
 ## Over the network
 
@@ -72,8 +79,10 @@ node consumer.js orders
 node consumer.js orders --follow
 ```
 
-Each client authenticates first. In development the seeded users are `producer` / `producer123` and
-`consumer` / `consumer123`; override with `MALACHI_USER` / `MALACHI_PASS`.
+Each client authenticates first. In development the seeded users are `producer` / `producer123`,
+`consumer` / `consumer123` and `app` / `app123` (both permissions); the scripts default to the first two,
+and `MALACHI_USER` / `MALACHI_PASS` override them. Point them at another node with `MALACHI_HOST` /
+`MALACHI_PORT`: they read the cluster's routes there and go on to the broker that leads each range.
 
 > #### Development credentials only {: .warning}
 > Those seeded users exist in `dev`/`test` only. Production refuses to boot with them: you either supply
@@ -89,7 +98,7 @@ authenticated admin session: see the dashboard section of the README for the cre
 
 ## Next steps
 
-- [The log model](log-model.md): why cursors are opaque and what a *range* is.
+- [The log model](log-model.md): why a position survives a split and what a *range* is.
 - [Produce and consume](produce-and-consume.md): batching, keys and ordering, consumer groups, and the
   errors a correct client retries.
 - [Streaming with backpressure](streaming-with-backpressure.md): server push and the credit window.

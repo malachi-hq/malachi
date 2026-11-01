@@ -134,7 +134,7 @@ This section is the vocabulary. Every interface uses these nouns, in these words
 | Field | Type | Meaning |
 |---|---|---|
 | `name` | string | Matches `~r/\A[A-Za-z0-9._-]+\z/`; becomes a directory path segment |
-| `keyspace_size` | positive integer | `2^bits`, bits in 1..32. Today always 256, because `LogApi` forces 8 bits (`log_api.ex:43,51`) |
+| `keyspace_size` | positive integer | `2^bits`, bits in 1..32. Today always 256, because `LogApi` forces 8 bits whatever a `create_topic` asks for (`log_api.ex:15,20`) |
 | `state` | `active` or `sealed` | |
 | `next_range_seq` | integer | The per topic range id counter |
 | `policy` | policy name or nil | Storage policy. Nil means the global policy applies |
@@ -216,17 +216,21 @@ private field with no accessor at all.
 
 ### 3.4 Cursor
 
-`log_api.ex:259`: `Base.url_encode64(:erlang.term_to_binary(positions))`, where positions is
-`%{range_id => :start | {source_index, source_offset}}`.
+`Malachi.Position`: a cursor is a position token of one range, version 1 being 19 bytes,
+`<<1, topic_tag::32, issuer_seq::32, source_index::16, offset::64>>`, at most 64 bytes on the wire. It
+is the `next` of a page, the start of an `open_consume` or a `fetch_range`, and a group's checkpoint
+(`commit_offsets`). Inside the server, and in the control plane's checkpoints, a position stays
+`{source_index, source_offset}`.
 
 `source_index` indexes the range's history sources: every sealed ancestor filtered to this range's
-key slice, followed by the range itself. Validation is four guards before deserialization, including
-a 262144 byte cap and an explicit rejection of the compressed term tag because a 2.6 KB token
-inflates about six thousand times (`log_api.ex:324-373`).
+key slice, followed by the range itself. Decoding is a plain binary match that builds no term, and a
+broker takes a token only when it minted it for the range read or for an ancestor whose history the
+range's starts with and whose keys hold the range's (`Malachi.Broker.position_lineage/4`); any other is
+`invalid_position`.
 
-**There is no cursor comparison function anywhere in the codebase**, and no way to translate a cursor
-to a position an operator could reason about. The interface therefore treats a cursor as an opaque
-identity: copy it, paste it, seek to it, and show what is around it.
+`Malachi.Position.compare/2` orders two tokens of one topic and issuer and answers `:incomparable` for
+any other pair; nothing subtracts one from another. The interface therefore treats a cursor as an
+opaque identity: copy it, paste it, compare it, seek to it, and show what is around it.
 
 ### 3.5 Consumer group
 
@@ -239,9 +243,9 @@ Assignment is by range, via rendezvous hashing with replication factor 1
 (`assignment.ex:28-41`). Generation increments only when the computed assignment actually changed.
 
 **Lag cannot be computed.** No function anywhere subtracts a committed position from a range end.
-The committed position is a `{source_index, source_offset}` pair against a sources list whose shape
-changes on every split, and the range's end offset lives in `Malachi.Broker.offsets`, read by the
-private `next_offset/2`. Section 6.5 specifies what the interface shows instead.
+The committed position is stored as a `{source_index, source_offset}` pair (and handed to clients as a
+token) against a sources list whose shape changes on every split, and the range's end offset lives in
+`Malachi.Broker.offsets`, read by the private `next_offset/2`. Section 6.5 specifies what the interface shows instead.
 
 ### 3.6 Cluster, ring and control plane
 
@@ -714,7 +718,8 @@ globals allow list, and no per record VM reset**, so state one record's script s
 next. Any Malachi equivalent declares its resource limits explicitly and resets between records, or
 it uses a language that cannot carry state at all, which is what Kafbat UI chose with CEL.
 
-GAP: all of it. There is no read by cursor on the wire and no HTTP route. This is the single largest
+GAP: all of it. The wire reads one range from a cursor (`fetch_range`, 31), but nothing filters or
+searches records, and there is no HTTP route. This is the single largest
 feature gap between Malachi and every product studied.
 
 ### 6.8 Cluster

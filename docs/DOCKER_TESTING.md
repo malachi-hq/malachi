@@ -54,8 +54,8 @@ make docker-regression-test
 | 3.5 | Static assets shipped in the image | `scripts/docker-static-assets-check.sh` (see below) |
 | 4 | TCP server listening | port 4040 open |
 | 5 | Container process health | `bin/malachi pid` |
-| 6 | Log produce/fetch workflow | `create_topic`, `produce_records`, then `fetch` by opaque cursor |
-| 7 | Consumer-group resume | `fetch_group`, `commit`, resume returns empty (at-least-once) |
+| 6 | Log produce/read workflow | over the wire with `Malachi.Loadtest.Client`: `create_topic`, a produce on a producer stream, then a read of every range |
+| 7 | Consumer-group resume | `join`, a read from the group's checkpoint, `commit`, and a second read from it returns empty (at-least-once) |
 | 8 | High-volume throughput | 1000 records in one produce |
 | 9 | Memory stability under load | 5000 records, memory before/after |
 | 10 | Concurrent multi-topic | 10 topics, 100 records each, all drained back |

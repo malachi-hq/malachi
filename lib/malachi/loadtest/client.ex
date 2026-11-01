@@ -60,7 +60,10 @@ defmodule Malachi.Loadtest.Client do
   @spec close(t()) :: :ok
   def close(%__MODULE__{conn: conn}), do: Conn.close(conn)
 
-  @doc "Creates `topic` with `keyspace_bits` bits of keyspace: `:ok`, or the refusal (`\"already_exists\"`)."
+  @doc """
+  Creates `topic` (`create_topic`): `:ok`, or the refusal (`"already_exists"`). `keyspace_bits` travels in
+  the frame, but the server chooses the keyspace size and ignores it.
+  """
   @spec create_topic(t(), String.t(), pos_integer()) :: :ok | {:error, String.t()}
   def create_topic(%__MODULE__{} = client, topic, keyspace_bits) do
     client

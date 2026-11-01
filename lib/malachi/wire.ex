@@ -13,12 +13,13 @@ defmodule Malachi.Wire do
   (the on-disk frame, which includes the offset); a consume batch puts each record's position beside it
   (`Malachi.Wire.Batch`). Keys, topics and names are
   length-prefixed byte strings with a presence flag (`nil` vs empty are distinct). Pure, this module
-  only encodes/decodes binaries; the socket wiring is B1b.
+  only encodes/decodes binaries; the socket wiring is `Malachi.TCPAcceptor` and `Malachi.TCPProtocol`.
 
   `decode_frame/1` is tolerant (returns `:incomplete` for a partial frame), but the payload decoders
   (`decode_request/1`, `decode_open_stream_req/1`, …) assume a **well-formed** body and raise on a malformed
-  one. A frame body comes from an untrusted client, so B1b must decode inside a `try` and answer an error
-  (or close) on a raise: keeping the malformed-input handling at the connection boundary, not in the codec.
+  one. A frame body comes from an untrusted client, so the connection decodes inside a `try` and answers an
+  error (or closes) on a raise: keeping the malformed-input handling at the connection boundary, not in the
+  codec.
 
   ## Stability and compatibility
 
@@ -56,7 +57,9 @@ defmodule Malachi.Wire do
       still answered and any after it is refused `unknown_stream`; a gap's append was refused, while a
       repeat's names a second copy, and the original's own answer still comes), and `moved` when the segment
       seals (a roll or a failover), the range splits or merges, or the broker restarts; the appends in flight
-      when it moves are still answered after the `moved`. `close_stream` (28) ends it.
+      when it moves are still answered after the `moved`. Only the broker that leads the segment answers an
+      append: one refused `not_primary`, or `sealed` when the seal refused it after it was sent, stored
+      nothing, so a client sends it again where the routes now say. `close_stream` (28) ends it.
     * **Consume** is the mirror (`open_consume`, 29): pushes of `records` carry the offset of every record,
       and `consume_ack` (30) says what was read and can move the window. `fetch_range` (31) is the unary
       read of one range. A page holds at most `max` records and about `max_bytes` bytes, always at least

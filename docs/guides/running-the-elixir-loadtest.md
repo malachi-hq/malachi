@@ -94,14 +94,19 @@ mix malachi.loadtest --scenario produce --connections 64 --batch 100 --payload j
 
 ## Pipelining
 
-`--pipeline` sets how many produce requests a connection keeps in flight. The default of 1 is a
-closed loop: send, wait, send. Raising it measures the server with the round trip taken out of the
-picture, which is the difference between measuring the broker and measuring the network between you
-and it.
+`--pipeline` sets how many appends each range's producer stream keeps in flight, further capped by the
+window the broker grants. The default of 1 is a closed loop: send, wait, send. Raising it measures the
+server with the round trip taken out of the picture, which is the difference between measuring the
+broker and measuring the network between you and it.
 
 ```bash
 mix malachi.loadtest --scenario produce --connections 64 --pipeline 8 --batch 100
 ```
+
+`--linger-ms` (0) and `--linger-bytes` (one batch) let a range's share of several batches go out as one
+append: a share waits until the range holds `--linger-bytes` of records or its oldest share has waited
+`--linger-ms`, and an append takes whole shares only, as many as fit. With `--linger-ms 0` a share goes
+as soon as the window has room.
 
 ## TLS and tokens
 
@@ -213,10 +218,10 @@ as the Node one does. Those three are the difference between a server that is sl
 shedding, and a throughput number taken while any of them is climbing describes the backpressure rather
 than the capacity. A dropped connection is reconnected and the run goes on; the drop is what is counted.
 
-It speaks only the stream keys: a server that does not answer `cluster_state`, or a cluster of a release
-before they were always served with its `producer_streams` flag off, fails the run before any worker
-connects, naming why (`mix malachi.flag enable producer_streams` turns that flag on). What routing did is in `moved`,
-`redirects` and `route_refreshes`.
+It speaks only the stream keys: a server that does not answer `cluster_state`, or a cluster that does not
+serve the stream keys (one of a release before they were always served, with its `producer_streams` flag
+off), fails the run before any worker connects, naming why. This release always serves them. What routing
+did is in `moved`, `redirects` and `route_refreshes`.
 
 A run that completes with `ops: 0` prints a warning naming the likely cause instead of reporting a
 silent zero.

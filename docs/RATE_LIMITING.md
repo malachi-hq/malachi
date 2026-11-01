@@ -11,9 +11,9 @@ All six actions are enforced:
 | `:auth` | client IP | the TCP auth handshake | 10 per 60s |
 | `:dashboard_auth` | client IP | dashboard `POST /login`, and dashboard tokens that do not validate | 10 per 60s |
 | `:dashboard_api` | session (a SHA-256 digest of its token) | every authenticated dashboard request, `/stream` once when it opens | 300 per 60s (`0` turns it off) |
-| `:publish` | authenticated username | the records of a `produce` frame or a stream `append` | **off** (limit `0`) |
-| `:publish_bytes` | authenticated username | the bytes of a `produce` request as received (topic and framing included; the key carries no compression), or the inflated bytes of a stream `append` | **off** (limit `0`) |
-| `:subscribe` | authenticated username | the `subscribe` frame, an `open_consume` and a `fetch_range` (one token each) | **off** (limit `0`) |
+| `:publish` | authenticated username | the records of a stream `append` | **off** (limit `0`) |
+| `:publish_bytes` | authenticated username | the inflated bytes of a stream `append` | **off** (limit `0`) |
+| `:subscribe` | authenticated username | an `open_consume` and a `fetch_range` (one token each) | **off** (limit `0`) |
 
 Read the publish and subscribe rows carefully, because four things about them are deliberate:
 
@@ -25,24 +25,25 @@ second) on a broker that measures hundreds of thousands of records a second.
 up to three times the configured limit cluster-wide. Distributed enforcement is a separate future item
 below, and nothing here should be read as a cluster-wide quota.
 
-**Records and bytes, not requests.** A produce is charged one unit of `:publish` per record and one unit
-of `:publish_bytes` per byte. A stream `append` is charged after its batch is inflated and decoded, so a
-compressed batch costs what it holds, not what it weighs on the wire. Both charges are taken together or
-not at all: an append over either quota spends neither. A subscribe costs one token.
+**Records and bytes, not requests.** A stream `append` is charged one unit of `:publish` per record and
+one unit of `:publish_bytes` per inflated byte, after its batch is inflated and decoded, so a compressed
+batch costs what it holds, not what it weighs on the wire. Both charges are taken together or not at all:
+an append over either quota spends neither. An `open_consume` or a `fetch_range` costs one token.
 
-**The attempt is charged.** A produce or append is charged before the broker takes it, and a refusal from
-the broker (`overloaded`, a sealed segment, a key outside the stream's range) does not give the charge
-back. On the paths that can fail after part of a batch was written (several ranges, a replication
-timeout) nothing could tell which records landed, so refunding some refusals and not others would let a
-user past the limit. With a publish quota set, a client retrying an `overloaded` batch spends the batch
-again; back off long enough for the quota's window to have room.
+**The attempt is charged.** An append is charged before the broker takes it, and a refusal from the
+broker (`overloaded`, `not_primary`, a sealed segment, a key outside the stream's range) does not give the
+charge back. On a path that can fail after the batch was written (a replication timeout) nothing could
+tell whether the records landed, so refunding some refusals and not others would let a user past the
+limit. With a publish quota set, a client retrying an `overloaded` batch, or sending a `not_primary` or
+`sealed` one again where the routes say, spends the batch again; back off long enough for the quota's
+window to have room.
 
 Two things are explicitly **out of scope** for these limits, so that the one that is implemented has a
 single, documented meaning: keying by **IP** (the network-level control is the auth limit plus
 `ConnectionLimiter`) and keying by **topic** (listed as future work). What a consumer reads is not charged
-by records or bytes, and `fetch` is not rate limited: a push stream's credit window bounds a consumer far
-better than a request count would, so opening a consume stream or fetching a range spends one subscribe
-token and the rest is credit.
+by records or bytes: a push stream's credit window bounds a consumer far better than a record count
+would, so opening a consume stream or fetching a range spends one subscribe token and the rest is
+credit.
 
 ### What a client sees
 
@@ -53,11 +54,11 @@ different client behaviour:
 | reason | means | client should |
 |---|---|---|
 | `rate_limited` | this user is over its configured quota | back off until the window rolls over |
-| `quota_too_small` | this one produce or append costs more records or bytes than a whole window of the quota | send smaller batches; retrying the same one never succeeds |
+| `quota_too_small` | this one append costs more records or bytes than a whole window of the quota | send smaller batches; retrying the same one never succeeds |
 | `overloaded` | the broker is saturated right now | back off briefly and retry (with a publish quota set, the retry is charged again) |
 
-A `produce` frame gets these as its error frame. A stream `append` gets them in its `append_ack`, as the
-error at its sequence, and the stream goes on.
+A stream `append` gets them in its `append_ack`, as the error at its sequence, and the stream goes on. An
+`open_consume` or a `fetch_range` over the subscribe quota gets `rate_limited` as its error frame.
 
 The response carries the reason only. `retry_after_ms` is computed server-side (it drives the metrics and
 logs) but is not on the wire: the error frame's payload is a bare reason string and `Malachi.Wire` freezes
@@ -289,9 +290,9 @@ different things to a client:
 | reason | when | what the client should do |
 |---|---|---|
 | `rate_limit_exceeded` | the auth handshake, per IP | stop reconnecting; the connection was never established |
-| `rate_limited` | a `produce`, stream `append`, `subscribe`, `open_consume` or `fetch_range`, per authenticated user | back off until the window rolls over |
-| `quota_too_small` | a `produce` or stream `append` bigger than a whole window of a publish quota | send smaller batches |
-| `overloaded` | a `produce`, when the broker is saturated | back off briefly and retry |
+| `rate_limited` | a stream `append`, an `open_consume` or a `fetch_range`, per authenticated user | back off until the window rolls over |
+| `quota_too_small` | a stream `append` bigger than a whole window of a publish quota | send smaller batches |
+| `overloaded` | a stream `append`, when the broker is saturated | back off briefly and retry |
 
 A connection cap answers `connection_limit_exceeded` (the per-IP cap) or `global_limit_exceeded` (the total
 cap), sent just before the socket is closed.
@@ -326,9 +327,10 @@ again.
    `:dashboard_api` budget and never the address's; one that does not validate spends the address's
    `:dashboard_auth` budget **before** it is validated, so the expiry and hijack audit events that
    validation writes are capped by the login budget
-4. **Publish/Subscribe** → RateLimiter checks the `:publish` / `:subscribe` limit by authenticated
-   username, after the permission check, on the `produce` and `subscribe` frames. Skipped entirely when
-   the action is unconfigured, which is the default
+4. **Publish/Subscribe** → RateLimiter charges the `:publish` and `:publish_bytes` quotas by authenticated
+   username on a stream `append`, after the permission check, once its batch is inflated and decoded, and
+   checks the `:subscribe` limit on an `open_consume` and a `fetch_range`, after the permission and routes
+   checks. Skipped entirely when the action is unconfigured, which is the default
 5. **Metrics** → Blocked counters incremented for every action that blocked
 6. **Cleanup** → Process death triggers automatic connection decrement
 
@@ -603,13 +605,15 @@ Key metrics to monitor:
 
 Shipped:
 
-- [x] Enforce the configured publish/subscribe rate limits (per-user quotas on produce/subscribe)
+- [x] Enforce the configured publish/subscribe rate limits (per-user quotas on appends, consume opens and
+  range fetches)
 - [x] Publish quotas counted in records and inflated bytes
 
 Potential improvements (not currently implemented):
 
 - [ ] Carry `retry_after_ms` on the wire (needs a new `api_key`; see "What a client sees")
-- [ ] Rate limit `fetch` (today only streaming credit bounds a consumer)
+- [ ] Charge reads by records or bytes (today a read spends one token, and a consume stream's credit
+  bounds the rest)
 - [ ] Persistent ban list (Redis/ETS backed)
 - [ ] Adaptive limits based on system load
 - [ ] Whitelist/blacklist IP ranges

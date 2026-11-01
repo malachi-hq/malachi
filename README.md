@@ -5,9 +5,9 @@
 # Malachi
 
 An open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-storage architecture, a CP
-(consistent, partition-tolerant), horizontally-scalable **log broker**. Clients speak topics, keys, and
-**opaque cursors**: never partitions or offsets - so the broker can split, merge, and restripe its
-storage underneath without breaking clients. Replicated by quorum (Raft via `ra`), with SWIM membership,
+(consistent, partition-tolerant), horizontally-scalable **log broker**. Clients speak topics, keys, and positions in a range's history,
+never a fixed partition count, so the broker can split, merge, and restripe its storage underneath
+without breaking clients. Replicated by quorum (Raft via `ra`), with SWIM membership,
 self-healing, and rack-aware placement.
 
 > [!WARNING]
@@ -53,11 +53,14 @@ A client deals in three things and nothing else:
 
 - **topic**: a named, ordered, replicated log.
 - **key**: on produce, routes each record to a range of the topic's keyspace (ordering is per key).
-- **opaque cursor**: on consume, a position token the client echoes back. It is deliberately opaque:
-  internally it encodes per-range positions, but the client never sees partitions or offsets, so the
-  broker can split/merge/restripe ranges underneath without breaking the client. After a split, a consumer
-  reads its share of the parent's records again from the new ranges (at least once, never lost). This is
-  the core difference from Kafka, which leaks partitions and offsets to the client.
+- **position**: on consume, each page of a range says where the next one starts as an **opaque token**,
+  and a consumer group checkpoints those tokens per range. A client compares two tokens and hands one back
+  to resume, and never computes one (`Malachi.Position`). Inside, a token names an offset in the range's
+  **history** (its ancestors oldest first, then the range itself). A split only extends a history, so a
+  token read in a parent is taken by its children and names the same record there, and the broker can
+  split/merge/restripe ranges underneath without breaking the client. After a split, a consumer reads its
+  share of the parent's records again from the new ranges (at least once, never lost). This is the core
+  difference from Kafka, whose client-visible partition count is fixed into every key's placement.
 
 Under the hood a topic is a set of **ranges** (slices of the keyspace that an operator splits and merges),
 each a series of **segments** replicated by quorum across nodes. See
@@ -74,26 +77,34 @@ mix deps.get
 iex -S mix        # starts the broker: TCP on 4040, dashboard on 4041
 ```
 
-The quickest way to see the model is the in-process log API in that `iex` session:
+The quickest way to see the model is a client in that `iex` session. `Malachi.Loadtest.Client` speaks the
+wire protocol as any client does: it reads the cluster state and the topic's routes, and writes and reads
+each range at the broker that leads it. The `app` user is seeded in development only:
 
 ```elixir
-alias Malachi.LogApi
-broker = Malachi.LogBroker
+alias Malachi.Loadtest.Client
+alias Malachi.Log.Record
 
-LogApi.create_topic(broker, "events")
+{:ok, client} =
+  Client.connect(host: "127.0.0.1", port: Malachi.TCPAcceptorPool.port(), user: "app", pass: "app123")
 
-# produce by key: no partitions, no offsets exposed
-LogApi.produce(broker, "events", [
-  %{"key" => "user-1", "value" => "hello"},
-  %{"key" => "user-2", "value" => "world"}
-])
+# the keyspace size is the server's to choose: it ignores the 8 asked for here
+:ok = Client.create_topic(client, "events", 8)
 
-# consume from the start: get back records + an opaque cursor to resume from
-{:ok, records, cursor} = LogApi.fetch(broker, "events", :start, 100)
-Enum.map(records, & &1.value)        #=> ["hello", "world"]
+# produce by key: no partitions, the key picks the range
+{:ok, 2} =
+  Client.produce(client, "events", [Record.new("hello", key: "user-1"), Record.new("world", key: "user-2")], 5_000)
 
-# resume by passing the cursor back, nothing new yet
-{:ok, [], _cursor} = LogApi.fetch(broker, "events", cursor, 100)
+# consume from the start of every range: the values, and where each range's next page starts
+{:ok, %{values: values}} = Client.read(client, "events")
+values        #=> ["hello", "world"]
+
+# a consumer group checkpoints those positions on the server, so a reader resumes where it left off
+{:ok, %{generation: generation, ranges: ranges}} = Client.join(client, "events", "readers", "m1")
+{:ok, %{positions: positions}} = Client.read(client, "events", start_from: {:committed, "readers"}, ranges: ranges)
+:ok = Client.commit(client, "events", "readers", "m1", generation, positions)
+{:ok, %{values: []}} = Client.read(client, "events", start_from: {:committed, "readers"}, ranges: ranges)
+:ok = Client.leave(client, "events", "readers", "m1")
 ```
 
 A single node runs its control plane in `ra`, the same Raft-backed metadata a cluster uses, as a cluster of
@@ -141,6 +152,7 @@ docker run \
   -p 127.0.0.1:4041:4041 \
   -e MALACHI_ADMIN_PASS=your_secure_password \
   -e MALACHI_REQUIRE_TLS=false \
+  -e MALACHI_ADVERTISED_HOST=127.0.0.1 \
   hectorcardoso/malachi:latest
 ```
 
@@ -148,6 +160,9 @@ The image runs the production release, which requires TLS unless told otherwise,
 `MALACHI_REQUIRE_TLS=false` the container exits at boot with `TLS certificate file not configured`.
 It is then serving plaintext, which is why the ports are bound to `127.0.0.1` rather than published
 on every interface. To serve real traffic, configure TLS instead of widening the binding.
+`MALACHI_ADVERTISED_HOST` is the address the node tells clients to reach it at, in the routes they read
+before every write and read; left unset, a single node advertises its node name's host, the container's
+hostname, which a client on your machine cannot resolve.
 
 ### Using Docker Compose
 
@@ -785,33 +800,70 @@ Response:  <<correlation_id::32, error_code::16, payload>>   # error_code 0 = ok
 `correlation_id` lets a client pipeline (match each response to its request). `api_key` selects the
 operation:
 
-| api_key | operation      | notes                                                          |
-|--------:|----------------|----------------------------------------------------------------|
-| 0       | `auth`         | **required first frame**; `username`/`password` → session token |
-| 1       | `create_topic` | topic name + keyspace bits                                      |
-| 7       | `leave_group`  | remove a member from its group (fast rebalance on clean shutdown) |
+| api_key | operation               | notes                                                                       |
+|--------:|-------------------------|-----------------------------------------------------------------------------|
+| 0       | `auth`                  | **a required first frame**: `username`/`password` → session token           |
+| 1       | `create_topic`          | topic name + keyspace bits (the server ignores the bits and picks the size) |
+| 2 to 6  | retired                 | the legacy data keys, answered `unknown_api_key`; never reused              |
+| 7       | `leave_group`           | remove a member from its group (fast rebalance on clean shutdown)           |
+| 8       | `create_user`           | admin                                                                       |
+| 9       | `delete_user`           | admin                                                                       |
+| 10      | `change_password`       | admin                                                                       |
+| 11      | `list_users`            | admin                                                                       |
+| 12      | `mtls_auth`             | first frame, authenticates from the verified client certificate             |
+| 13      | `token_auth`            | first frame, authenticates with a signed JWT (OIDC)                         |
+| 14      | `grant_acl`             | admin, per-topic ACLs                                                       |
+| 15      | `revoke_acl`            | admin                                                                       |
+| 16      | `list_acls`             | admin                                                                       |
+| 17      | `define_policy`         | admin, storage policies                                                     |
+| 18      | `delete_policy`         | admin                                                                       |
+| 19      | `list_policies`         | admin                                                                       |
+| 20      | `bind_topic_policy`     | admin                                                                       |
+| 21      | `get_topic_policy`      | admin                                                                       |
+| 22      | `set_role`              | admin, console roles                                                        |
+| 23      | `list_users_with_roles` | admin                                                                       |
+| 24      | `cluster_state`         | every broker with its status and advertised address, and the vnodes         |
+| 25      | `topic_routes`          | a topic's ranges, each with its active segment and primary                  |
+| 26      | `open_stream`           | a producer stream on one range, with a window the broker grants             |
+| 27      | `append`                | one sequenced batch on a producer stream; answered by `append_ack` pushes   |
+| 28      | `close_stream`          | ends a producer or consume stream                                           |
+| 29      | `open_consume`          | a consume stream on one range, with a credit window in records              |
+| 30      | `consume_ack`           | the raw position a consume stream read up to; returns credit                |
+| 31      | `fetch_range`           | one page of one range, waiting up to `wait_ms` for records                  |
+| 32      | `join_group`            | a member's ranges, generation and session                                   |
+| 33      | `group_heartbeat`       | keeps a member alive within its session, reports a rebalance                |
+| 34      | `commit_offsets`        | checkpoints a member's position token in each of its ranges                 |
+
+The server pushes three kinds of frame on an open stream, in the response envelope with the correlation id
+of the request that opened it: `append_ack`, `moved` and `records`.
 
 The admin api_keys (users 8 to 11, per-topic ACLs 14 to 16, storage policies 17 to 21, console roles 22
 and 23) require the `:admin` permission; see the [per-topic ACLs](docs/guides/per-topic-acls.md) and
 [per-topic retention](docs/guides/per-topic-retention.md) guides.
 
-Keys 24 to 34 are the NorthGuard data path being built in #275: routing (`cluster_state`, `topic_routes`),
+Keys 24 to 34 are the NorthGuard data path, the only keys that write and read records: routing (`cluster_state`, `topic_routes`),
 producer streams with a broker-defined window (`open_stream`, `append`, `close_stream`), per-range consume
 streams that carry each record's offset (`open_consume`, `consume_ack`, `fetch_range`), and group
 membership beside the data path (`join_group`, `group_heartbeat`, `commit_offsets`), with records in
-batches that may be zstd compressed (`Malachi.Wire`, `Malachi.Wire.Batch`, `scripts/lib/wire.js`). Any
+batches (`Malachi.Wire`, `Malachi.Wire.Batch`, `scripts/lib/wire.js`). An append's batch is zstd compressed
+or not (codec `none`), and the server refuses one whose records inflate past
+`MALACHI_MAX_INFLATED_BATCH_BYTES` (16 MiB by default); the pages it serves go out with codec `none`. Any
 authenticated session gets `cluster_state`: every broker with its status and the address it advertises
-(`MALACHI_ADVERTISED_HOST`), the vnodes, and that the stream keys are served (a node of a release before
-they always were says whether its `producer_streams` cluster flag is on). `topic_routes` answers anyone holding `:produce` or
+(`MALACHI_ADVERTISED_HOST`), the vnodes, and that the stream keys are served (always, on this release; a node of a release before
+it says whether its `producer_streams` cluster flag is on). `topic_routes` answers anyone holding `:produce` or
 `:consume` on the topic; `open_stream`, `append` and `close_stream` serve producer streams to anyone holding
 `:produce` on it, opened on the node that leads the range's active segment (another node answers `moved`,
-and routes that differ from the vnode's `stale_routes`), with a window the broker grants and adjusts on
-every ack and a `moved` push when the segment seals, fails over or the range splits. `open_consume`,
+and routes that differ from the vnode's `stale_routes`), with a window in appends and inflated bytes that
+the broker grants at the handshake (capped by `MALACHI_STREAM_MAX_WINDOW_APPENDS` and
+`MALACHI_STREAM_MAX_WINDOW_BYTES`) and adjusts on every ack, and a `moved` push when the segment seals,
+fails over or the range splits. Only the segment's leader answers an append: one refused `not_primary` or
+`sealed` stored nothing, and a client sends it again where the routes now say, as both load generators
+do. `open_consume`,
 `consume_ack` and `fetch_range` serve a range's records to anyone holding `:consume` on the topic, from
 the same node: a consume stream pushes pages of records a replication quorum acknowledged (those written
 through this node's producer streams as their appends are acknowledged, those another node wrote once their
 segment seals; after the node restarts, an active segment's records once the next append there is
-acknowledged or it seals, while a cursor read before the restart is still taken and waits), each with its position in the range's history (ancestors first), within a credit window in records that `consume_ack`
+acknowledged or it seals, while a position read before the restart is still taken and waits), each with its position in the range's history (ancestors first), within a credit window in records that `consume_ack`
 returns, and gets `moved` when the range splits or merges or its next segment opens on another node; `fetch_range` answers one page, waiting up to
 `wait_ms` for records. One connection can hold producer and consume streams at once. `join_group`,
 `group_heartbeat` and `commit_offsets` answer anyone holding `:consume` on the topic, from the topic's group
@@ -829,25 +881,16 @@ on their next heartbeat. A connection's commits land in the order it sent them. 
 plane at machine version 8 and answer `unsupported` below it. `leave_group` (7) takes a member out;
 closing a consume stream does not.
 
-Records on the served keys carry **no offset**: position travels only in the opaque cursor. The stream
-frames (keys 24 to 34) carry each record's position beside it, `{source_index, offset}` in its range's
-history (see `Malachi.Wire`). Permissions (`:produce`/`:consume`) are enforced per operation against the
-authenticated session.
-
-A `fetch` with a **consumer-group member id** is server-scoped: the coordinator assigns each member of a
-group a share of the topic's ranges, so members consume in **parallel** and disjointly. The client still
-only sees records + an opaque cursor: its share of ranges stays on the server - and the member stays alive by
-fetching (or explicitly `leave_group`s on shutdown).
-
-Streaming (`subscribe`/`stream_ack`) is the NorthGuard-style sessionized push: after subscribing, the
-server pushes records up to the credit window; the client acks to durably advance the group's position
-(at-least-once) and return credit, so a slow consumer applies backpressure instead of overflowing.
-A `subscribe` with a **member id** scopes the push stream to that member's ranges (parallel, disjoint,
-still opaque); the member ack doubles as a coordinator heartbeat, so an idle member sends a periodic
-empty ack to stay alive (and `leave_group`s on shutdown for a fast rebalance). A member's coordination
-is owned by one node (the leader of the topic's vnode); during a leadership failover a member request may
-briefly get `not_owner`, which is transient: the reference client backs off and retries (the server
-re-resolves the new leader).
+Every record on the stream keys travels with its raw position, `{source_index, offset}` in its range's
+history, and every page with an opaque token for where the next one starts: `consume_ack` takes the raw
+position, while the start of a read and `commit_offsets` take a token, which a broker refuses
+`invalid_position` when it is not one it minted for that range or for an ancestor whose keys hold the
+range's (see `Malachi.Wire` and `Malachi.Position`). Permissions (`:produce`/`:consume`) are enforced per operation against the
+authenticated session. A group member reads its ranges on `fetch_range` or on consume streams, which carry
+no group: it stays alive by `group_heartbeat` within its session, not by reading, and a consume stream
+that closes or drops leaves it in the group. A member's coordination is owned by one node (the leader of
+the topic's vnode); during a leadership failover a member request may briefly get `not_owner`, which is
+transient: the reference client backs off and retries (the server re-resolves the new leader).
 
 ### Reference client (Node.js)
 
@@ -1058,7 +1101,7 @@ Malachi ports LinkedIn's NorthGuard log-storage design to Elixir/OTP:
 - **Control plane**: topic/range/segment metadata as a deterministic state machine, replicated per vnode by Raft (`ra`) and sharded across vnodes by topic.
 - **Data plane**: a `Log` of `segments` per range, replicated by quorum across nodes; placement is HRW/rendezvous and rack-aware.
 - **Membership**: SWIM (gossip with suspicion) for failure detection; self-healing re-replicates segments and promotes primaries on node loss.
-- **Client**: a compact binary protocol over TCP; topics, keys, and opaque cursors (never partitions or offsets).
+- **Client**: a compact binary protocol over TCP; a routing client reads the cluster state and the topic's routes, then writes and reads each range at the broker that leads it.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 

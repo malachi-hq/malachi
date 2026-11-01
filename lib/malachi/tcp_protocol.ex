@@ -225,9 +225,10 @@ defmodule Malachi.TCPProtocol do
   # under `:publish_bytes`), both or neither. A cost bigger than a whole window of its quota can never be
   # admitted, so it is refused as `quota_too_small` rather than as a `rate_limited` the client would retry
   # forever. The quota charges the attempt: a produce the broker then refuses (overloaded, sealed, a key
-  # outside its range) has spent its records and bytes all the same, since on the paths that can fail
-  # after a partial write no refund could tell what landed. Unconfigured quotas, the default, cost five
-  # config reads (each quota's limit and window, and whether limiting is on) and touch no table.
+  # outside its range) has spent its records and bytes all the same, since on a path that can fail after
+  # the batch was written (a replication timeout) no refund could tell whether it landed. Unconfigured
+  # quotas, the default, cost five config reads (each quota's limit and window, and whether limiting is
+  # on) and touch no table.
   defp charge_publish(session, records, bytes) do
     charges = [
       {:publish, RateLimiter.action_config(:publish), records},

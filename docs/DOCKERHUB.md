@@ -3,9 +3,10 @@
 **An open-source, 100% Elixir reimplementation of LinkedIn's NorthGuard log-storage architecture: a
 CP, horizontally scalable log broker.**
 
-Clients speak topics, keys and opaque cursors, never partitions or offsets. That indirection is the
-point: the broker can split a topic's storage and restripe it across nodes underneath a running
-client without breaking it, because the client never held a coordinate that could go stale. The
+Clients speak topics, keys and positions in a range's history, never a fixed partition count. That is
+the point: the broker can split a topic's storage and restripe it across nodes underneath a running
+client without breaking it, because a split only extends a range's history and a position read before
+it names the same record after it. The
 control plane is replicated by quorum (Raft, via `ra`).
 
 [Documentation](https://hectorifc.github.io/malachi/) &middot;
@@ -25,6 +26,7 @@ docker run -d --name malachi \
   -p 127.0.0.1:4040:4040 -p 127.0.0.1:4041:4041 \
   -e MALACHI_ADMIN_PASS="a-long-local-only-password" \
   -e MALACHI_REQUIRE_TLS=false \
+  -e MALACHI_ADVERTISED_HOST=127.0.0.1 \
   hectorcardoso/malachi:latest
 ```
 
@@ -45,6 +47,11 @@ would hand a plaintext broker to anyone who can route to your host. The loopback
 this a local example. Do not delete it to reach the container from another machine; make the
 deployment a real one instead.
 
+`MALACHI_ADVERTISED_HOST` is the address the node tells clients to connect to: a client reads the
+cluster's routes first and then writes and reads at the address each broker advertises. Left unset, a
+single node advertises its node name's host, the container's hostname, which a client on your machine
+cannot resolve.
+
 ### Running it for real
 
 Drop `MALACHI_REQUIRE_TLS=false`, mount certificates, and point at their **container** paths. Host
@@ -57,6 +64,7 @@ docker run -d --name malachi \
   -v /etc/malachi/certs:/certs:ro \
   -e MALACHI_TLS_CERTFILE=/certs/server.pem \
   -e MALACHI_TLS_KEYFILE=/certs/server-key.pem \
+  -e MALACHI_ADVERTISED_HOST=broker.example.com \
   -e MALACHI_ADMIN_PASS="$(openssl rand -base64 32)" \
   hectorcardoso/malachi:latest
 ```
@@ -101,6 +109,7 @@ docker run -d --name malachi \
   -e MALACHI_RA_DATA_DIR=/app/data/ra \
   -e MALACHI_ADMIN_PASS="a-long-local-only-password" \
   -e MALACHI_REQUIRE_TLS=false \
+  -e MALACHI_ADVERTISED_HOST=127.0.0.1 \
   hectorcardoso/malachi:latest
 ```
 
