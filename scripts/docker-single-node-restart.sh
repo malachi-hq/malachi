@@ -96,7 +96,10 @@ CONNECT="alias Malachi.Loadtest.Client
 
 wait_up() {
   for _ in $(seq 1 60); do
-    if rpc "IO.puts(is_pid(Process.whereis($BROKER)))" 2>/dev/null | grep -cF -- true >/dev/null; then return 0; fi
+    # up means taking connections: the broker runs AND the listener has registered its port, which it does
+    # after the broker starts (a nil port makes every connect raise badarg rather than return an error)
+    if rpc "IO.puts(is_pid(Process.whereis($BROKER)) and is_integer(Malachi.TCPAcceptorPool.port()))" 2>/dev/null |
+      grep -cF -- true >/dev/null; then return 0; fi
     if [ "$(docker inspect -f '{{.State.Running}}' "$NAME")" != "true" ]; then fail "the node stopped while booting"; fi
     sleep 1
   done
