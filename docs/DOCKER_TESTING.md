@@ -189,7 +189,7 @@ Expected startup logs (locale `en_US`):
 ### Exercise the log broker
 
 The client protocol is binary, so do not hand-write frames. Either use the reference Node client in
-[`scripts/`](https://github.com/HectorIFC/malachi/tree/main/scripts) (`producer.js`, `consumer.js`), or
+[`scripts/`](https://github.com/malachi-hq/malachi/tree/main/scripts) (`producer.js`, `consumer.js`), or
 drive `Malachi.Loadtest.Client` through `bin/malachi rpc`, which is what the regression script does. It
 is a client of the stream and group keys over the wire, connected here to the node's own listener as
 admin; it speaks plain TCP, hence `MALACHI_REQUIRE_TLS=false` above:
@@ -262,5 +262,5 @@ For multi-architecture builds, see [Multi-arch builds](MULTI_ARCH_BUILD.md).
 
 ## Support
 
-- GitHub Issues: https://github.com/HectorIFC/malachi/issues
-- Documentation: https://hectorifc.github.io/malachi
+- GitHub Issues: https://github.com/malachi-hq/malachi/issues
+- Documentation: https://malachi-hq.github.io/malachi

@@ -213,7 +213,7 @@ them are covered by the guarantee:
   refused after it was sent is answered `sealed` with nothing of it stored, so the client reads the
   routes again and sends it to the child that holds its key. The head is found in the **control plane**, not in the
   splitting node's own cache, so the fence does not depend on that node having produced to the range and
-  an operator can split from any node ([#41](https://github.com/HectorIFC/malachi/issues/41)).
+  an operator can split from any node ([#41](https://github.com/malachi-hq/malachi/issues/41)).
 
   What the fence does **not** claim. It closes the segment's **primary**, which is enough because an
   append is only accepted by the head of the replica set, and once the segment is sealed no failover can

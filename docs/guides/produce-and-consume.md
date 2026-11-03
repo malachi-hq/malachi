@@ -223,9 +223,9 @@ All of these are transient and mean retry, not fail:
 The bundled clients handle all of them, the Node scripts and the Elixir ones in `Malachi.Loadtest` alike.
 A read or an open refused with `moved`, `stale_routes`, `:migrating` or `:not_owner` reads the topic's
 routes again and goes to the broker they name
-([`scripts/lib/links.js`](https://github.com/HectorIFC/malachi/blob/main/scripts/lib/links.js)); a group
+([`scripts/lib/links.js`](https://github.com/malachi-hq/malachi/blob/main/scripts/lib/links.js)); a group
 member asks a moving coordinator again after a back-off
-([`scripts/lib/group_member.js`](https://github.com/HectorIFC/malachi/blob/main/scripts/lib/group_member.js));
+([`scripts/lib/group_member.js`](https://github.com/malachi-hq/malachi/blob/main/scripts/lib/group_member.js));
 and `consumer.js` waits out `:metadata_unavailable`, or a broker that takes no connection, on its group join
 as on its reads: for as long as it takes with `--follow`; without it, until ten seconds have passed since it
 first found no broker, waiting then for the attempt still on its way (which may try several brokers in turn,
