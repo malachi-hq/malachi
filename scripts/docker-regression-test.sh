@@ -187,18 +187,25 @@ fi
 
 # Test 8: Memory stability under load
 echo -n "Testing: Memory stability under load... "
+# The load runs inside the if: under set -e, a failing rpc on its own would end the script with no FAIL and
+# no summary.
 INITIAL_MEM=$(docker stats --no-stream --format "{{.MemUsage}}" "$CONTAINER_NAME" | cut -d'/' -f1)
-client_rpc 60 '
+if MEM_RESULT=$(client_rpc 60 '
   topic = "mem_topic"
   _ = Client.create_topic(client, topic, 8)
   records = for i <- 1..5000, do: Record.new("msg_#{i}", key: "k#{rem(i, 8)}")
   {:ok, _count} = Client.produce(client, topic, records, 30_000)
   :ok
-' > /dev/null 2>&1
-sleep 2
-FINAL_MEM=$(docker stats --no-stream --format "{{.MemUsage}}" "$CONTAINER_NAME" | cut -d'/' -f1)
-echo -e "${GREEN}PASS${NC} (${INITIAL_MEM} → ${FINAL_MEM})"
-TESTS_PASSED=$((TESTS_PASSED + 1))
+' 2>&1); then
+    sleep 2
+    FINAL_MEM=$(docker stats --no-stream --format "{{.MemUsage}}" "$CONTAINER_NAME" | cut -d'/' -f1)
+    echo -e "${GREEN}PASS${NC} (${INITIAL_MEM} → ${FINAL_MEM})"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    echo -e "${RED}FAIL${NC}"
+    echo "$MEM_RESULT"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
 
 # Test 9: Concurrent multi-topic operations
 echo -n "Testing: Concurrent multi-topic operations... "
