@@ -5,6 +5,9 @@ on:
     # `edited` so the title/description checks re-run when the PR body or title is updated, not only on a push.
     types: [opened, synchronize, reopened, ready_for_review, edited]
 
+permissions:
+  contents: read
+
 jobs:
   pr-validation:
     name: PR Validation

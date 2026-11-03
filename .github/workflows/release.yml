@@ -7,14 +7,15 @@ on:
       - main
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
   # First, verify that CI passed
   verify-ci:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+    permissions:
+      checks: read
     
     steps:
       - name: 🛡️ Harden the runner

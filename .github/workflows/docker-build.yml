@@ -15,6 +15,9 @@ env:
   DOCKER_USERNAME: hectorcardoso
   IMAGE_NAME: malachi
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest

@@ -12,8 +12,6 @@ on:
 
 permissions:
   contents: read
-  security-events: write
-  pull-requests: write
 
 jobs:
   sobelow:
@@ -136,6 +134,9 @@ jobs:
   trivy-scan:
     name: Trivy Security Scanner
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: 🛡️ Harden the runner
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
@@ -169,6 +170,9 @@ jobs:
   docker-scan:
     name: Docker Image Security Scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     # Pull requests as well as pushes to main, for two reasons. The obvious one is that a scan which
     # only runs after the merge cannot stop anything: a vulnerable base image reaches main first and
     # is reported second. The subtler one is that this job's SARIF upload registers a code-scanning
