@@ -64,7 +64,8 @@ PRODUCER_PASS="regression_producer_$(date +%s)"
 CONSUMER_PASS="regression_consumer_$(date +%s)"
 APP_PASS="regression_app_$(date +%s)"
 
-# Start container
+# Start container. Every check below is a client of its own that authenticates over the wire, more than
+# the default auth limit of 10 a minute from one address takes, so the limit is raised for this container.
 echo "Starting container: $IMAGE_NAME"
 docker run -d --name "$CONTAINER_NAME" \
     -p ${TCP_PORT}:4040 \
@@ -75,6 +76,7 @@ docker run -d --name "$CONTAINER_NAME" \
     -e MALACHI_APP_PASS="$APP_PASS" \
     -e MALACHI_REQUIRE_TLS=false \
     -e MALACHI_ENABLE_TLS=false \
+    -e MALACHI_AUTH_RATE_LIMIT=1000 \
     "$IMAGE_NAME" > /dev/null
 
 # Wait for startup
