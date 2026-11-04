@@ -61,3 +61,19 @@ updates:
       actions:
         patterns:
           - "*"
+
+  # Docker base images, pinned by digest in the Dockerfiles. Without this entry the digests never move on their own.
+  - package-ecosystem: "docker"
+    directories:
+      - "/"
+      - "/benchmark"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    assignees:
+      - "HectorIFC"
+    commit-message:
+      prefix: "chore(docker):"

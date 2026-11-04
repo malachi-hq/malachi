@@ -36,12 +36,12 @@ jobs:
         with:
           egress-policy: audit
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       
       - name: 🔧 Setup Elixir
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           elixir-version: ${{ matrix.elixir }}
           otp-version: ${{ matrix.otp }}
@@ -51,12 +51,12 @@ jobs:
       # tests fail rather than skip when node is missing. 22 because the payload checks compress with the
       # zstd in Node's zlib, which arrived in 22.15 (#192).
       - name: 🟢 Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 
       - name: 📦 Cache dependencies
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             deps
@@ -110,7 +110,7 @@ jobs:
         if: matrix.coverage
       
       - name: 📈 Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         if: matrix.coverage
         with:
           files: ./cover/excoveralls.json
@@ -128,12 +128,12 @@ jobs:
         with:
           egress-policy: audit
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       
       - name: 🐳 Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       
       # A fresh checkout has none of the gitignored material a developer's priv holds (dist_cert, cert,
       # plts), so without these decoys a Dockerfile that went back to copying priv as a whole would still
@@ -146,7 +146,7 @@ jobs:
           echo "decoy, must never reach the image" > priv/cert/decoy.key
 
       - name: 🔨 Build Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: .
           push: false
@@ -237,11 +237,9 @@ jobs:
 
           # Authenticate and get token
           echo "🔐 Authenticating with dashboard..."
-          LOGIN_RESPONSE=$(curl -sf -X POST http://localhost:4041/login \
+          if ! LOGIN_RESPONSE=$(curl -sf -X POST http://localhost:4041/login \
             -H "Content-Type: application/json" \
-            -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PASS\"}" 2>&1)
-
-          if [ $? -ne 0 ]; then
+            -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PASS\"}" 2>&1); then
             echo "❌ Authentication request failed!"
             echo "Response: $LOGIN_RESPONSE"
             docker logs malachi-test
@@ -250,9 +248,7 @@ jobs:
           fi
 
           # Extract token
-          TOKEN=$(echo "$LOGIN_RESPONSE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['token'])" 2>&1)
-
-          if [ $? -ne 0 ]; then
+          if ! TOKEN=$(echo "$LOGIN_RESPONSE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['token'])" 2>&1); then
             echo "❌ Failed to extract token!"
             echo "Login response: $LOGIN_RESPONSE"
             docker logs malachi-test
@@ -264,10 +260,8 @@ jobs:
 
           # Check metrics endpoint
           echo "📊 Fetching metrics..."
-          METRICS_RESPONSE=$(curl -sf http://localhost:4041/metrics \
-            -H "Authorization: Bearer $TOKEN" 2>&1)
-
-          if [ $? -ne 0 ]; then
+          if ! METRICS_RESPONSE=$(curl -sf http://localhost:4041/metrics \
+            -H "Authorization: Bearer $TOKEN" 2>&1); then
             echo "❌ Failed to fetch metrics!"
             echo "Response: $METRICS_RESPONSE"
             docker logs malachi-test
@@ -324,19 +318,19 @@ jobs:
         with:
           egress-policy: audit
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
       
       - name: 🔧 Setup Elixir
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           elixir-version: '1.19.4'
           otp-version: '28.1'
       
       - name: 📦 Cache dependencies
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             deps
@@ -375,7 +369,7 @@ jobs:
           MIX_ENV: dev
 
       - name: 📤 Upload the built documentation
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: landing-page-doc
           path: doc/
@@ -401,18 +395,18 @@ jobs:
         with:
           egress-policy: audit
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: 🔧 Setup Elixir
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           elixir-version: '1.19.4'
           otp-version: '28.1'
 
       - name: 📦 Cache dependencies
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             deps
@@ -453,13 +447,13 @@ jobs:
         with:
           egress-policy: audit
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: 🔧 Setup Elixir
         id: beam
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           elixir-version: '1.19.4'
           otp-version: '28.1'
@@ -467,7 +461,7 @@ jobs:
       # The PLTs take minutes to build and change only with the toolchain and the dependencies, so they are
       # cached on exactly those. dialyxir keeps the core PLTs under the mix home and the project PLT in _build.
       - name: 📦 Cache dependencies and PLTs
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             deps
@@ -556,17 +550,17 @@ jobs:
         with:
           egress-policy: audit
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: 🟢 Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 
       - name: 📥 Download the built documentation
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: landing-page-doc
           path: doc

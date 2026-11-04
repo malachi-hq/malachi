@@ -1,4 +1,4 @@
-FROM elixir:1.19-otp-28-alpine AS builder
+FROM elixir:1.19-otp-28-alpine@sha256:07b2cb62c04ce868a1cc7105ab4b673511a8bd18cd1c3fea68d1ba99b969be59 AS builder
 
 WORKDIR /app
 
@@ -23,7 +23,7 @@ COPY priv/static priv/static
 RUN mix compile && \
     mix release
 
-FROM alpine:3.21 AS runner
+FROM alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd AS runner
 
 ARG APP_VERSION
 

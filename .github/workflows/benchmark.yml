@@ -94,20 +94,20 @@ jobs:
         with:
           egress-policy: audit
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         # No later step does authenticated git, and this job then runs repo code (deps + the benchmark),
         # so do not leave the GitHub token in the local git config.
         with:
           persist-credentials: false
 
       - name: Set up Elixir
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           elixir-version: '1.19.4'
           otp-version: '28.1'
 
       - name: Cache dependencies
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             deps
@@ -155,7 +155,7 @@ jobs:
 
       - name: Upload the A/B measurement
         if: ${{ inputs.prealloc_ab }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: prealloc-ab-measurement-stage-${{ inputs.prealloc_ab_stage }}
           path: ${{ runner.temp }}/prealloc-ab.json
@@ -173,7 +173,7 @@ jobs:
 
       - name: Upload the blank tail measurement
         if: ${{ inputs.blank_tail_scan }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: blank-tail-scan
           path: ${{ runner.temp }}/blank-tail-scan.json
@@ -185,7 +185,7 @@ jobs:
       # the platform the answer is about; the script refuses to call a run too short to judge a pass.
       - name: Check out main as the A/B baseline
         if: ${{ inputs.store_error_path_ab }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           path: store-error-path-baseline
@@ -203,7 +203,7 @@ jobs:
 
       - name: Upload the storage error path A/B
         if: ${{ always() && inputs.store_error_path_ab }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: store-error-path-ab
           path: ${{ runner.temp }}/store-error-path-ab/report.json
@@ -227,7 +227,7 @@ jobs:
         with:
           egress-policy: audit
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         # This job runs repository code (the images and the harness) and does no authenticated git.
         with:
           persist-credentials: false
@@ -282,7 +282,7 @@ jobs:
 
       - name: Upload the cases
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: docker-cluster-durability
           path: ${{ runner.temp }}/docker-cluster/cases.jsonl
@@ -332,27 +332,27 @@ jobs:
         with:
           egress-policy: audit
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         # This job runs repository code (the suite) and does no authenticated git.
         with:
           persist-credentials: false
 
       # The same toolchain as the CI test job, which is where both occurrences were seen.
       - name: Set up Elixir
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           elixir-version: '1.19.4'
           otp-version: '28.1'
 
       # The load generator tests drive scripts/loadtest.js, as in the CI test job, on the same Node 22.
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 
       # Restore only: a dozen runners saving the same key would race each other for nothing.
       - name: Restore dependencies
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             deps
@@ -387,7 +387,7 @@ jobs:
       # always(): the failing iterations' logs, with their forensic reports, are the whole point.
       - name: Upload the hunt
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: quota-flake-hunt-${{ matrix.runner }}
           path: ${{ runner.temp }}/quota-flake-hunt
@@ -410,19 +410,19 @@ jobs:
         with:
           egress-policy: audit
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Check out main as the A/B baseline
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           path: rate-limit-baseline
           persist-credentials: false
 
       - name: Set up Elixir
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           elixir-version: '1.19.4'
           otp-version: '28.1'
@@ -439,7 +439,7 @@ jobs:
 
       - name: Upload the publish quota check A/B
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: rate-limit-ab
           path: ${{ runner.temp }}/rate-limit-ab
