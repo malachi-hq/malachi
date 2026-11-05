@@ -20,6 +20,9 @@ services:
       ERL_FLAGS: "${SRV_ERL_FLAGS:-+S 4:4}"
       MALACHI_TCP_PORT: "4040"
       MALACHI_DASHBOARD_PORT: "4041"
+      # The address clients are routed to: the generators run in their own containers and dial what the
+      # node advertises, which without a node name would be a host only this container reaches.
+      MALACHI_ADVERTISED_HOST: "malachi"
       MALACHI_GROUP_COMMIT: "true"
       # A single node runs a one-member control plane cluster, whose default replication factor (3) turns
       # broker group commit off; 1 keeps this harness's regime (#273).
