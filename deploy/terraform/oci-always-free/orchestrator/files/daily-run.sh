@@ -66,20 +66,22 @@ fetch_config() {
   tar -xzf "$tarball" -C "$WORK/src" --strip-components=1
   [ -d "$WORK/src/deploy/terraform/oci-always-free/cluster" ] \
     || { log "the pinned commit has no cluster root at deploy/terraform/oci-always-free/cluster"; return 1; }
-  python3 - "$WORK/src/deploy/terraform/oci-always-free/cluster" "$WORK/config.json" <<'PY'
-import base64, io, json, os, sys, zipfile
+  # --config-source takes a .zip of the configuration (oci resource-manager stack update reference), so the
+  # archive is built here and passed as a file. Only the cluster root's own files go in.
+  python3 - "$WORK/src/deploy/terraform/oci-always-free/cluster" "$WORK/cluster.zip" <<'PY'
+import os, sys, zipfile
 root, out = sys.argv[1], sys.argv[2]
-buf = io.BytesIO()
-with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-    for dirpath, _, files in os.walk(root):
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in (".terraform", "tests")]
         for name in files:
+            if name in ("terraform.tfstate", "terraform.tfstate.backup") or name.endswith(".tfvars"):
+                continue
             full = os.path.join(dirpath, name)
             z.write(full, os.path.relpath(full, root))
-json.dump({"configSourceType": "ZIP_UPLOAD",
-           "zipFileBase64Encoded": base64.b64encode(buf.getvalue()).decode()}, open(out, "w"))
 PY
   "${OCI[@]}" resource-manager stack update --stack-id "$STACK_ID" \
-    --config-source "file://$WORK/config.json" --variables "$(stack_variables)" --force >/dev/null
+    --config-source "$WORK/cluster.zip" --variables "$(stack_variables)" --force >/dev/null
   log "stack config updated to commit $CONFIG_COMMIT_SHA"
 }
 
