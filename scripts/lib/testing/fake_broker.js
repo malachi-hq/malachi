@@ -110,6 +110,8 @@ class FakeBroker {
     this.window = { appends: 64, bytes: 16777216 };
     this.extraBrokers = []; // further brokers the cluster state lists
     this.clusterStateAnswer = null; // a [code, payload] to answer cluster_state with instead
+    // what a topic_routes is answered, by the connection it came on: 'ok', or 'drop' (its connection closed)
+    this.routesPolicy = () => 'ok';
     this.authDelayMs = 0; // how long an authentication waits for its answer
     this.closes = []; // every close_stream: the stream id
     // the group every join and heartbeat is answered with the assignment of, and every group call asked:
@@ -222,6 +224,7 @@ class FakeBroker {
       );
     }
     if (apiKey === wire.API.topicRoutes) {
+      if (this.routesPolicy(socket) === 'drop') return socket.destroy();
       const topic = new Reader(payload).str();
       const routes = this.routes.get(topic);
       if (!routes) return reply(wire.ERROR, str('no_such_topic'));

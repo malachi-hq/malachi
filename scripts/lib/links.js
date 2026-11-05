@@ -2,9 +2,10 @@
 
 /**
  * What every routing client keeps between a topic's routes and the brokers that serve them, as the Elixir
- * load generator's Malachi.Loadtest.Links does: one connection per broker address, a metadata connection
- * opened on first use, the routes read again when they were forgotten, with a per-topic backoff once a read
- * fails, and counts of what routing did (`stats`), for a routing client to hold and route through.
+ * load generator's Malachi.Loadtest.Links does: one connection per broker address, the routes read again
+ * when they were forgotten (over one of those connections, which any node answers, or a metadata connection
+ * when there is none), with a per-topic backoff once a read fails, and counts of what routing did (`stats`),
+ * for a routing client to hold and route through.
  *
  * Connections are ./client.js MalachiClients, authenticated with `connOpts` ({ user, pass, timeout });
  * host and port come from the routes (./router.js).
@@ -45,7 +46,7 @@ class Links {
     this.router = router;
     this.connOpts = connOpts;
     this.conns = new Map(); // address key -> Promise<MalachiClient | null>
-    this.control = null; // the metadata connection, or null
+    this.control = null; // the metadata connection, or null: opened by a read with no connection to a broker to go over
     this.controlOpening = null; // the metadata connect in flight, shared by the reads that wait on it
     this.unroutable = new Map(); // topic -> { until, reason } while its routes back off
     this.stats = { refreshes: 0, connect_failures: 0, redirects: 0 };
@@ -146,12 +147,35 @@ class Links {
     return read;
   }
 
-  // Reads the cluster state and `topic`'s routes over the metadata connection, opened on first use to the
-  // bootstrap address or, should that not answer, to each broker the cluster state lists in turn. Not held
-  // back by the topic's backoff: `ensureRoutes` is what honours it.
+  // Reads the cluster state and `topic`'s routes again, over a connection this already has to a broker: any
+  // node answers both, and a connection is authenticated once, so a read after a `moved` costs a round trip
+  // on it and no new connection. With no connection to a broker yet, or when the read over one failed, it
+  // goes over the metadata connection, opened then to the bootstrap address or, should that not answer, to
+  // each broker the cluster state lists in turn. Not held back by the topic's backoff: `ensureRoutes` is
+  // what honours it.
   async refresh(topic) {
     this.bump('refreshes');
+    const held = await this._heldConnection();
+    if (held) {
+      try {
+        await this.router.refresh(held, topic);
+        return { ok: true };
+      } catch (err) {
+        // a refusal is the server's answer; a dropped or silent connection is its owner's to replace
+        if (err instanceof MalachiError && !err.transport && !err.timeout) return { error: err.message };
+      }
+    }
     return this._readRoutes(topic, this.control !== null);
+  }
+
+  // A connection to a broker this holds and that is still open, the first by address; null when there is none.
+  async _heldConnection() {
+    const keys = [...this.conns.keys()].sort();
+    for (const key of keys) {
+      const client = await this.conns.get(key);
+      if (client && client.socket) return client;
+    }
+    return null;
   }
 
   // A metadata connection kept from an earlier read may have been closed by the server since (an idle one

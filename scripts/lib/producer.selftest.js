@@ -13,6 +13,7 @@
 
 const assert = require('assert');
 const wire = require('./wire');
+const { MalachiClient } = require('./client');
 const { Router } = require('./router');
 const { Producer, recordBytes, entryBytes } = require('./producer');
 const { FakeBroker } = require('./testing/fake_broker');
@@ -179,6 +180,64 @@ check('a stream told it moved: what was in flight is answered, and the rest goes
     assert.notStrictEqual(broker.appends[1].stream, first);
     assert.strictEqual(broker.unknownStream, 0, 'nothing more was sent on the stream that moved');
     assert.strictEqual(p.statsNow().moved, 1);
+  }),
+);
+
+check('a moved reads the routes again over the stream\'s own connection, and opens no other', () =>
+  withBroker(async (broker) => {
+    // the routes already read, as every load generator connection starts with them
+    const router = new Router(broker.address);
+    const boot = new MalachiClient({ ...broker.address, timeout: 2000 });
+    await boot.connect('u', 'p');
+    await router.refresh(boot, 't');
+    boot.close();
+    const p = new Producer(router, { user: 'u', pass: 'p', timeout: 2000 }, { maxInflight: 1 });
+    try {
+      await p.produce('t', entries(['a']));
+      assert.strictEqual(await p.wait(2000), 'idle');
+      const connections = broker.sockets.length;
+
+      broker.moved(broker.appends[0].stream);
+      await untilTrue(() => p.statsNow().moved === 1);
+      await p.produce('t', entries(['b']));
+      assert.strictEqual(await p.wait(2000), 'idle');
+
+      assert.deepStrictEqual(tags(p.takeEvents(), 'acked'), ['a', 'b']);
+      assert.strictEqual(p.statsNow().refreshes, 1);
+      // a new connection would authenticate again: on a broker under load, seconds a producer stops for
+      assert.strictEqual(broker.sockets.length, connections, 'no connection was opened to read the routes');
+      assert.strictEqual(p.links.control, null);
+    } finally {
+      await p.close();
+    }
+  }),
+);
+
+check('a routes read whose connection drops under it goes over a metadata connection instead', () =>
+  withBroker(async (broker) => {
+    const router = new Router(broker.address);
+    const boot = new MalachiClient({ ...broker.address, timeout: 2000 });
+    await boot.connect('u', 'p');
+    await router.refresh(boot, 't');
+    boot.close();
+    const p = new Producer(router, { user: 'u', pass: 'p', timeout: 2000 }, { maxInflight: 1 });
+    try {
+      await p.produce('t', entries(['a']));
+      assert.strictEqual(await p.wait(2000), 'idle');
+      const stream = broker.appends[0].stream;
+      const dataSocket = broker.streams.get(stream).socket;
+      broker.routesPolicy = (socket) => (socket === dataSocket ? 'drop' : 'ok');
+
+      broker.moved(stream);
+      await untilTrue(() => p.statsNow().moved === 1);
+      await p.produce('t', entries(['b']));
+      assert.strictEqual(await p.wait(2000), 'idle');
+
+      assert.deepStrictEqual(tags(p.takeEvents(), 'acked'), ['a', 'b']);
+      assert.notStrictEqual(p.links.control, null, 'the read went over a metadata connection');
+    } finally {
+      await p.close();
+    }
   }),
 );
 
