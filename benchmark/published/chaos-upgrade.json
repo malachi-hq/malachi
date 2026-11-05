@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": "2026-11-04T12:03:02Z",
+    "timestamp": "2026-11-05T12:01:21Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "6fe8c28",
-    "git_ref_date": "2026-11-04T00:57:06Z",
+    "git_ref": "4b096fc",
+    "git_ref_date": "2026-11-04T12:03:21Z",
     "malachi_version": "0.22.7",
     "hardware": {
       "cpu": "x86_64",
@@ -25,16 +25,16 @@
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 47514,
-    "post_chaos_records_per_s": 3383
+    "acked_writes": 52807,
+    "post_chaos_records_per_s": 17980
   },
   "failures": [
-    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1367)",
-    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 2946)",
+    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1857)",
+    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 4008)",
     "nodes 1 and 2 did not serve a clean produce while node 3 was down",
-    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 2946)"
+    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 4008)"
   ],
-  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261104T112935Z-6fe8c28",
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261105T112700Z-4b096fc",
   "details": {
     "old_ref": "v0.22.4",
     "old_rule": "the newest release whose code differs from this tree, which is release v0.22.7's",
@@ -45,9 +45,9 @@
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 16904,
-      "phase2": 11497,
-      "phase3": 19113
+      "phase1": 19280,
+      "phase2": 13104,
+      "phase3": 20423
     },
     "vnodes": 4,
     "vnode_rule": "sharded: v0.22.4 resumes its vnode members after a restart",
