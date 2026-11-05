@@ -19,7 +19,7 @@ defmodule Malachi.Test.StreamStub do
   `reply` after `ms` milliseconds. A `fetch_range` gets an empty page. Routes can
   also change from one read to the next (`set_routes_sequence/2`); an `open_stream` answers with the
   version last read, by any connection (the stub keeps one for all), `opened/1` counts the opens, and
-  `consumes/1` lists the open_consumes, as `{corr, start}`.
+  `consumes/1` lists the open_consumes, as `{corr, start}`, and `accepted/1` counts the connections.
 
   The appends the stub took are kept, in arrival order, with their values (`appends/1`), and a test can
   write any frame to the connections that opened streams (`push/2`): a `moved` push, or the error frames
@@ -55,7 +55,8 @@ defmodule Malachi.Test.StreamStub do
           advertised_port: nil,
           other_brokers: [],
           taken: [],
-          streamers: []
+          streamers: [],
+          accepted: 0
         }
       end)
 
@@ -129,6 +130,10 @@ defmodule Malachi.Test.StreamStub do
     Agent.update(state, &%{&1 | other_brokers: [broker | &1.other_brokers]})
   end
 
+  @doc "How many connections the stub accepted so far."
+  @spec accepted(t()) :: non_neg_integer()
+  def accepted(%__MODULE__{state: state}), do: Agent.get(state, & &1.accepted)
+
   @doc "Every append taken so far, in arrival order: `{stream_id, sequence, values}`."
   @spec appends(t()) :: [{pos_integer(), non_neg_integer(), [binary()]}]
   def appends(%__MODULE__{state: state}), do: state |> Agent.get(& &1.taken) |> Enum.reverse()
@@ -142,6 +147,7 @@ defmodule Malachi.Test.StreamStub do
   defp accept(stub) do
     case :gen_tcp.accept(stub.listen) do
       {:ok, sock} ->
+        Agent.update(stub.state, &%{&1 | accepted: &1.accepted + 1})
         pid = spawn(fn -> receive(do: (:go -> serve(stub, sock))) end)
         :ok = :gen_tcp.controlling_process(sock, pid)
         send(pid, :go)

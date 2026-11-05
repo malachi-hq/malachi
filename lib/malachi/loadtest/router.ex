@@ -11,12 +11,19 @@ defmodule Malachi.Loadtest.Router do
   first record or after a failover sealed its segment) is opened at a live broker, which places the segment
   and answers `moved` towards its primary (`address_of/3`).
 
-  Pure but for `bootstrap/1` and `refresh/3`, which ask over a passive `Malachi.Loadtest.Conn`.
+  Pure but for `bootstrap/2` and `refresh/3`, which ask over a `Malachi.Loadtest.Conn`: a metadata
+  connection, or one of the client's own to a broker, its streams open, since any node answers both keys
+  (`Malachi.Loadtest.Conn.request_beside/4` keeps the pushes that arrive meanwhile).
   """
 
   alias Malachi.Keyspace
   alias Malachi.Loadtest.Conn
   alias Malachi.Wire
+
+  # The correlation ids the two reads go under, apart from every client's own (which count up from 1 or 100),
+  # so an answer that arrives late on a connection a client also requests on is never taken for theirs.
+  @cluster_state_corr 0xFFFF_FF18
+  @topic_routes_corr 0xFFFF_FF19
 
   @enforce_keys [:bootstrap]
   # `topics` holds the routes a record is routed by, dropped by `forget/2` so the next one reads them again;
@@ -61,7 +68,7 @@ defmodule Malachi.Loadtest.Router do
   """
   @spec bootstrap(t(), Conn.t()) :: {:ok, t(), Conn.t()} | {:error, String.t(), Conn.t()} | {:error, term()}
   def bootstrap(%__MODULE__{} = router, conn) do
-    case Conn.request(conn, Wire.cluster_state_key(), 24, Wire.encode_cluster_state_req()) do
+    case Conn.request_beside(conn, Wire.cluster_state_key(), @cluster_state_corr, Wire.encode_cluster_state_req()) do
       {:ok, 0, payload, conn} -> decoded(router, payload, conn)
       {:ok, _code, _refusal, conn} -> {:error, "no_cluster_state", conn}
       {:error, _reason} = failed -> failed
@@ -87,7 +94,9 @@ defmodule Malachi.Loadtest.Router do
           {:ok, t(), Conn.t()} | {:error, String.t(), Conn.t()} | {:error, term()}
   def refresh(%__MODULE__{} = router, conn, topic) do
     with {:ok, router, conn} <- bootstrap(router, conn) do
-      case Conn.request(conn, Wire.topic_routes_key(), 25, Wire.encode_topic_routes_req(topic)) do
+      request = Wire.encode_topic_routes_req(topic)
+
+      case Conn.request_beside(conn, Wire.topic_routes_key(), @topic_routes_corr, request) do
         {:ok, 0, payload, conn} -> {:ok, put_routes(router, Wire.decode_topic_routes_resp(payload)), conn}
         {:ok, _code, refusal, conn} -> {:error, Wire.decode_error_reason(refusal), conn}
         {:error, _reason} = failed -> failed

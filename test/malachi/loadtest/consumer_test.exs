@@ -601,6 +601,31 @@ defmodule Malachi.Loadtest.ConsumerTest do
       assert Consumer.handle_message(c, {:tcp_passive, socket}, now()) == :no
     end
 
+    test "a moved reads the routes again over the stream's own connection, and opens no other" do
+      stub = start_stub(%{29 => {:push_on_open, ["a"]}})
+      # the routes already read, as every load generator worker starts with them
+      {router, conn_opts} = stub_router(stub)
+      {:ok, conn} = Conn.connect(conn_opts)
+      {:ok, conn} = Conn.authenticate(conn, conn_opts)
+      {:ok, router, conn} = Router.refresh(router, conn, "t")
+      Conn.close(conn)
+      c = Consumer.new(router, conn_opts)
+      on_exit(fn -> Consumer.close(c) end)
+
+      {:ok, c, early} = Consumer.subscribe(c, "t", 2_000)
+      {c, _rest} = read_all(c, 1 - records(early), 2_000)
+      connections = StreamStub.accepted(stub)
+      [{{_address, id}, %{corr: corr}}] = Map.to_list(c.streams)
+      moved = %{stream_id: id, reason: "split", routes_version: 0, targets: []}
+      StreamStub.push(stub, Wire.encode_ok(corr, IO.iodata_to_binary(Wire.encode_push(:moved, moved))))
+
+      {c, _events, _} = Consumer.await(c, 2_000, fn _c -> length(StreamStub.consumes(stub)) == 2 end)
+      assert %{moved: 1, refreshes: 1} = Consumer.stats(c)
+      # a new connection would authenticate again: on a broker under load, seconds a reader stops for
+      assert StreamStub.accepted(stub) == connections
+      assert c.control == nil
+    end
+
     test "a stream the broker closes with a refusal fails its range, which opens again from where it read" do
       stub = start_stub(%{29 => {:push_on_open, ["a", "b", "c"]}})
       {:ok, c, early} = Consumer.subscribe(stub_consumer(stub), "t", 2_000)

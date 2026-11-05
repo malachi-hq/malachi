@@ -13,6 +13,7 @@ defmodule Malachi.Loadtest.ProducerTest do
   alias Malachi.BrokerServer
   alias Malachi.DataPlaneRouter
   alias Malachi.Loadtest.Conn
+  alias Malachi.Loadtest.Links
   alias Malachi.Loadtest.Producer
   alias Malachi.Loadtest.Router
   alias Malachi.Log.Record
@@ -73,6 +74,16 @@ defmodule Malachi.Loadtest.ProducerTest do
     {:ok, conn} = Conn.connect(stub_opts(stub))
     {:ok, conn} = Conn.authenticate(conn, stub_opts(stub))
     {:ok, router, conn} = Router.bootstrap(Router.new({"127.0.0.1", stub.port}), conn)
+    Conn.close(conn)
+    router
+  end
+
+  # A router that already holds `topic`'s routes, as every load generator worker starts with one.
+  defp stub_router_with_routes(stub, topic) do
+    {:ok, conn} = Conn.connect(stub_opts(stub))
+    {:ok, conn} = Conn.authenticate(conn, stub_opts(stub))
+    {:ok, router, conn} = Router.bootstrap(Router.new({"127.0.0.1", stub.port}), conn)
+    {:ok, router, conn} = Router.refresh(router, conn, topic)
     Conn.close(conn)
     router
   end
@@ -331,20 +342,23 @@ defmodule Malachi.Loadtest.ProducerTest do
     assert Producer.idle?(p)
   end
 
-  test "a metadata connection the server closed is replaced, and the read made again", ctx do
+  test "a read with no connection to a broker goes over a metadata connection, replaced once the server closed it",
+       ctx do
     p = producer(ctx)
-    {p, _events} = produce_all(p, ctx.topic, ["a"])
-    assert %Conn{} = p.control
+    {:ok, p} = Links.refresh(p, ctx.topic)
+    assert %Conn{} = first = p.control
     # as the server closes an idle one, after MALACHI_TCP_RECV_TIMEOUT
-    Conn.close(p.control)
+    Conn.close(first)
 
     other = "producer_other_#{System.unique_integer([:positive])}"
     admin = connect!(user: "admin", pass: "admin123")
     {:ok, 0, _, admin} = Conn.request(admin, Wire.create_topic_key(), 2, Wire.encode_create_topic_req(other, 4))
     Conn.close(admin)
 
-    {p, events} = produce_all(p, other, ["b"])
-    assert acked(events) == ["b"]
+    assert {:ok, p} = Links.refresh(p, other)
+    assert %Conn{} = p.control
+    refute p.control.socket == first.socket
+    assert Router.routes(p.router, other)
     assert %{refreshes: 2} = Producer.stats(p)
   end
 
@@ -483,6 +497,45 @@ defmodule Malachi.Loadtest.ProducerTest do
 
     assert Enum.sort(acked(early ++ events)) == Enum.sort(["new" | old])
     assert for({id, _seq, values} <- StreamStub.appends(stub), id > 1, value <- values, do: value) == old ++ ["new"]
+  end
+
+  test "a moved reads the routes again over the stream's own connection, and opens no other" do
+    stub = start_stub()
+    p = Producer.new(stub_router_with_routes(stub, "t"), stub_opts(stub))
+    on_exit(fn -> Producer.close(p) end)
+    {:ok, p} = Producer.prepare(p, "t", 2_000)
+    {p, events} = produce_all(p, "t", ["a"])
+    assert acked(events) == ["a"]
+    connections = StreamStub.accepted(stub)
+
+    [{_stream_key, %{corr: corr}}] = Map.to_list(p.streams)
+    StreamStub.push(stub, moved_frame(corr, 1))
+    {p, [], :idle} = Producer.await(p, 2_000, &match?(%{stream: nil}, &1.lanes[{"t", 0}]))
+    {p, events} = produce_all(p, "t", ["b"])
+
+    assert acked(events) == ["b"]
+    assert %{moved: 1, refreshes: 1} = Producer.stats(p)
+    # a new connection would authenticate again: on a broker under load, seconds a producer stops for
+    assert StreamStub.accepted(stub) == connections
+    assert p.control == nil
+  end
+
+  test "a routes read whose connection drops under it goes over a metadata connection instead" do
+    # the routes as the worker starts with them, then a read that closes its connection, then answers again
+    stub = start_stub(%{25 => {:cycle, [:default, :close]}})
+    p = Producer.new(stub_router_with_routes(stub, "t"), stub_opts(stub))
+    on_exit(fn -> Producer.close(p) end)
+    {:ok, p} = Producer.prepare(p, "t", 2_000)
+    {p, events} = produce_all(p, "t", ["a"])
+    assert acked(events) == ["a"]
+
+    [{_stream_key, %{corr: corr}}] = Map.to_list(p.streams)
+    StreamStub.push(stub, moved_frame(corr, 1))
+    {p, [], :idle} = Producer.await(p, 2_000, &match?(%{stream: nil}, &1.lanes[{"t", 0}]))
+    {p, events} = produce_all(p, "t", ["b"])
+
+    assert acked(events) == ["b"]
+    assert %Conn{} = p.control
   end
 
   test "after stop_sending, an append answered unknown_stream is dropped rather than sent again" do

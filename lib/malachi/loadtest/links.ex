@@ -1,14 +1,16 @@
 defmodule Malachi.Loadtest.Links do
   @moduledoc """
   What every routing client of the load generator keeps between a topic's routes and the brokers that serve
-  them: one connection per broker address, a metadata connection opened on first use, the routes read again
-  when they were forgotten, with a per-topic backoff once a read fails, and counts of what routing did. The
+  them: one connection per broker address, the routes read again when they were forgotten (over one of those
+  connections, which any node answers, or a metadata connection when there is none), with a per-topic
+  backoff once a read fails, and counts of what routing did. The
   producer (`Malachi.Loadtest.Producer`), the consumer (`Malachi.Loadtest.Consumer`) and the fetcher
   (`Malachi.Loadtest.Fetcher`) all hold these fields in their own struct and route through here:
 
     * `:router` (`Malachi.Loadtest.Router`), `:conn_opts` (credentials and TLS, as
       `Malachi.Loadtest.Conn.connect/1` takes them; host and port come from the routes);
-    * `:control`, the metadata connection or nil; `:conns`, address to `%{conn: conn}`; `:sockets`, socket
+    * `:control`, the metadata connection or nil, opened only by a read with no connection to a broker to
+      go over; `:conns`, address to `%{conn: conn}`; `:sockets`, socket
       to address, for the messages an activated connection sends;
     * `:unroutable`, topic to `{until, refusal}` while its routes back off; `:stats`, with at least
       `:refreshes` and `:connect_failures`.
@@ -178,12 +180,32 @@ defmodule Malachi.Loadtest.Links do
   end
 
   @doc """
-  Reads the cluster state and `topic`'s routes over the metadata connection, opened on first use to the
-  bootstrap address or, should that not answer, to each broker the cluster state lists in turn. Not held
-  back by the topic's backoff: `ensure_routes/3` is what honours it.
+  Reads the cluster state and `topic`'s routes again, over a connection the client already has to a broker:
+  any node answers both, and a connection is authenticated once, so a read after a `moved` costs a round
+  trip on it and no new connection (`Malachi.Loadtest.Conn.request_beside/4` keeps the pushes that arrive
+  meanwhile). A client with no connection to a broker yet, or whose read over one failed, reads over the
+  metadata connection, opened then to the bootstrap address or, should that not answer, to each broker the
+  cluster state lists in turn. Not held back by the topic's backoff: `ensure_routes/3` is what honours it.
   """
   @spec refresh(map(), String.t()) :: {:ok, map()} | {:error, String.t(), map()}
-  def refresh(client, topic), do: client |> bump(:refreshes) |> read_routes(topic, client.control != nil)
+  def refresh(client, topic) do
+    client = bump(client, :refreshes)
+
+    case Enum.min_by(client.conns, &elem(&1, 0), fn -> nil end) do
+      nil -> read_routes(client, topic, client.control != nil)
+      {address, %{conn: conn}} -> read_beside(client, topic, address, conn)
+    end
+  end
+
+  # A connection that fails under the read is reported to its owner as a closed one (`request_beside/4`),
+  # which drops it as it drops any; the read itself goes over the metadata connection.
+  defp read_beside(client, topic, address, conn) do
+    case Router.refresh(client.router, conn, topic) do
+      {:ok, router, conn} -> {:ok, %{put_conn(client, address, conn) | router: router}}
+      {:error, reason, conn} when is_binary(reason) -> {:error, reason, put_conn(client, address, conn)}
+      {:error, _transport} -> read_routes(client, topic, client.control != nil)
+    end
+  end
 
   # A metadata connection kept from an earlier read may have been closed by the server since (an idle one
   # is, after `MALACHI_TCP_RECV_TIMEOUT`): one that fails is replaced and the read made again, once.

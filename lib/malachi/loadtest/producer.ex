@@ -19,7 +19,8 @@ defmodule Malachi.Loadtest.Producer do
   (the chaos checker resends, the load generator counts). What is retried is routing. A stream told `moved`
   (its segment sealed by a roll or a failover, or its range split or merged) takes no more appends; the
   appends it had in flight are still answered on it, and the records not yet sent go to the stream the
-  routes now name, read again over a metadata connection opened only when it is first needed. An append
+  routes now name, read again over the connection the stream was on, with no new connection to
+  authenticate (`Malachi.Loadtest.Links.refresh/2`). An append
   the broker refused `not_primary` or `sealed` is routing too, with no event: the broker answers those only
   for an append it stored nothing of (`Malachi.BrokerServer.send_stream_produce/6`), so once the stream
   drains its records go back to the front of their range's buffer, in the order they were sent, and out on
