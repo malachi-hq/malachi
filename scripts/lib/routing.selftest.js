@@ -93,6 +93,16 @@ function responseFrame(corr, code, payload) {
 
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Waits until `cond()` holds, for what arrives over a socket: a fixed tick races the delivery on a loaded
+// machine. Only an absence is waited out with a tick.
+async function waitFor(cond, ms = 2000) {
+  const until = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > until) throw new Error(`timed out after ${ms} ms waiting for ${cond}`);
+    await tick(5);
+  }
+}
+
 // Links whose connect is a stand-in: `outcome(address)` says what each connect to an address gives, a
 // client-like object or null; `attempts` counts them per address.
 function stubLinks(outcome, router = routerWith([broker('a@h', '10.0.0.1', 4040)], [range(1, 0, 16, 'a@h')])) {
@@ -361,7 +371,7 @@ async function selfTest() {
       const b = await client.openStream(wire.API.openStream, Buffer.alloc(0), handlers('b'));
       const [socket] = server.sockets;
       socket.write(responseFrame(a.correlationId, wire.ERROR, str('unknown_stream')));
-      await tick();
+      await waitFor(() => seen.a.length > 0);
       client.forgetStream(a.correlationId);
       socket.write(responseFrame(a.correlationId, wire.ERROR, str('after_forget')));
       await tick();
@@ -370,7 +380,8 @@ async function selfTest() {
       const c = client.openStream(wire.API.openStream, Buffer.alloc(0), handlers('c')).then(() => 'opened', (e) => e.message);
       seen.c = [];
       assert.strictEqual(await c, 'connection closed by server');
-      await tick();
+      // the frame after the forget came before the drop, so by b's close it was read and ignored
+      await waitFor(() => seen.b.length > 0);
       assert.deepStrictEqual(seen, { a: ['unknown_stream'], b: ['closed'], c: [] });
     } finally {
       server.close();
