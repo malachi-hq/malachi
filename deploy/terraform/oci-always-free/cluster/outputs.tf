@@ -12,3 +12,11 @@ output "ca_cert_pem" {
   description = "CA certificate for --cacert on the smoke client. Public by design: it is not a key."
   value       = tls_self_signed_cert.ca.cert_pem
 }
+
+# The daily run's probe authenticates as the producer user, the same seeded user the cluster creates. The
+# value is sensitive: it is in the state, which lives inside OCI, and the probe reads it from there.
+output "probe_password" {
+  description = "Password of the producer user, for the daily probe only."
+  value       = random_password.producer.result
+  sensitive   = true
+}
