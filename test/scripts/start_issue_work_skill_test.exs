@@ -92,6 +92,6 @@ defmodule StartIssueWorkSkillTest do
   test "the skill has no em dash, a repository rule" do
     skill = File.read!(@skill)
     # Written as an escape so this file does not carry the character it forbids.
-    refute skill =~ "—"
+    refute skill =~ "\u2014"
   end
 end
