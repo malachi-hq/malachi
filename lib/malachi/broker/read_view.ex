@@ -28,10 +28,11 @@ defmodule Malachi.Broker.ReadView do
           ranges: %{Metadata.range_id() => Metadata.range_meta()},
           segments: %{Metadata.range_id() => [Metadata.segment_meta()]},
           ends: %{Metadata.range_id() => non_neg_integer()},
-          unrecovered: MapSet.t(Metadata.range_id())
+          unrecovered: MapSet.t(Metadata.range_id()),
+          horizon_pending: MapSet.t(Metadata.range_id())
         }
 
-  defstruct ranges: %{}, segments: %{}, ends: %{}, unrecovered: MapSet.new()
+  defstruct ranges: %{}, segments: %{}, ends: %{}, unrecovered: MapSet.new(), horizon_pending: MapSet.new()
 
   @doc """
   The view of `range_ids` from `broker`: each range the control plane knows, plus the segments and the
@@ -52,7 +53,8 @@ defmodule Malachi.Broker.ReadView do
       ranges: ranges,
       segments: Map.new(touched, &{&1, DSRSM.segments_of_range(broker.dsrsm, topic_of(&1), &1)}),
       ends: Map.take(broker.offsets, touched),
-      unrecovered: touched |> Enum.filter(&Broker.unrecovered?(broker, &1)) |> MapSet.new()
+      unrecovered: touched |> Enum.filter(&Broker.unrecovered?(broker, &1)) |> MapSet.new(),
+      horizon_pending: touched |> Enum.filter(&Broker.horizon_pending?(broker, &1)) |> MapSet.new()
     }
   end
 
@@ -71,6 +73,10 @@ defmodule Malachi.Broker.ReadView do
   @doc "Whether `range_id` waits for a recovery that learns its end (see `Malachi.Broker.unrecovered?/2`)."
   @spec unrecovered?(t(), Metadata.range_id()) :: boolean()
   def unrecovered?(%__MODULE__{unrecovered: unrecovered}, range_id), do: MapSet.member?(unrecovered, range_id)
+
+  @doc "Whether `range_id` waits for its horizon (see `Malachi.Broker.horizon_pending?/2`)."
+  @spec horizon_pending?(t(), Metadata.range_id()) :: boolean()
+  def horizon_pending?(%__MODULE__{horizon_pending: pending}, range_id), do: MapSet.member?(pending, range_id)
 
   defp topic_of(range_id), do: elem(range_id, 0)
 end

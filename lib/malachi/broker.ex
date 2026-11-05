@@ -104,7 +104,8 @@ defmodule Malachi.Broker do
           rolling: %{Metadata.range_id() => roll()},
           fencing: %{Metadata.range_id() => %{segment_id: Metadata.segment_id(), sent_at: integer()}},
           unrecovered: %{Metadata.range_id() => true},
-          durable: %{Metadata.range_id() => non_neg_integer()}
+          durable: %{Metadata.range_id() => non_neg_integer()},
+          horizon_pending: %{Metadata.range_id() => true}
         }
 
   defstruct dsrsm: nil,
@@ -161,7 +162,13 @@ defmodule Malachi.Broker do
             # not yet answered. Consume streams read only up to it (`durable_end/2`), so a consumer never
             # sees a record its producer was not told is stored, and a failover that seals below an
             # unacknowledged tail cannot hand a consumer an offset that is later reused.
-            durable: %{}
+            durable: %{},
+            # Ranges a recovery learned the end of but not yet the horizon: their active segment, led here,
+            # holds records past `durable_end/2` that no produce this frontend answered and no replica probe
+            # vouched for yet (a restart forgets the horizon). Until a probe, a produce or a seal raises it,
+            # a consume of one refuses rather than serve a page that stops short of those records: empty and
+            # successful, which a consumer cannot tell from having caught up. See `await_horizon/2`.
+            horizon_pending: %{}
 
   @doc """
   Opens an empty broker.
@@ -414,6 +421,28 @@ defmodule Malachi.Broker do
   defp raise_durable(durable, range_id, offset), do: Map.update(durable, range_id, offset, &max(&1, offset))
 
   @doc """
+  Marks `range_id`, whose end a recovery just learned (`seed_range_state/4`) and whose active segment this
+  frontend leads, as waiting for its horizon: when the end is past `durable_end/2` and no horizon is known,
+  the records in between are on disk but unreadable here until a replica probe (`seed_durable/3`), a
+  produce (`mark_durable/2`) or a seal raises the horizon, and a consume of the range refuses with
+  `:metadata_unavailable` meanwhile (`horizon_pending?/2`). A range with nothing past its horizon, a new one
+  among them, is left readable: an empty page there is the truth, and a reader waits on it as on any.
+  """
+  @spec await_horizon(t(), Metadata.range_id()) :: t()
+  def await_horizon(%__MODULE__{} = broker, range_id) do
+    if not Map.has_key?(broker.durable, range_id) and next_offset(broker, range_id) > durable_end(broker, range_id),
+      do: %{broker | horizon_pending: Map.put(broker.horizon_pending, range_id, true)},
+      else: broker
+  end
+
+  @doc "Whether `range_id` waits for a horizon over records a recovery found (see `await_horizon/2`)."
+  @spec horizon_pending?(t(), Metadata.range_id()) :: boolean()
+  def horizon_pending?(%__MODULE__{} = broker, range_id), do: Map.has_key?(broker.horizon_pending, range_id)
+
+  defp horizon_known(broker, range_ids),
+    do: %{broker | horizon_pending: Map.drop(broker.horizon_pending, range_ids)}
+
+  @doc """
   Records the placements of a produce this frontend answered as stored as durable (`durable_end/2`): each
   range's records up to the last one placed are held by a replication quorum, or flushed by a group commit.
   """
@@ -424,7 +453,7 @@ defmodule Malachi.Broker do
         raise_durable(acc, range_id, last + 1)
       end)
 
-    %{broker | durable: durable}
+    horizon_known(%{broker | durable: durable}, Map.keys(placements))
   end
 
   @doc """
@@ -446,7 +475,11 @@ defmodule Malachi.Broker do
   def seed_durable(%__MODULE__{} = broker, range_id, offset) do
     if unrecovered?(broker, range_id),
       do: broker,
-      else: %{broker | durable: raise_durable(broker.durable, range_id, min(offset, next_offset(broker, range_id)))}
+      else:
+        horizon_known(
+          %{broker | durable: raise_durable(broker.durable, range_id, min(offset, next_offset(broker, range_id)))},
+          [range_id]
+        )
   end
 
   @doc """
@@ -1224,7 +1257,8 @@ defmodule Malachi.Broker do
     do: %{
       broker
       | offsets: Map.put(broker.offsets, range_id, offset),
-        durable: Map.put(broker.durable, range_id, offset)
+        durable: Map.put(broker.durable, range_id, offset),
+        horizon_pending: Map.delete(broker.horizon_pending, range_id)
     }
 
   @doc """
@@ -1557,7 +1591,7 @@ defmodule Malachi.Broker do
       is_nil(range) ->
         {:error, :no_such_range}
 
-      ReadView.unrecovered?(view, range_id) ->
+      ReadView.unrecovered?(view, range_id) or ReadView.horizon_pending?(view, range_id) ->
         {:error, :metadata_unavailable}
 
       true ->
@@ -1602,13 +1636,29 @@ defmodule Malachi.Broker do
         own = length(range.parents)
 
         case start do
-          :earliest -> {:ok, {0, 0}}
-          :latest -> {:ok, {own, durable_end(broker, range_id)}}
-          {:position, {index, offset}} when index < own -> {:ok, {index, offset}}
-          {:position, {^own, offset}} -> own_position(broker, range_id, own, offset)
-          {:position, _past_the_sources} -> {:error, :invalid_position}
-          {:position, issuer, at} -> issued_start(broker, range_id, issuer, at)
-          {:committed, group} -> committed_start(broker, group, topic, range_id)
+          :earliest ->
+            {:ok, {0, 0}}
+
+          # the latest a reader can start at is the horizon, which a range waiting for one does not know yet
+          :latest ->
+            if horizon_pending?(broker, range_id),
+              do: {:error, :metadata_unavailable},
+              else: {:ok, {own, durable_end(broker, range_id)}}
+
+          {:position, {index, offset}} when index < own ->
+            {:ok, {index, offset}}
+
+          {:position, {^own, offset}} ->
+            own_position(broker, range_id, own, offset)
+
+          {:position, _past_the_sources} ->
+            {:error, :invalid_position}
+
+          {:position, issuer, at} ->
+            issued_start(broker, range_id, issuer, at)
+
+          {:committed, group} ->
+            committed_start(broker, group, topic, range_id)
         end
     end
   end

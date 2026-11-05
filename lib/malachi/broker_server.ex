@@ -663,9 +663,10 @@ defmodule Malachi.BrokerServer do
     with_consume_range(range_id, state, fn state ->
       case Broker.consume_start(state.broker, range_id, start) do
         {:ok, position} ->
-          # a range whose end the recovery has not learned is answered at once, for its read to refuse
-          # (`metadata_unavailable`): held, it would wait on an end nothing can make it pass
+          # a range whose end or horizon the recovery has not learned is answered at once, for its read to
+          # refuse (`metadata_unavailable`): held, it would wait on an end nothing can make it pass
           if wait_ms == 0 or Broker.unrecovered?(state.broker, range_id) or
+               Broker.horizon_pending?(state.broker, range_id) or
                Broker.consume_ready?(state.broker, range_id, position) do
             {:reply, fetch_reply(state, %{range_id: range_id, position: position}), state}
           else
@@ -1150,7 +1151,7 @@ defmodule Malachi.BrokerServer do
 
         case recovered_next_offset(segments) do
           next when is_integer(next) ->
-            Broker.seed_range_state(broker, range_id, next, min_seq)
+            broker |> Broker.seed_range_state(range_id, next, min_seq) |> await_local_horizon(topic, range_id)
 
           # The primary did not answer, so the end is unknown. Any horizon guessed here is wrong in one
           # direction: the segment's start would serve the range's earlier segments and hide the active
@@ -1208,6 +1209,15 @@ defmodule Malachi.BrokerServer do
 
   defp active_segment(dsrsm, topic, range_id),
     do: Enum.find(DSRSM.segments_of_range(dsrsm, topic, range_id), &(&1.state == :active))
+
+  # A range whose active segment this node leads serves its reads here, from a horizon a restart forgot:
+  # until the probe of this or a later pass learns it, its reads refuse (`Malachi.Broker.await_horizon/2`).
+  defp await_local_horizon(broker, topic, range_id) do
+    case active_segment(broker.dsrsm, topic, range_id) do
+      %{replica_set: [primary | _]} -> if local_ref?(primary), do: Broker.await_horizon(broker, range_id), else: broker
+      nil -> broker
+    end
+  end
 
   defp recovered_next_offset(segments) do
     case Enum.find(segments, &(&1.state == :active)) do

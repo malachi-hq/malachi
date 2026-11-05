@@ -505,6 +505,55 @@ defmodule Malachi.BrokerTest do
     end
   end
 
+  describe "ranges whose horizon a recovery has not learned yet" do
+    # A restarted frontend: its bookkeeping and its horizons gone, the end of `root_id` learned again at 2.
+    defp restarted_with_records(store) do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("a", "k1"), record("b", "k2")])
+      restarted = %{broker | offsets: %{}, segment_seq: %{}, durable: %{}} |> Broker.seed_range_state(root_id, 2, 1)
+      {restarted, root_id}
+    end
+
+    test "records past the horizon refuse a consume until a probe vouches for them", %{store: store} do
+      {restarted, root_id} = restarted_with_records(store)
+      waiting = Broker.await_horizon(restarted, root_id)
+
+      assert Broker.horizon_pending?(waiting, root_id)
+      # not an empty page, which a reader cannot tell from having caught up
+      assert Broker.read_consume(waiting, root_id, :start, 100, read_fun(store)) == {:error, :metadata_unavailable}
+      assert Broker.consume_start(waiting, root_id, :latest) == {:error, :metadata_unavailable}
+
+      vouched = Broker.seed_durable(waiting, root_id, 2)
+      refute Broker.horizon_pending?(vouched, root_id)
+      {delivered, _cursor} = consume(vouched, store, root_id, :start)
+      assert delivered |> Enum.map(& &1.value) |> Enum.sort() == ["a", "b"]
+      assert Broker.consume_start(vouched, root_id, :latest) == {:ok, {0, 2}}
+    end
+
+    test "a produce answered or a seal ends the wait as a probe does", %{store: store} do
+      {restarted, root_id} = restarted_with_records(store)
+      waiting = Broker.await_horizon(restarted, root_id)
+
+      refute waiting |> Broker.mark_durable(%{root_id => {2, 2}}) |> Broker.horizon_pending?(root_id)
+
+      %{id: segment_id} = waiting.segments[root_id]
+      refute waiting |> Broker.forget_sealed(root_id, segment_id, 2) |> Broker.horizon_pending?(root_id)
+    end
+
+    test "a range with nothing past its horizon, a new one among them, is left readable", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      empty = broker |> Broker.seed_range_state(root_id, 0, 1) |> Broker.await_horizon(root_id)
+      refute Broker.horizon_pending?(empty, root_id)
+      assert {:ok, [], _cursor, []} = Broker.read_consume(empty, root_id, :start, 100, read_fun(store))
+
+      # nor one whose horizon is known, even below its end: a quorum held 1 of the 2, and only that one is read
+      {restarted, root_id} = restarted_with_records(store)
+      known = restarted |> Broker.seed_durable(root_id, 1) |> Broker.await_horizon(root_id)
+      refute Broker.horizon_pending?(known, root_id)
+      assert Broker.durable_end(known, root_id) == 1
+    end
+  end
+
   describe "ranges whose end a recovery could not learn (#273)" do
     test "an unrecovered range refuses read_consume until a seed learns its end", %{store: store} do
       {broker, root_id} = broker_with_topic()

@@ -282,6 +282,43 @@ defmodule Malachi.BrokerServerRaTest do
     end
   end
 
+  test "a restarted broker whose horizon probe gets no quorum refuses consumes, rather than serve none" do
+    # The end is learned (the primary answers) but the horizon is not (one answer of three is no quorum):
+    # the records of the active segment are on disk and acknowledged, and a page that stopped short of them
+    # came back empty and successful, as the single-node drill caught after a recreate.
+    cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+    replicas = named_replicas("malachi_pending_horizon")
+    brokers = for {name, _directory} <- replicas, do: {name, node()}
+
+    {:ok, first} = BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+    {:ok, root} = BrokerServer.create_topic(first, "events", 4)
+    {:ok, _} = BrokerServer.produce(first, "events", for(i <- 1..5, do: Record.new("v#{i}", key: "k#{i}")))
+    [%{replica_set: [_primary | followers]}] = Metadata.segments_of_range(BrokerServer.metadata(first), root)
+    :ok = BrokerServer.stop(first)
+    for {name, _node} <- followers, do: :ok = GenServer.stop(name)
+
+    {:ok, second} =
+      BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+
+    assert ReadBack.values(second, "events") == {:error, :metadata_unavailable}
+    # a long poll is answered at once, for its read to refuse, rather than held on a horizon nothing raises
+    started = System.monotonic_time(:millisecond)
+    {:ok, position, view, reporter} = BrokerServer.fetch_range(second, root, :earliest, 5_000)
+    assert System.monotonic_time(:millisecond) - started < 1_000, "the long poll was held"
+    assert ConsumeStreams.read_page(view, root, position, 100, 1_048_576, reporter) == {:error, :metadata_unavailable}
+
+    # the followers come back: the next pass learns the horizon, and every record is served
+    for {name, _node} <- followers do
+      {^name, directory} = List.keyfind(replicas, name, 0)
+      {:ok, _repl} = ReplicationServer.start_link(directory: directory, name: name)
+    end
+
+    :ok = BrokerServer.reconcile_now(second)
+    assert second |> ReadBack.values("events") |> Enum.sort() == Enum.sort(for(i <- 1..5, do: "v#{i}"))
+    :ok = BrokerServer.stop(second)
+  end
+
   test "the horizon a restart learns is the end a quorum reached, not the furthest, and is not asked again" do
     cluster = :"bs_meta_#{System.unique_integer([:positive])}"
     on_exit(fn -> MetadataServer.delete(cluster) end)
