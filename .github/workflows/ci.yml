@@ -583,6 +583,19 @@ jobs:
           terraform init -backend=false -input=false -lockfile=readonly
           terraform validate
 
+      # The plan tests use mock_provider, which needs Terraform 1.7 or newer, so they run on the newest leg only.
+      # They check the free-tier arithmetic, the network rules, the naming and secret invariants, and the
+      # orchestrator's policy and pins, all on the plan with mocked providers.
+      - name: 🧪 Plan tests, cluster root
+        if: matrix.terraform != '1.5.7'
+        working-directory: deploy/terraform/oci-always-free/cluster
+        run: terraform test
+
+      - name: 🧪 Plan tests, orchestrator root
+        if: matrix.terraform != '1.5.7'
+        working-directory: deploy/terraform/oci-always-free/orchestrator
+        run: terraform test
+
   # The landing page in a browser, on the built doc/ of this pull request. Lighthouse scores, a 360px layout with no
   # sideways scroll, every heading and paragraph with JavaScript off, and no CSS animation under reduced motion.
   # The checks live in site/checks and their versions are pinned by its lockfile. Runs on Linux only: the scores
