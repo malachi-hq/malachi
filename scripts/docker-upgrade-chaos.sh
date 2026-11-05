@@ -4,14 +4,23 @@
 # checker and background traffic producing through every step (issue #196).
 #
 # Two images. OLD is a release, built from its own tree (git archive of OLD_REF; by default the newest release
-# whose code differs from this tree's, see resolve_old_ref), and one that serves the stream keys: the checker
-# speaks no other keys, so a default OLD that predates them ends the run skipped. NEW is the working tree with
+# whose code differs from this tree's, see resolve_old_ref), and one that serves the stream keys, which the
+# checker and the traffic speak and nothing else. While no release serves them yet, the default OLD is the
+# working tree itself, and the newest release takes a phase of its own (phase 0 below) that carries the data
+# it wrote over to the working tree, a third image, DATA. NEW is the working tree with
 # test/support/upgrade_canary.patch applied, so it has what no release has yet: a capability and a cluster
 # flag (upgrade_canary), a metadata command at the next machine version ({:canary_note, topic, note} at NEW's
 # @code_version, read from the patched tree), a
 # replication cast older builds do not know, and a data format (2) its flag raises the marker to. Every node
 # keeps its volume across every swap.
 #
+# Phase 0, only while OLD is the working tree: the data of the newest release, carried over. The cluster starts
+#   on DATA under DATA's machine version pin, and DATA's own checker (its tree's scripts/chaos_checker.exs, on
+#   the keys DATA speaks) writes for PHASE0_WINDOW_S seconds. Then every node goes DATA -> OLD with no traffic
+#   (no client speaks both sets of keys), the pin moves to OLD's version node by node, the control plane must
+#   follow it, and this tree's checker must read, on the stream keys, every write DATA acknowledged, with every
+#   Raft group holding the same state on every member: the log replay and the data directories the release
+#   left behind, which is what an upgrade from it has to keep.
 # Phase 1, roll forward under the machine version pin (MALACHI_RA_MACHINE_VERSION = OLD's version):
 #   each node goes OLD -> NEW. With node 3 on NEW and nodes 1 and 2 on OLD, the drill certifies that the
 #   flag is refused naming the OLD nodes (#193), that the canary command is refused (#188) and leaves the
@@ -33,9 +42,9 @@
 # (check_no_crash, OLD_KNOWN_CRASHES), and a clean produce passes at the end.
 #
 # Knobs: OLD_REF (a release at 0.14.2 or later, 0.16.1 for a sharded run, which no release is before the first
-# with the fix for #136); OLD_PATCH and NEW_PATCH, an extra
+# with the fix for #136, and one that serves the stream keys); OLD_PATCH and NEW_PATCH, an extra
 # patch applied to either tree, for the fails-before runs (a run with either is recorded as such in the
-# result); PHASE1_WINDOW_S, PHASE2_WINDOW_S and PHASE3_WINDOW_S; UPGRADE_CANARY_PATCH, the canary patch (a
+# result); PHASE0_WINDOW_S, PHASE1_WINDOW_S, PHASE2_WINDOW_S and PHASE3_WINDOW_S; UPGRADE_CANARY_PATCH, the canary patch (a
 # test seam).
 #
 # Usage: scripts/docker-upgrade-chaos.sh
@@ -52,6 +61,7 @@ export MALACHI_SEGMENT_PREALLOC_BYTES="${MALACHI_SEGMENT_PREALLOC_BYTES:-6710886
 export MALACHI_LOG_VNODES=1
 SPLIT_TO=""
 VNODE_RULE=""
+PHASE0_WINDOW_S="${PHASE0_WINDOW_S:-120}"
 PHASE1_WINDOW_S="${PHASE1_WINDOW_S:-480}"
 PHASE2_WINDOW_S="${PHASE2_WINDOW_S:-360}"
 PHASE3_WINDOW_S="${PHASE3_WINDOW_S:-900}"
@@ -145,15 +155,37 @@ resolve_old_ref() {
     usage_error "OLD_REF=$OLD_REF names no commit here; fetch the tags (fetch-depth: 0)"
   # From here on a run that stops early still records which release it was rolling from.
   record_details
-  # A release that predates the stream keys cannot be rolled from: the checker this tree runs against it
-  # speaks no other keys. Releases are cut in order, so when the release chosen above
-  # predates them every older one does too, and there is nothing to roll from yet.
+  # A release that predates the stream keys cannot be rolled from under traffic: the checker this tree runs
+  # against it speaks no other keys, and no client speaks both. Releases are cut in order, so when the release
+  # chosen above predates them every older one does too. The roll is then certified from the working tree, and
+  # that release's data in phase 0.
   if ! serves_stream_keys "$OLD_REF"; then
     [ "$OLD_RULE" = "given as OLD_REF" ] &&
       usage_error "OLD_REF=$OLD_REF predates the stream keys, which the checker speaks; pick a release that serves them"
-    skip_run "$OLD_REF, $OLD_RULE, predates the stream keys, which the checker speaks: no release can be rolled from yet"
+    DATA_REF=$OLD_REF
+    DATA_SHA=$OLD_SHA
+    DATA_RULE=$OLD_RULE
+    OLD_FROM_TREE=1
+    OLD_REF="working tree"
+    OLD_SHA=$(git rev-parse HEAD)
+    OLD_RULE="the working tree: $DATA_REF, $DATA_RULE, predates the stream keys, so its data is carried over in phase 0"
+    record_details
   fi
 }
+
+# The working tree as it is, uncommitted changes included, minus what git ignores and what was deleted, into
+# directory $1. Through a file for the same reason as OLD's export: an extracting tar that stops at the end
+# marker would leave the creating one to die of SIGPIPE writing its padding.
+copy_working_tree() {
+  git ls-files -z --cached --others --exclude-standard |
+    while IFS= read -r -d '' f; do [ -e "$f" ] && printf '%s\0' "$f"; done |
+    tar --null -T - -cf "$WORK/tree-$(basename "$1").tar" && tar -xf "$WORK/tree-$(basename "$1").tar" -C "$1" ||
+    abort_run "could not copy the working tree"
+}
+
+# The release of $1's tree, X.Y.Z, and its machine version.
+tree_version() { grep '@version' "$1/mix.exs" | head -1 | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/'; }
+tree_pin() { sed -n 's/^  @code_version \([0-9][0-9]*\)$/\1/p' "$1/lib/malachi/cluster/machine_version.ex"; }
 
 prepare_contexts() {
   OLD_CTX="$WORK/ctx-old"
@@ -163,28 +195,37 @@ prepare_contexts() {
   # Through a file, not a pipe: bsdtar (macOS) stops reading at the end-of-archive marker, and `git archive`
   # may still have its last padding to write, which then dies of SIGPIPE (exit 141, nothing on stderr) and,
   # under pipefail, failed the export now and then on a loaded host.
-  git archive -o "$WORK/old.tar" "$OLD_SHA" && tar -x -f "$WORK/old.tar" -C "$OLD_CTX" ||
-    usage_error "could not export $OLD_REF"
-  OLD_VERSION=$(grep '@version' "$OLD_CTX/mix.exs" | head -1 | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
-  OLD_PIN=$(sed -n 's/^  @code_version \([0-9][0-9]*\)$/\1/p' "$OLD_CTX/lib/malachi/cluster/machine_version.ex")
+  if [ -n "$OLD_FROM_TREE" ]; then
+    copy_working_tree "$OLD_CTX"
+    DATA_CTX="$WORK/ctx-data"
+    mkdir -p "$DATA_CTX"
+    git archive -o "$WORK/data.tar" "$DATA_SHA" && tar -x -f "$WORK/data.tar" -C "$DATA_CTX" ||
+      usage_error "could not export $DATA_REF"
+    DATA_VERSION=$(tree_version "$DATA_CTX")
+    DATA_PIN=$(tree_pin "$DATA_CTX")
+    [ -n "$DATA_PIN" ] || usage_error "cannot read the machine version of $DATA_REF"
+  else
+    git archive -o "$WORK/old.tar" "$OLD_SHA" && tar -x -f "$WORK/old.tar" -C "$OLD_CTX" ||
+      usage_error "could not export $OLD_REF"
+  fi
+  OLD_VERSION=$(tree_version "$OLD_CTX")
+  OLD_PIN=$(tree_pin "$OLD_CTX")
   [ -n "$OLD_PIN" ] || usage_error "cannot read the machine version of $OLD_REF"
   choose_control_plane
   record_details
+  # The oldest build the cluster runs is held to the floors: DATA when there is one, since the cluster starts on
+  # it, and OLD otherwise.
+  floor_ref=$OLD_REF floor_version=$OLD_VERSION
+  [ -n "$OLD_FROM_TREE" ] && floor_ref=$DATA_REF floor_version=$DATA_VERSION
   if [ -n "$SPLIT_TO" ]; then
-    version_at_least "$OLD_VERSION" "$OLD_FLOOR_SHARDED" ||
-      usage_error "OLD_REF=$OLD_REF is release $OLD_VERSION; a sharded run needs $OLD_FLOOR_SHARDED or later, the first release that brings up a vnode created by a split (#242)"
+    version_at_least "$floor_version" "$OLD_FLOOR_SHARDED" ||
+      usage_error "OLD_REF=$floor_ref is release $floor_version; a sharded run needs $OLD_FLOOR_SHARDED or later, the first release that brings up a vnode created by a split (#242)"
   else
-    version_at_least "$OLD_VERSION" "$OLD_FLOOR_UNSHARDED" ||
-      usage_error "OLD_REF=$OLD_REF is release $OLD_VERSION; an unsharded run needs $OLD_FLOOR_UNSHARDED or later, the first release with every gate the canary exercises and every control-plane group NEW starts"
+    version_at_least "$floor_version" "$OLD_FLOOR_UNSHARDED" ||
+      usage_error "OLD_REF=$floor_ref is release $floor_version; an unsharded run needs $OLD_FLOOR_UNSHARDED or later, the first release with every gate the canary exercises and every control-plane group NEW starts"
   fi
 
-  # The working tree as it is, uncommitted changes included, minus what git ignores and what was deleted.
-  # Through a file for the same reason as OLD's export: an extracting tar that stops at the end marker
-  # would leave the creating one to die of SIGPIPE writing its padding.
-  git ls-files -z --cached --others --exclude-standard |
-    while IFS= read -r -d '' f; do [ -e "$f" ] && printf '%s\0' "$f"; done |
-    tar --null -T - -cf "$WORK/new.tar" && tar -xf "$WORK/new.tar" -C "$NEW_CTX" ||
-    abort_run "could not copy the working tree"
+  copy_working_tree "$NEW_CTX"
 
   apply_to "$NEW_CTX" "$UPGRADE_CANARY_PATCH" "upgrade canary" "NEW"
   # The machine version the canary command is introduced at, which the control plane reaches once the pin
@@ -194,6 +235,8 @@ prepare_contexts() {
   [ -n "$NEW_VERSION" ] || usage_error "cannot read the machine version of the canary tree"
   [ -n "$NEW_PATCH" ] && apply_to "$NEW_CTX" "$NEW_PATCH" "NEW_PATCH" "NEW"
   [ -n "$OLD_PATCH" ] && apply_to "$OLD_CTX" "$OLD_PATCH" "OLD_PATCH" "OLD"
+  [ -n "$OLD_FROM_TREE" ] &&
+    echo "DATA is $DATA_REF (release $DATA_VERSION, machine version $DATA_PIN: $DATA_RULE), carried over in phase 0"
   echo "OLD is $OLD_REF (release $OLD_VERSION, machine version $OLD_PIN: $OLD_RULE); NEW is the working tree with the canary"
 }
 
@@ -202,16 +245,23 @@ build_upgrade_images() {
   prefix="${COMPOSE_PROJECT_NAME:-$(basename "$PWD")}-upgrade"
   OLD_IMAGE="$prefix:old"
   NEW_IMAGE="$prefix:new"
-  # Every node starts on OLD. Set before any compose command, because the override requires an image for every
-  # node and compose reads the whole file whatever service a command names.
-  for n in 1 2 3; do place "$n" "$OLD_IMAGE"; done
+  [ -n "$OLD_FROM_TREE" ] && DATA_IMAGE="$prefix:data"
+  # Every node starts on DATA when there is one, on OLD otherwise. Set before any compose command, because the
+  # override requires an image for every node and compose reads the whole file whatever service a command names.
+  for n in 1 2 3; do place "$n" "${DATA_IMAGE:-$OLD_IMAGE}"; done
+  OWN_IMAGES=()
+  if [ -n "$OLD_FROM_TREE" ]; then
+    docker build -q -t "$DATA_IMAGE" -f "$DATA_CTX/benchmark/Dockerfile.loadtest" "$DATA_CTX" >"$WORK/build-data.log" 2>&1 ||
+      { tail -20 "$WORK/build-data.log"; abort_run "the DATA image did not build"; }
+    OWN_IMAGES=("$DATA_IMAGE")
+  fi
   # Each from its own tree and its own Dockerfile, so OLD is built the way its release was.
   docker build -q -t "$OLD_IMAGE" -f "$OLD_CTX/benchmark/Dockerfile.loadtest" "$OLD_CTX" >"$WORK/build-old.log" 2>&1 ||
     { tail -20 "$WORK/build-old.log"; abort_run "the OLD image did not build"; }
-  OWN_IMAGES=("$OLD_IMAGE")
+  OWN_IMAGES+=("$OLD_IMAGE")
   docker build -q -t "$NEW_IMAGE" -f "$NEW_CTX/benchmark/Dockerfile.loadtest" "$NEW_CTX" >"$WORK/build-new.log" 2>&1 ||
     { tail -20 "$WORK/build-new.log"; abort_run "the NEW image did not build"; }
-  OWN_IMAGES=("$OLD_IMAGE" "$NEW_IMAGE")
+  OWN_IMAGES+=("$NEW_IMAGE")
   # The checker and the load generator stay on the working tree without the canary: they are clients.
   $COMPOSE build loadtest >"$WORK/build-loadtest.log" 2>&1 ||
     { tail -20 "$WORK/build-loadtest.log"; abort_run "the load generator image did not build"; }
@@ -248,6 +298,57 @@ swap() {
   roll_node "malachi$1" "$3"
 }
 
+# Swaps node $1 to image $2 with no traffic to measure, as phase 0 does: the cluster must reconverge, and
+# nothing more is asked of the swap. Its log is kept, as `roll_node` keeps it.
+swap_quiet() {
+  place "$1" "$2"
+  $COMPOSE stop "malachi$1" >/dev/null 2>&1 || { fail "compose could not stop malachi$1 ($3)"; return 1; }
+  capture_logs "malachi-cluster-$1" "$3"
+  $COMPOSE up -d "malachi$1" >/dev/null 2>&1 || { fail "compose could not recreate malachi$1 ($3)"; return 1; }
+  wait_healthy || fail "the cluster did not reconverge after $3"
+}
+
+# DATA's own checker, from DATA's tree and on DATA's image, on the cluster's network: a client of the keys
+# DATA serves, which this tree's checker does not speak.
+data_checker_run() {
+  network=$(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}' malachi-cluster-1)
+  docker run --rm --network "$network" --cpuset-cpus "$LT_CPUSET" -v "$WORK:/chaos" -v "$DATA_CTX/scripts:/chaos_scripts" \
+    --entrypoint sh "$DATA_IMAGE" -c "cd /app && mix run --no-start /chaos_scripts/chaos_checker.exs $*"
+}
+
+# Phase 0 (see the header): DATA writes, every node moves to OLD, the control plane to OLD's machine version,
+# and this tree's checker reads back everything DATA acknowledged.
+carry_data_over() {
+  say "phase 0: the data of $DATA_REF, carried over to the working tree"
+  PHASE=0
+  PHASE_WINDOW_S=$PHASE0_WINDOW_S
+  PHASE_STARTED=$(date +%s)
+  CHAOS_TOPIC="chaos_upgrade_p0"
+  rm -f "$WORK/acked.log"
+  event "p0: $DATA_REF's own checker writing for ${PHASE0_WINDOW_S}s"
+  data_checker_run "produce $CHAOS_HOSTS $CHAOS_TOPIC $PHASE0_WINDOW_S /chaos/acked.log" >"$WORK/checker-p0.log" 2>&1 ||
+    { tail -5 "$WORK/checker-p0.log"; fail "$DATA_REF's checker did not run"; }
+  ACKED_WRITES=$(acked_count)
+  [ "${ACKED_WRITES:-0}" -gt 0 ] || fail "$DATA_REF's checker acked nothing"
+  echo "$DATA_REF's checker acked $ACKED_WRITES writes"
+
+  event "p0: every node from $DATA_REF to the working tree (pin $DATA_PIN), with no traffic"
+  for n in 3 2 1; do swap_quiet "$n" "$OLD_IMAGE" "p0: node $n to the working tree"; done
+  event "p0: the pin moved to $OLD_PIN node by node"
+  export MALACHI_RA_MACHINE_VERSION="$OLD_PIN"
+  for n in 3 2 1; do swap_quiet "$n" "$OLD_IMAGE" "p0: node $n at the pin $OLD_PIN"; done
+  if await_value "$OLD_PIN" 30 effective_version 1; then
+    echo "the control plane moved from machine version $DATA_PIN to $OLD_PIN"
+  else
+    fail "the control plane did not move to machine version $OLD_PIN (at '$(effective_version 1)')"
+  fi
+
+  ACKED_TOTAL=$((ACKED_TOTAL + ACKED_WRITES))
+  ACKED_BY_PHASE=$(echo "$ACKED_BY_PHASE" | jq -c --argjson n "$ACKED_WRITES" '.phase0 = $n')
+  verify_acked
+  check_convergence
+}
+
 # --- phases ---
 
 ACKED_BY_PHASE="{}"
@@ -257,6 +358,14 @@ OLD_SHA=""
 OLD_VERSION=""
 OLD_RULE=""
 OLD_PIN=""
+# The release phase 0 carries over, set only while OLD is the working tree (resolve_old_ref).
+OLD_FROM_TREE=""
+DATA_REF=""
+DATA_SHA=""
+DATA_RULE=""
+DATA_VERSION=""
+DATA_PIN=""
+DATA_IMAGE=""
 
 begin_phase() {
   PHASE=$1
@@ -500,7 +609,8 @@ check_no_crash() {
     [ -f "$f" ] || continue
     seq=$(basename "$f" | cut -d- -f1)
     image=$(awk -v s="$seq" '$1 == s {print $2}' "$WORK/logs/images.txt" 2>/dev/null)
-    if [ "$image" != "$OLD_IMAGE" ]; then
+    # The known crashes are a release's: OLD's when OLD is one, and DATA's. A build of this tree excuses none.
+    if [ "$image" != "${DATA_IMAGE:-}" ] && { [ -n "$OLD_FROM_TREE" ] || [ "$image" != "$OLD_IMAGE" ]; }; then
       checked=$(cat "$f")
     elif ! checked=$(without_known_crashes "$f"); then
       fail "OLD_KNOWN_CRASHES holds an entry that matches an empty line or one awk cannot read as a regular expression"
@@ -511,7 +621,9 @@ check_no_crash() {
       echo "$checked" | grep -E -A 5 "$CRASH_ANY" | head -20
       crashed=1
     elif grep -qE "$CRASH_ANY" "$f"; then
-      echo "--- $(basename "$f") (OLD, a crash it is known to have, listed in OLD_KNOWN_CRASHES; not failed)"
+      build=OLD
+      [ "$image" = "${DATA_IMAGE:-}" ] && build=DATA
+      echo "--- $(basename "$f") ($build, a crash it is known to have, listed in OLD_KNOWN_CRASHES; not failed)"
       grep -E -A 3 "$CRASH_ANY" "$f" | head -8
     fi
   done
@@ -536,7 +648,17 @@ record_details() {
     --argjson split_to "${SPLIT_TO:-null}" \
     --argjson vnodes "$MALACHI_LOG_VNODES" \
     --arg vnode_rule "$VNODE_RULE" \
+    --arg data_ref "$DATA_REF" \
+    --arg data_rule "$DATA_RULE" \
+    --arg data_sha "$DATA_SHA" \
+    --arg data_version "$DATA_VERSION" \
+    --argjson data_pin "${DATA_PIN:-null}" \
     '{old_ref: $old_ref, old_rule: $old_rule, old_sha: $old_sha, old_version: $old_version, old_machine_version: $old_pin,
+      data_ref: (if $data_ref == "" then null else $data_ref end),
+      data_rule: (if $data_rule == "" then null else $data_rule end),
+      data_sha: (if $data_sha == "" then null else $data_sha end),
+      data_version: (if $data_version == "" then null else $data_version end),
+      data_machine_version: $data_pin,
       old_patch: (if $old_patch == "" then null else $old_patch end),
       new_patch: (if $new_patch == "" then null else $new_patch end),
       negative_control: ($old_patch != "" or $new_patch != ""),
@@ -552,12 +674,18 @@ prepare_contexts
 build_upgrade_images
 
 export UPGRADE_RESTART_3=on-failure
-export MALACHI_RA_MACHINE_VERSION="$OLD_PIN"
-start_cluster
-# The cluster starts on OLD, and a release that predates the stream keys being always served answers them
-# only while the producer_streams flag is on: the checker and the traffic speak no other keys. NEW keeps
-# advertising the flag as a retired no-op, so turning it on here holds across every swap, rollback included.
-enable_stream_keys
+if [ -n "$OLD_FROM_TREE" ]; then
+  export MALACHI_RA_MACHINE_VERSION="$DATA_PIN"
+  start_cluster
+  carry_data_over
+else
+  export MALACHI_RA_MACHINE_VERSION="$OLD_PIN"
+  start_cluster
+  # The cluster starts on OLD, and a release that predates the stream keys being always served answers them
+  # only while the producer_streams flag is on: the checker and the traffic speak no other keys. NEW keeps
+  # advertising the flag as a retired no-op, so turning it on here holds across every swap, rollback included.
+  enable_stream_keys
+fi
 
 say "phase 1: roll forward under the pin"
 begin_phase 1 "$PHASE1_WINDOW_S"

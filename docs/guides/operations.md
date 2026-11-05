@@ -307,7 +307,10 @@ still answer health checks.
 `scripts/docker-upgrade-chaos.sh` certifies the procedure in
 [Upgrades and the rollback floor](#upgrades-and-the-rollback-floor): a cluster rolled from the release
 before this code to this code under the machine version pin, back again, then forward, finalized, with a canary
-feature switched on and a rollback that must be refused with exit 78.
+feature switched on and a rollback that must be refused with exit 78. While that release predates the stream
+keys, which no client speaks together with the keys before them, the roll is certified from this code to the
+canary build, and the release's data first: written by the release, carried over to this code with the pin
+moved to its machine version, and read back whole.
 
 ## Retention
 

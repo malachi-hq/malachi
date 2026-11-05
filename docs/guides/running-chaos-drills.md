@@ -45,8 +45,8 @@ values through the whole window on the stream keys (a producer stream per range,
 say, a few appends in flight), sends again every value whose append failed, records only **acknowledged**
 writes, and at the end reads every range back with `fetch_range` to prove each of them is still readable.
 The upgrade drill switches the stream keys on (`mix malachi.flag enable producer_streams`) as soon as its
-cluster is up, before its checker or its traffic starts, because that cluster starts on an older release
-that serves them only behind the flag; every other drill runs this build, which always serves them. The
+cluster is up, before its checker or its traffic starts, when that cluster starts on an older release that
+serves them only behind the flag; every other drill runs this build, which always serves them. The
 cluster reconverges to 3/3 healthy after every event. And a clean produce plus fetch passes once the
 chaos ends: errors *during* an event are expected, errors after it are not.
 
@@ -182,10 +182,12 @@ built from its own tree: `OLD_REF`, or by default the release an operator would 
 merge is tagged, so when your tree's code (`lib`, `config`, `mix.lock`) is the newest release's, as it is
 on `main`, that is the newest release whose code differs (a release that only changed the docs is
 skipped); when your tree changes the code, it is the newest release. OLD must serve the stream keys, which
-the checker speaks and nothing else: when the release chosen by default predates
-them, the run ends **skipped**, recorded with the reason and not counted as passed or failed, and an
-`OLD_REF` that predates them is refused. The cluster starts on OLD with the stream keys switched on, as in
-every drill, and they stay on through every roll and the rollback. The oldest it accepts is 0.14.2
+the checker and the traffic speak and nothing else, and no client speaks both them and the keys before them,
+so a roll under traffic from a release that predates them cannot be measured at all. When the release chosen
+by default predates them, OLD is your working tree itself, and that release becomes **DATA**, built from its
+own tree too, whose data phase 0 (below) carries over; an `OLD_REF` that predates them is refused. A cluster
+that starts on OLD has the stream keys switched on, as in every drill, and they stay on through every roll
+and the rollback. The oldest release it accepts, as OLD or as DATA, is 0.14.2
 for an unsharded run (the first release with every gate the canary exercises and every control-plane
 group this tree starts) and 0.16.1 for a sharded one (see below), although no release runs sharded before
 the first one that carries the fix for [#136](https://github.com/malachi-hq/malachi/issues/136). The run prints which release it took and why, and records it.
@@ -195,8 +197,17 @@ command at the next machine version, a replication message older builds do not k
 the flag raises the directories to. Nothing of the canary ships; on every pull request the patch is applied
 to the tree and the result compiled, so it never falls behind the code it patches.
 
-Three phases, each with its own checker window and topic, and every node keeping its volume across
-every swap:
+Three phases, four when there is a DATA release, each with its own checker window and topic, and every
+node keeping its volume across every swap:
+
+- **carry the release's data over** (only with DATA): the cluster starts on DATA under its machine version
+  pin, and DATA's own checker, from DATA's tree and speaking the keys DATA serves, writes for
+  `PHASE0_WINDOW_S` seconds. Every node then goes from DATA to your tree with no traffic, the pin moves to
+  your tree's machine version node by node, and the control plane must follow it. This tree's checker must
+  then read, on the stream keys, every write DATA acknowledged, and every Raft group must hold the same
+  state on every member: the control plane's log replayed by the newer code, and the data directories the
+  release left behind, which is what an upgrade from it has to keep. The three phases below then run on the
+  same cluster, with your tree as OLD.
 
 - **roll forward under the pin**: `MALACHI_RA_MACHINE_VERSION` holds the control plane at OLD's version,
   as the [operations guide](operations.md#the-control-plane-machine-version) tells an operator to, and

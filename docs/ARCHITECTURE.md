@@ -360,7 +360,10 @@ downgrade in guarantees, and it is accepted explicitly. The substitutes, and the
 - **Rolling-upgrade certification** (the "deploy the build, roll back the build" operations): delivered as
   `scripts/docker-upgrade-chaos.sh`. The cluster is rolled node by node from the release before this code to
   this tree and back under traffic, then forward again with a canary feature switched on and a rollback that
-  must be refused. The canary (a capability, a metadata command at the next machine version, an unknown
+  must be refused. While the release before this code predates the stream keys, which no client speaks
+  together with the keys before them, the roll starts from this tree, and a phase before it carries the
+  release's data over: written by the release's own checker, every node moved to this tree, the control
+  plane to its machine version, and every acknowledged write read back. The canary (a capability, a metadata command at the next machine version, an unknown
   replication message, a new data format) is a patch applied only to the drill's image, so the gates of
   the bridge release are certified before any real feature depends on them.
 - **`Concuerror`** for systematic interleaving exploration: **attempted and blocked by the tool**,
