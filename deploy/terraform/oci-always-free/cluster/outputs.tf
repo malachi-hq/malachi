@@ -3,6 +3,11 @@ output "client_endpoint" {
   value       = "${oci_network_load_balancer_network_load_balancer.client.ip_addresses[0].ip_address}:4040"
 }
 
+output "log_nodes" {
+  description = "The MALACHI_LOG_NODES value every node receives. Built from the same list as the node names."
+  value       = local.log_nodes
+}
+
 output "node_fqdns" {
   description = "Internal FQDN of every node, the names used by RELEASE_NODE and MALACHI_LOG_NODES."
   value       = local.node_fqdns

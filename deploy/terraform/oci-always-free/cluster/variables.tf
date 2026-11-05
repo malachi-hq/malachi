@@ -44,5 +44,10 @@ variable "a1_memory_gbs" {
   description = "Memory of each A1 node. The Always Free pool is 12 GB in total across A1 instances."
   type        = number
   default     = 6
+
+  validation {
+    condition     = var.a1_memory_gbs <= 6
+    error_message = "a1_memory_gbs must be at most 6: the Always Free A1 pool is 12 GB across two A1 nodes."
+  }
 }
 

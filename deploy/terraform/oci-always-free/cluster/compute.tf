@@ -37,6 +37,8 @@ resource "oci_core_instance" "node" {
   source_details {
     source_type = "image"
     source_id   = each.value.arch == "arm" ? data.oci_core_images.arm.images[0].id : data.oci_core_images.amd.images[0].id
+    # 50 GB per node: three cluster boots leave room for the orchestrator's 50 GB inside the 200 GB free allowance.
+    boot_volume_size_in_gbs = 50
   }
 
   create_vnic_details {
