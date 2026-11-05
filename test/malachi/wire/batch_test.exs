@@ -27,6 +27,12 @@ defmodule Malachi.Wire.BatchTest do
   defp raw(codec, count, inflated_size, payload),
     do: <<Batch.codec_code(codec)::8, count::32, inflated_size::32, byte_size(payload)::32, payload::binary>>
 
+  # The payload of an empty zstd batch: what `encode/2` writes for nothing, which OTP 28 cannot compress.
+  defp empty_frame do
+    <<1, 0::32, 0::32, size::32, frame::binary-size(size)>> = Batch.encode([], :zstd)
+    frame
+  end
+
   # A zstd frame of `total` zero bytes compressed in 1 MiB steps, so the test never holds `total` in memory.
   # A streamed frame declares no content size.
   defp streamed_zeros(total) do
@@ -94,6 +100,9 @@ defmodule Malachi.Wire.BatchTest do
 
     test "an empty batch" do
       assert {:ok, []} = Batch.decode(Batch.encode([], :zstd), max_inflated_bytes: 0)
+      # a whole frame of nothing, as zstd itself reads it
+      assert {:ok, %{frameContentSize: 0}} = :zstd.get_frame_header(empty_frame())
+      assert "" = IO.iodata_to_binary(:zstd.decompress(empty_frame()))
     end
 
     test "zstd makes a batch of similar records much smaller" do
@@ -147,7 +156,7 @@ defmodule Malachi.Wire.BatchTest do
 
     test "frames that each inflate to nothing still end the inflation, one per call" do
       # OTP answers each empty frame with three elements and no output, so only taking input ends the loop.
-      empty = IO.iodata_to_binary(:zstd.compress(""))
+      empty = empty_frame()
       payload = :binary.copy(empty, 10_000)
 
       task = Task.async(fn -> Batch.decode(raw(:zstd, 0, 0, payload), max_inflated_bytes: @mib) end)
@@ -166,7 +175,7 @@ defmodule Malachi.Wire.BatchTest do
     test "a zstd payload shorter than any whole frame is malformed, whatever its header claims" do
       # OTP reads a header out of these bytes from memory it never wrote, so the answer would otherwise
       # change from one call to the next.
-      empty = IO.iodata_to_binary(:zstd.compress(""))
+      empty = empty_frame()
       assert byte_size(empty) == 9
       assert {:ok, []} = Batch.decode(raw(:zstd, 0, 0, empty), max_inflated_bytes: @mib)
 

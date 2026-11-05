@@ -44,6 +44,9 @@ defmodule Malachi.Wire.Batch do
   # magic number (4), frame header descriptor (1), window descriptor or content size (1), block header (3)
   @min_zstd_frame 9
 
+  # The frame of nothing, as `:zstd.compress/1` writes it on OTP 29: OTP 28 raises on an empty input.
+  @empty_zstd_frame <<40, 181, 47, 253, 32, 0, 1, 0, 0>>
+
   @typedoc "How a batch's payload is encoded: as is, or compressed with zstd."
   @type codec :: :none | :zstd
 
@@ -135,6 +138,7 @@ defmodule Malachi.Wire.Batch do
   defp within(_inflated_size, _cap), do: {:error, :batch_too_large}
 
   defp compress(inflated, :none), do: inflated
+  defp compress(<<>>, :zstd), do: @empty_zstd_frame
   defp compress(inflated, :zstd), do: inflated |> :zstd.compress() |> IO.iodata_to_binary()
 
   defp inflate(:none, payload, inflated_size) when byte_size(payload) == inflated_size, do: {:ok, payload}
