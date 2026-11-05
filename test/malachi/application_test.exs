@@ -626,43 +626,6 @@ defmodule Malachi.ApplicationTest do
     end
   end
 
-  describe "ensure_advertised_address/2" do
-    import ExUnit.CaptureIO
-    import ExUnit.CaptureLog
-
-    defp gate(resolved) do
-      test = self()
-      halt = fn status -> send(test, {:halted, status}) end
-
-      output =
-        capture_io(:stderr, fn ->
-          capture_log(fn -> send(test, {:result, App.ensure_advertised_address(resolved, halt)}) end)
-        end)
-
-      {output, receive(do: ({:result, result} -> result))}
-    end
-
-    test "an address to advertise lets the node start" do
-      assert {"", :ok} = gate({:ok, %{host: "malachi-0.svc", port: 4040}})
-      refute_received {:halted, _status}
-    end
-
-    test "a node with peers and no host, or a loopback one, is refused with the startup refusal's status" do
-      {missing, _} = gate({:error, :missing_host})
-      assert_received {:halted, 78}
-      assert missing =~ "MALACHI_ADVERTISED_HOST is not set"
-
-      {loopback, _} = gate({:error, {:loopback_host, "127.0.0.1"}})
-      assert_received {:halted, 78}
-      assert loopback =~ "MALACHI_ADVERTISED_HOST=127.0.0.1 is a loopback or unspecified address"
-    end
-
-    test "this node's own configuration resolves (the suite runs it as a single node)" do
-      assert {:ok, %{host: host, port: port}} = App.advertised_address()
-      assert is_binary(host) and is_integer(port)
-    end
-  end
-
   describe "membership_attributes/0" do
     test "gossips this build's capability set alongside the operator's own attributes" do
       attributes = App.membership_attributes()
@@ -1054,6 +1017,56 @@ defmodule Malachi.ApplicationLivePlacementTest do
       # empty: the point is that each takes the placement as an argument rather than a captured list.
       assert opts[:leading].([{:vn_a, 100, [node()]}]) == []
       assert opts[:version_servers].([{:vn_a, 100, [node()]}]) == []
+    end
+  end
+end
+
+defmodule Malachi.ApplicationAdvertisedAddressTest do
+  @moduledoc """
+  `Malachi.Application.ensure_advertised_address/2`, the startup gate on the address a node advertises.
+
+  `async: false`: the gate's refusal goes to standard error, and `capture_io(:stderr)` captures the one
+  device every process writes to, so a module run alongside it (the suite also prints compiler warnings
+  there while it loads files) would land in the output these tests read.
+  """
+  use ExUnit.Case, async: false
+
+  alias Malachi.Application, as: App
+
+  describe "ensure_advertised_address/2" do
+    import ExUnit.CaptureIO
+    import ExUnit.CaptureLog
+
+    defp gate(resolved) do
+      test = self()
+      halt = fn status -> send(test, {:halted, status}) end
+
+      output =
+        capture_io(:stderr, fn ->
+          capture_log(fn -> send(test, {:result, App.ensure_advertised_address(resolved, halt)}) end)
+        end)
+
+      {output, receive(do: ({:result, result} -> result))}
+    end
+
+    test "an address to advertise lets the node start" do
+      assert {"", :ok} = gate({:ok, %{host: "malachi-0.svc", port: 4040}})
+      refute_received {:halted, _status}
+    end
+
+    test "a node with peers and no host, or a loopback one, is refused with the startup refusal's status" do
+      {missing, _} = gate({:error, :missing_host})
+      assert_received {:halted, 78}
+      assert missing =~ "MALACHI_ADVERTISED_HOST is not set"
+
+      {loopback, _} = gate({:error, {:loopback_host, "127.0.0.1"}})
+      assert_received {:halted, 78}
+      assert loopback =~ "MALACHI_ADVERTISED_HOST=127.0.0.1 is a loopback or unspecified address"
+    end
+
+    test "this node's own configuration resolves (the suite runs it as a single node)" do
+      assert {:ok, %{host: host, port: port}} = App.advertised_address()
+      assert is_binary(host) and is_integer(port)
     end
   end
 end
