@@ -40,7 +40,9 @@ write_files:
       EnvironmentFile=/etc/malachi-orchestrator.env
       Environment=PATH=/opt/malachi-oci/bin:/usr/local/bin:/usr/bin:/bin
       ExecStart=/opt/malachi/daily-run.sh
-      TimeoutStartSec=6h
+      # Worst case: three apply jobs of up to APPLY_WAIT_LIMIT each (3 h), two 30-minute capacity waits, the
+      # ready and smoke waits, and a destroy job of up to 1.5 h. A SIGTERM at this limit runs the teardown trap.
+      TimeoutStartSec=14h
   - path: /etc/systemd/system/malachi-daily.timer
     permissions: "0644"
     content: |
