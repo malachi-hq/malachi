@@ -71,6 +71,14 @@ else
       targets+=("$candidate")
     fi
   done
+  # The Terraform example's scripts and cloud-init templates run on the instances as root, which is where a
+  # download piped into a shell would do the most damage, so they are scanned too. Provider caches are not
+  # the repository's code and are skipped.
+  if [ -d deploy/terraform ]; then
+    while IFS= read -r candidate; do
+      targets+=("$candidate")
+    done < <(find deploy/terraform -type f \( -name '*.sh' -o -name '*.tftpl' \) -not -path '*/.terraform/*' | sort)
+  fi
 fi
 
 if [ "${#targets[@]}" -eq 0 ]; then die "no files to scan"; fi

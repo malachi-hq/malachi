@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars (gitignored) and fill in your values. Nothing secret belongs in this file: every
+# password, cookie and key is generated at apply time.
+region              = "replace-me-home-region"
+compartment_id      = "ocid1.compartment.oc1..replace-me"
+availability_domain = "replace-me-ad"
+image_tag           = "0.22.7"
