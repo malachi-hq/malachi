@@ -60,17 +60,25 @@ defmodule StartIssueWorkSkillTest do
     assert String.contains?(skill, @size_field)
   end
 
-  test "the Ready option id and the four other Status options are unchanged", %{skill: skill} do
+  test "each Status option id sits next to its own name, so two ids cannot be swapped unnoticed", %{skill: skill} do
+    # Each pairing is written in the skill as it is read by a planner: the name, then its id in code ticks.
+    assert skill =~ "Ready (`61e4505c`)"
+
     for {name, id} <- [
           {"Backlog", "f75ad846"},
-          {"Ready", "61e4505c"},
           {"In progress", "47fc9ee4"},
           {"In review", "df73e18b"},
           {"Done", "98236657"}
         ] do
-      assert String.contains?(skill, "#{name}") and String.contains?(skill, id),
-             "Status option #{name} (#{id}) is missing from the skill"
+      assert Regex.match?(~r/#{Regex.escape(name)}\s+`#{id}`/, skill),
+             "Status option #{name} must sit next to its id #{id}"
     end
+  end
+
+  test "the worktree port range names all six ports the script reserves, through +5" do
+    skill = File.read!(@skill)
+    assert skill =~ "`20000 + 10N + 5`"
+    assert skill =~ "`MALACHI_CONSOLE_PORT`"
   end
 
   test "states that the board has no Priority field, so the P0 rule is not applied silently", %{skill: skill} do

@@ -150,8 +150,8 @@ One script writes them all:
 scripts/worktree-env.sh <N> ~/malachi-<N>
 ```
 
-It writes `~/malachi-<N>/worktree.env` (gitignored), with the ports `20000 + 10N` to `20000 + 10N + 4`
-(`MALACHI_TCP_PORT`, `MALACHI_DASHBOARD_PORT`, `JAEGER_UI_PORT`, `OTLP_PORT`, `PROMETHEUS_PORT`), data
+It writes `~/malachi-<N>/worktree.env` (gitignored), with the ports `20000 + 10N` to `20000 + 10N + 5`
+(`MALACHI_TCP_PORT`, `MALACHI_DASHBOARD_PORT`, `JAEGER_UI_PORT`, `OTLP_PORT`, `PROMETHEUS_PORT`, `MALACHI_CONSOLE_PORT`), data
 directories under the worktree's ignored `tmp/`, `MALACHI_NODE=malachi_<N>@127.0.0.1` (the node the
 `mix malachi.*` tasks target) and `COMPOSE_PROJECT_NAME=malachi-<N>`, and prints the dashboard URL.
 Keep that URL for step 7.
