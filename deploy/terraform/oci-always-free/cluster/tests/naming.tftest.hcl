@@ -1,5 +1,5 @@
-# One list drives the node names, the Erlang node names and the log node list, so they cannot drift apart. A node
-# that is given a default password or the old example cookie fails here.
+# One list drives the node names, the Erlang node names and the log node list, so they cannot drift apart. No
+# instance definition may carry a default password or the old example cookie, and no password may be a literal.
 
 variables {
   region              = "replace-me-home-region"
@@ -38,9 +38,8 @@ run "every_node_gets_the_fqdn_in_the_same_list_the_cluster_is_told_about" {
 }
 
 # The cloud-init content depends on generated secrets, which are unknown at plan time, so these checks read the
-# source text instead: the template and the instance definition, as written. Terraform requires an assertion to
-# refer to an object of the configuration, so each condition also names the pinned image tag, which every node
-# runs; the tag is never empty, so that part is always true.
+# source text. Terraform requires an assertion to refer to an object of the configuration, so each condition also
+# names the pinned image tag, which every node runs; the tag is never empty, so that part is always true.
 run "no_default_password_or_example_cookie_is_written_anywhere_in_the_instance_definition" {
   command = plan
 
@@ -52,6 +51,20 @@ run "no_default_password_or_example_cookie_is_written_anywhere_in_the_instance_d
       !can(regex("malachi_durable_cookie", file("compute.tf")))
     )
     error_message = "A default password or the old example cookie is written into the node definition or its template."
+  }
+}
+
+# A literal password of any value, not only the known defaults: every seed password and the cookie must come from
+# a generated resource, never from a quoted string in the node definition.
+run "no_password_or_cookie_is_a_literal_in_the_node_definition" {
+  command = plan
+
+  assert {
+    condition = var.image_tag != "" && (
+      !can(regex("(admin|producer|consumer|app)_pass\\s*=\\s*\"", file("compute.tf"))) &&
+      !can(regex("cookie\\s*=\\s*\"", file("compute.tf")))
+    )
+    error_message = "A password or the cookie is a literal string in compute.tf instead of a generated value."
   }
 }
 
