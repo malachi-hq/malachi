@@ -113,17 +113,17 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
     start_coordinator_on(leader, coord_name)
 
     ref = {coord_name, leader}
-    {:ok, _, _} = GroupCoordinator.poll(ref, "g", "t", :m1)
-    {:ok, _, _} = GroupCoordinator.poll(ref, "g", "t", :m2)
-    {:ok, _, r1} = GroupCoordinator.poll(ref, "g", "t", :m1)
-    {:ok, _, r2} = GroupCoordinator.poll(ref, "g", "t", :m2)
+    {:ok, _} = GroupCoordinator.join_group(ref, "g", "t", :m1)
+    {:ok, _} = GroupCoordinator.join_group(ref, "g", "t", :m2)
+    {:ok, %{ranges: r1}} = GroupCoordinator.heartbeat_group(ref, "g", "t", :m1)
+    {:ok, %{ranges: r2}} = GroupCoordinator.heartbeat_group(ref, "g", "t", :m2)
     assert Enum.sort(r1 ++ r2) == [:r0, :r1]
     assert r1 -- r2 == r1
 
     # a follower must not accept coordination for "t" (defense against stale routing): the guard rejects
     guard_follower = hd(followers)
     start_coordinator_on(guard_follower, coord_name)
-    assert GroupCoordinator.poll({coord_name, guard_follower}, "g", "t", :mx) == {:error, :not_owner}
+    assert GroupCoordinator.join_group({coord_name, guard_follower}, "g", "t", :mx) == {:error, :not_owner}
 
     # failover: the leader dies; the remaining two elect a new leader, and routing reconverges on it
     :ok = :erpc.call(leader, :ra, :stop_server, [:default, {vnode, leader}])
@@ -140,5 +140,53 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
     assert :erpc.call(new_leader, CoordinatorRouter, :owns?, ["t"]) == true
     # resolve on the new leader now returns the bare per-vnode name (local), members reconverge here
     assert :erpc.call(new_leader, CoordinatorRouter, :resolve, [@coord, "t"]) == coord_name
+  end
+
+  test "a cluster whose metadata is one Raft group coordinates every group on its leader, under one name" do
+    {_pa, node_a} = start_peer()
+    {_pb, node_b} = start_peer()
+    {_pc, node_c} = start_peer()
+    nodes = [node_a, node_b, node_c]
+    cluster = :"meta_#{System.unique_integer([:positive])}"
+
+    {:ok, _} = :erpc.call(node_a, MetadataServer, :start, [cluster, [node_a]])
+    assert Rebalance.ra_add_member(cluster, node_b, [node_a]) == :ok
+    assert Rebalance.ra_add_member(cluster, node_c, [node_a, node_b]) == :ok
+    {:ok, leader} = leader_via(cluster, node_a)
+
+    # what each broker publishes when it joins the group, with its own member as the server id
+    for n <- nodes, do: :ok = :erpc.call(n, CoordinatorRouter, :put_leader, [{cluster, n}])
+    # every node runs the node-wide coordinator; only the leader's may coordinate
+    for n <- nodes, do: start_coordinator_on(n, @coord)
+
+    # each node resolves the group to the leader's node-wide coordinator, once its own record of the
+    # leader (ra's local leaderboard, which follows the election) has caught up
+    for n <- nodes do
+      expected = if n == leader, do: @coord, else: {@coord, leader}
+
+      assert {:ok, ^expected} =
+               retry(fn ->
+                 case :erpc.call(n, CoordinatorRouter, :resolve, [@coord, "t"]) do
+                   ^expected -> {:ok, expected}
+                   other -> other
+                 end
+               end)
+
+      assert :erpc.call(n, CoordinatorRouter, :owns?, ["t"]) == (n == leader)
+    end
+
+    # two members joining through different nodes reach one coordinator, and share the ranges out
+    [via_a, via_b] = Enum.take(nodes, 2)
+    ref_a = :erpc.call(via_a, CoordinatorRouter, :resolve, [@coord, "t"])
+    ref_b = :erpc.call(via_b, CoordinatorRouter, :resolve, [@coord, "t"])
+    {:ok, _} = :erpc.call(via_a, GroupCoordinator, :join_group, [ref_a, "g", "t", :m1])
+    {:ok, _} = :erpc.call(via_b, GroupCoordinator, :join_group, [ref_b, "g", "t", :m2])
+    {:ok, %{ranges: r1}} = :erpc.call(via_a, GroupCoordinator, :heartbeat_group, [ref_a, "g", "t", :m1])
+    {:ok, %{ranges: r2}} = :erpc.call(via_b, GroupCoordinator, :heartbeat_group, [ref_b, "g", "t", :m2])
+    assert Enum.sort(r1 ++ r2) == [:r0, :r1]
+
+    # a follower's own coordinator refuses, rather than coordinate the group a second time
+    follower = hd(nodes -- [leader])
+    assert GroupCoordinator.join_group({@coord, follower}, "g", "t", :mx) == {:error, :not_owner}
   end
 end

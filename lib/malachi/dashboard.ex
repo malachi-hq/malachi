@@ -93,13 +93,33 @@ defmodule Malachi.Dashboard do
   def handle_info(:accept, %{socket: socket, limits: limits} = state) do
     case :gen_tcp.accept(socket) do
       {:ok, client} ->
-        spawn(fn -> handle_http(client, limits) end)
+        hand_off(client, limits)
         send(self(), :accept)
         {:noreply, state}
 
       {:error, _} ->
         send(self(), :accept)
         {:noreply, state}
+    end
+  end
+
+  # The accepted socket belongs to this process until it is handed over: a handler that ended without
+  # closing it (an exit on an error path) left it open, owned here, for as long as the dashboard lived.
+  # The handler takes it before it reads a byte, so a socket goes with the process that holds it. The
+  # socket is passive, so one the client already closed is handed over all the same, and the handler finds
+  # the close on its first read. Only a port already gone cannot be handed over (`einval`), which no path
+  # here produces; should it happen, the handler is stopped and the socket closed rather than the
+  # dashboard taken down.
+  defp hand_off(client, limits) do
+    handler = spawn(fn -> receive(do: (:go -> handle_http(client, limits))) end)
+
+    case :gen_tcp.controlling_process(client, handler) do
+      :ok ->
+        send(handler, :go)
+
+      {:error, _closed} ->
+        Process.exit(handler, :kill)
+        :gen_tcp.close(client)
     end
   end
 
@@ -871,6 +891,7 @@ defmodule Malachi.Dashboard do
         dashboard_auth: format_top_blocked(RateLimiter.get_top_blocked(:dashboard_auth, 20)),
         dashboard_api: format_top_blocked(RateLimiter.get_top_blocked(:dashboard_api, 20)),
         publish: format_top_blocked(RateLimiter.get_top_blocked(:publish, 20)),
+        publish_bytes: format_top_blocked(RateLimiter.get_top_blocked(:publish_bytes, 20)),
         subscribe: format_top_blocked(RateLimiter.get_top_blocked(:subscribe, 20)),
         channel_publish: format_top_blocked(RateLimiter.get_top_blocked(:channel_publish, 20)),
         channel_subscribe: format_top_blocked(RateLimiter.get_top_blocked(:channel_subscribe, 20))
@@ -884,6 +905,7 @@ defmodule Malachi.Dashboard do
         # an unconfigured action reports a null limit rather than a default nobody applies.
         dashboard_auth: Access.login_bucket_config(),
         publish: action_config_json(:publish),
+        publish_bytes: action_config_json(:publish_bytes),
         subscribe: action_config_json(:subscribe),
         dashboard_api: action_config_json(:dashboard_api)
       }

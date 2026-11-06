@@ -12,8 +12,18 @@
  * plus latency percentiles. This is the external, end-to-end view (real TCP + serialization + auth),
  * reusing the reference client in ./lib.
  *
- * The ops (`produceOp`/`fetchOp`) are deliberately separate from the drivers (`closedLoop`/`openLoop`) so
- * both drive the same unit of work.
+ * Producing goes through producer streams (./lib/producer.js), as the Elixir generator's does: each
+ * connection is a routing producer that opens one stream per range on the broker leading it, sends its
+ * appends within the window the broker grants (--pipeline at most), and lingers per --linger-ms and
+ * --linger-bytes. In a closed loop an op is one acknowledged append, timed from its send, as in the Elixir
+ * generator: one batch with no lingering on a one-range topic, several when lingering joins them, part of
+ * one when the topic has several ranges. In the open loop an op is one hand-over of --batch records, timed
+ * from its scheduled time to the acknowledgement of its last record.
+ *
+ * Reading goes through the routing readers too: a fetch worker is a fetcher (./lib/fetcher.js), one
+ * fetch_range of each range in turn, and a stream worker a consumer (./lib/consumer.js), one consume stream
+ * per range. The produce op (`produceOp`) is separate from the drivers (`closedLoop`/`openLoop`), so both
+ * hand over the same batches.
  *
  * Usage:
  *   node loadtest.js --scenario produce --connections 20 --duration 10
@@ -27,8 +37,12 @@
  */
 
 const { performance } = require('perf_hooks');
-const { MalachiClient, isMigrating, isNotOwner, isTransport } = require('./lib/client');
-const { colors, config, parseArgs, fail, withRetry } = require('./lib/cli');
+const { MalachiClient } = require('./lib/client');
+const { Router } = require('./lib/router');
+const { Producer, recordBytes: framedRecordBytes } = require('./lib/producer');
+const { Fetcher } = require('./lib/fetcher');
+const { Consumer } = require('./lib/consumer');
+const { colors, config, parseArgs, fail } = require('./lib/cli');
 const payload = require('./lib/payload');
 const os = require('os');
 const path = require('path');
@@ -55,10 +69,15 @@ const KNOB_REQUIRES = {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// A dropped stream connection reconnects with a short backoff, capped so a server that is down does not
-// spin the worker. The same values as @max_reconnect_tries and @reconnect_backoff_ms in the Elixir generator.
-const MAX_RECONNECT_TRIES = 10;
+// How long the appends in flight when a run ends are waited for, as the Elixir generator waits (@drain_ms).
+const DRAIN_MS = 15000;
+// How long setting a run up may wait on the server at one step, as the Elixir generator's setup_timeout_ms.
+const SETUP_TIMEOUT_MS = 30000;
+
+// How long a reader waits before its next try after a dropped connection, or one it could not make, and
+// after a fetch the broker shed: the Elixir generator's @reconnect_backoff_ms and @shed_backoff_ms.
 const RECONNECT_BACKOFF_MS = 20;
+const SHED_BACKOFF_MS = 5;
 
 // A compact HDR-style log-linear histogram for accurate tail percentiles (P99.9 / P99.99) with bounded
 // memory and no sampling error, unlike a reservoir (which under-represents the deep tail). Values are
@@ -150,12 +169,15 @@ class Stats {
     this.bytes = 0;
     this.hist = new Histogram();
     this.saturated = false; // set by openLoop when in-flight hits the cap (server can't sustain the rate)
-    // Stream connections dropped, and the reconnects that followed, counted as the Elixir generator counts
-    // them but only within the measured window: a warmup's drops are discarded with the rest of its Stats,
-    // where the Elixir generator counts drops in any window. Only the stream driver counts these; the other
-    // drivers still count a transport failure in `errors`.
+    // Connections the routing clients lost over the run, added once at its end (`finishClients`).
     this.dropped = 0;
-    this.reconnects = 0;
+    // appends the broker shed, apart from the errors, as the Elixir generator counts them
+    this.overloaded = 0;
+    this.rateLimited = 0;
+    // what the routing clients did over the whole run, added once at its end (`finishClients`)
+    this.moved = 0;
+    this.redirects = 0;
+    this.routeRefreshes = 0;
   }
 
   record(latencyMs, records, bytes) {
@@ -170,12 +192,13 @@ class Stats {
     this.hist.record(Math.round(latencyMs * 1000)); // ms -> us
   }
 
-  drop() {
-    this.dropped += 1;
-  }
-
-  reconnect() {
-    this.reconnects += 1;
+  // A refused append, counted under its reason: the two sheds apart, any other reason as an error. An append
+  // in flight when its connection dropped is in `dropped` (the producer's count), not here.
+  refusal(reason) {
+    if (reason === 'connection_lost') return;
+    if (reason === 'overloaded') this.overloaded += 1;
+    else if (reason === 'rate_limited') this.rateLimited += 1;
+    else this.error(new Error(reason));
   }
 
   error(err) {
@@ -211,19 +234,86 @@ function connect() {
   return newClient().connect(cfg.username, cfg.password);
 }
 
+// One worker's routing producer, its streams opened on every range of the topic before the run, as the
+// Elixir generator's are (inside the connect ramp, so the measured window pays none of it). Its events go
+// to whatever phase is current (`phase`), so one producer serves the warmup and the measured window.
+async function connectProducer(index, opts) {
+  const producer = new Producer(
+    newRouter(),
+    connOpts(),
+    {
+      maxInflight: opts.pipeline,
+      lingerMs: opts.lingerMs,
+      lingerBytes: opts.lingerBytes,
+      label: `malachi-loadtest-${index}`,
+      onEvent: (event) => phase.event(event),
+    },
+  );
+  const prepared = await producer.prepare(opts.topic, SETUP_TIMEOUT_MS);
+  if (prepared.error) {
+    await producer.close();
+    throw new Error(`could not open the producer streams of ${opts.topic}: ${prepared.error}`);
+  }
+  return producer;
+}
+
+// The events of every producer, recorded into the current phase's Stats; replaced at each phase. A closed
+// loop records each acknowledged append as one op; the open loop finishes a hand-over on the
+// acknowledgement of its last record (`handOver`).
+const phase = { event: () => {} };
+
+function closedLoopPhase(stats) {
+  return (event) => {
+    if (event.kind === 'acked') {
+      const records = event.entries.length;
+      stats.record(event.latencyUs / 1000, records, event.entries.reduce((acc, e) => acc + e.bytes, 0));
+    } else {
+      stats.refusal(event.reason);
+    }
+  };
+}
+
+// The records of one hand-over, each tagged with it, so the open loop can tell when all of them were
+// answered, whichever appends carried them.
+function handOver(records, intended) {
+  const unit = { intended, pending: records.length, failed: null, records: records.length, bytes: recordBytes(records) };
+  return { unit, entries: records.map((record) => ({ tag: unit, record, bytes: record.value.length })) };
+}
+
+// A producer sends nothing more, and its appends in flight are waited for (until `drainEnd`, DRAIN_MS after
+// the measured window ended, which an open loop's own drain counts from too) and recorded; a consumer's
+// pages stop counting. What routing did over the whole run counts, for every routing client, as a dropped
+// connection does: an event, not a rate.
+async function finishClients(clients, stats, drainEnd) {
+  await Promise.all(
+    clients.map(async (client) => {
+      if (client instanceof Producer) {
+        await client.stopSending();
+        await client.wait(Math.max(0, drainEnd - performance.now()), (p) => !p.inFlight());
+      }
+      const routing = client.statsNow();
+      stats.moved += routing.moved;
+      stats.redirects += routing.redirects;
+      stats.routeRefreshes += routing.refreshes;
+      stats.dropped += routing.dropped;
+    }),
+  );
+}
+
 // Opens `count` connections under opts.connectStrategy (see CONNECT_STRATEGIES). bounded is a pool of
 // K async workers pulling the next index: at most K connects (and their auth round-trips) in flight,
 // which keeps each auth's individual latency near K / server_verify_rate instead of the whole queue's
 // drain time. stagger delays connection i's START by i * connectStaggerMs and lets completions overlap.
-async function makeClients(count, opts) {
+// `connectOne(i)` makes worker i: a plain connection, or a routing producer (`connectProducer`).
+async function makeClients(count, opts, connectOne = () => connect()) {
   if (opts.connectStrategy === 'all-at-once') {
-    return Promise.all(Array.from({ length: count }, connect));
+    return Promise.all(Array.from({ length: count }, (_, i) => connectOne(i)));
   }
   if (opts.connectStrategy === 'stagger') {
     return Promise.all(
       Array.from({ length: count }, async (_, i) => {
         await sleep(i * opts.connectStaggerMs);
-        return connect();
+        return connectOne(i);
       })
     );
   }
@@ -233,11 +323,34 @@ async function makeClients(count, opts) {
     Array.from({ length: Math.min(opts.connectConcurrency, count) }, async () => {
       while (next < count) {
         const i = next++;
-        clients[i] = await connect();
+        clients[i] = await connectOne(i);
       }
     })
   );
   return clients;
+}
+
+// Worker i of `scenario`, as the Elixir generator makes it: a routing producer where it produces (produce,
+// and even indexes of mixed), a consumer where it streams (a consume stream on every range), a fetcher where
+// it fetches (fetch, and odd indexes of mixed: one fetch_range per range in turn).
+function connectWorker(scenario, i, opts) {
+  if (scenario === 'produce' || (scenario === 'mixed' && i % 2 === 0)) return connectProducer(i, opts);
+  if (scenario === 'stream') return connectReader(new Consumer(newRouter(), connOpts(), { window: opts.window, max: opts.max, onRefusal: 'stop', onEvent: (e) => phase.event(e) }), opts);
+  return connectReader(new Fetcher(newRouter(), connOpts(), { max: opts.max }), opts);
+}
+
+const newRouter = () => new Router({ host: cfg.host, port: cfg.port });
+const connOpts = () => ({ user: cfg.username, pass: cfg.password, timeout: 30000 });
+
+// A reader connected to the broker of every range of the topic before the run, opening nothing (a consumer
+// opens its streams when the run starts, so every page pushed is pushed inside it).
+async function connectReader(reader, opts) {
+  const prepared = await reader.prepare(opts.topic);
+  if (prepared.error) {
+    await reader.close();
+    throw new Error(`could not reach the brokers of ${opts.topic}: ${prepared.error}`);
+  }
+  return reader;
 }
 
 // A reusable value buffer of the requested size (the codec copies it, so sharing across records is safe).
@@ -250,14 +363,19 @@ function makeValue(size) {
 // keep the single shared value they always had.
 function makePool(opts) {
   if (opts.payload === 'constant') return null;
-  return payload.values(opts.payload, opts.payloadSeed, opts.recordSize, payload.poolSize(opts.recordSize, opts.batch, opts.connections, 1));
+  return payload.values(
+    opts.payload,
+    opts.payloadSeed,
+    opts.recordSize,
+    payload.poolSize(opts.recordSize, opts.batch, opts.connections, opts.pipeline),
+  );
 }
 
 // The records of pool batch `n`, keyed by their position in the pool, as the Elixir generator keys them.
 function poolBatch(opts, n) {
   return Array.from({ length: opts.batch }, (_, j) => {
     const pos = n * opts.batch + j;
-    return { key: `key-${pos % opts.keys}`, value: opts.pool[pos] };
+    return { key: `k${pos % opts.keys}`, value: opts.pool[pos] };
   });
 }
 
@@ -265,73 +383,83 @@ function recordBytes(records) {
   return records.reduce((acc, r) => acc + r.value.length, 0);
 }
 
-// ---- ops (one unit of work; return { records, bytes }) ----
+// ---- the produce op ----
 
-// During a vnode split the topic is briefly fenced (:migrating) or routed to a stale owner (:not_owner);
-// both are transient (the fence lifts and the ring settles), so retry them out of the measured op rather
-// than counting a reshard blip as a benchmark error, matching what producer.js/consumer.js do.
-const transient = (err) => isMigrating(err) || isNotOwner(err);
-
-// Constant bytes: one value for every record, as every published series was measured. A pool: the next
-// batch on every op, from connection `index`'s own starting batch, as the Elixir generator walks it.
+// The next batch of records a producing worker hands over. Constant bytes: one value for every record, as
+// every published series was measured, each connection's keys from k0 on, as the Elixir generator's. A
+// pool: the next batch on every op, from connection `index`'s own starting batch, as the Elixir generator
+// walks it.
 function produceOp(opts, index) {
   if (opts.pool === null) {
     const value = makeValue(opts.recordSize);
     let seq = 0;
-    return async (client) => {
-      const batch = Array.from({ length: opts.batch }, () => {
+    return () =>
+      Array.from({ length: opts.batch }, () => {
+        const key = `k${(index * opts.batch + seq) % opts.keys}`;
         seq += 1;
-        return { key: `key-${seq % opts.keys}`, value };
+        return { key, value };
       });
-      const n = await withRetry(() => client.produce(opts.topic, batch), transient);
-      return { records: n, bytes: value.length * batch.length };
-    };
   }
   const batches = opts.pool.length / opts.batch;
   let cursor = payload.startBatch(index, batches, opts.connections);
-  return async (client) => {
+  return () => {
     const batch = poolBatch(opts, cursor);
     cursor = (cursor + 1) % batches;
-    const n = await withRetry(() => client.produce(opts.topic, batch), transient);
-    return { records: n, bytes: opts.recordSize * batch.length };
-  };
-}
-
-function fetchOp(opts) {
-  return async (client, ctx) => {
-    const { records, cursor } = await withRetry(
-      () => client.fetch(opts.topic, { cursor: ctx.cursor, max: opts.max }),
-      transient,
-    );
-    // Drained: rewind to the start so the worker keeps generating fetch load against the backlog.
-    ctx.cursor = records.length === 0 ? null : cursor;
-    return { records: records.length, bytes: recordBytes(records) };
+    return batch;
   };
 }
 
 // ---- drivers ----
 
-// Closed-loop: each client loops its op until the deadline. Latency is measured per op.
-async function closedLoop(clients, makeOpFor, deadline, stats) {
+// Closed-loop: each client loops its op until the deadline. Latency is measured per op. A producing worker
+// hands over a batch whenever its producer has room and otherwise waits for room, so its window, not this
+// loop, sets the pace; each acknowledged append is one op, timed from its send (`closedLoopPhase`).
+async function closedLoop(clients, makeOpFor, deadline, stats, opts) {
+  phase.event = closedLoopPhase(stats);
   await Promise.all(
     clients.map(async (client, index) => {
       const op = makeOpFor(index);
-      const ctx = { cursor: null };
-      while (performance.now() < deadline) {
-        const t0 = performance.now();
-        try {
-          const { records, bytes } = await op(client, ctx);
-          stats.record(performance.now() - t0, records, bytes);
-        } catch (err) {
-          stats.error(err);
-          if (err.message === 'not connected' || /closed/.test(err.message)) break;
-          // Back off briefly so a persistent error (e.g. a permission or topic issue) throttles instead
-          // of pegging a core and inflating the error count with a tight retry spin.
-          await sleep(5);
+      if (client instanceof Producer) {
+        while (performance.now() < deadline) {
+          if (client.room()) {
+            await client.produce(opts.topic, handOver(op(), null).entries);
+          } else {
+            await client.wait(Math.max(1, deadline - performance.now()), (p) => p.room());
+          }
         }
+        return;
+      }
+      // a fetcher: one fetch_range of the next range in turn, an op with the records it brought (a page with
+      // none is still an op), timed over its round trip alone, as the Elixir generator's stream_fetch
+      while (performance.now() < deadline) {
+        await fetchOnce(client, opts, stats, deadline);
       }
     })
   );
+}
+
+// One fetch of the open loop and what it means for the run, as `fetchOnce` reads one of the closed loop: a page
+// is an op, timed from its schedule; a shed or a refusal is counted under its reason; a broker that took no
+// connection, a dropped connection, routes held back or a redirect served no page and are no op, the request
+// gone unserved rather than counted as an error.
+function countOpenFetch(stats, answer, latencyMs, recordSize) {
+  if (answer.kind === 'ok') stats.record(latencyMs, answer.count, answer.count * recordSize);
+  else if (answer.kind === 'error' && answer.reason !== 'connect_failed') stats.refusal(answer.reason);
+}
+
+// One fetch of a fetcher's closed loop and what it means for the run: a page is an op; a shed is counted
+// apart and backed off a little; a refusal, or routes that could not be read, is an error under its reason;
+// routes held back are waited out rather than counted again; a redirect is no op; a dropped connection, or
+// one that cannot be made, waits a little before the next try.
+async function fetchOnce(fetcher, opts, stats, deadline) {
+  const answer = await fetcher.fetch(opts.topic);
+  if (answer.kind === 'ok') stats.record(answer.latencyUs / 1000, answer.count, answer.count * opts.recordSize);
+  else if (answer.kind === 'held') await sleep(Math.min(answer.ms, Math.max(0, deadline - performance.now())));
+  else if (answer.kind === 'dropped' || (answer.kind === 'error' && answer.reason === 'connect_failed')) await sleep(RECONNECT_BACKOFF_MS);
+  else if (answer.kind === 'error' && (answer.reason === 'rate_limited' || answer.reason === 'overloaded')) {
+    stats.refusal(answer.reason);
+    await sleep(SHED_BACKOFF_MS);
+  } else if (answer.kind === 'error') stats.error(new Error(answer.reason));
 }
 
 // Open-loop: fire requests at a fixed arrival rate (opts.rate) regardless of prior completions, and
@@ -340,6 +468,20 @@ async function closedLoop(clients, makeOpFor, deadline, stats) {
 // spread round-robin over the connection pool, which multiplexes them by correlation id. When in-flight
 // hits opts.maxInflight the server can't sustain the rate, so we stop piling on and flag saturation.
 async function openLoop(clients, makeOpFor, opts, durationMs, stats) {
+  // A hand-over is answered once every one of its records is: acknowledged, timed from its scheduled time;
+  // or failed, counted once under the first refusal.
+  phase.event = (event) => {
+    for (const entry of event.entries) {
+      const unit = entry.tag;
+      if (event.kind === 'failed' && unit.failed === null) unit.failed = event.reason;
+      unit.pending -= 1;
+      if (unit.pending === 0) {
+        if (unit.failed === null) stats.record(performance.now() - unit.intended, unit.records, unit.bytes);
+        else stats.refusal(unit.failed);
+        unit.done();
+      }
+    }
+  };
   const gapMs = 1000 / opts.rate;
   const start = performance.now();
   const deadline = start + durationMs;
@@ -356,18 +498,35 @@ async function openLoop(clients, makeOpFor, opts, durationMs, stats) {
           break;
         }
         const index = issued++;
-        const client = clients[index % clients.length];
-        const op = makeOpFor(index);
+        // the op of the worker that takes the request: in mixed, a producer produces and a reader fetches,
+        // whatever the request's own parity (with an odd worker count the two would part)
+        const worker = index % clients.length;
+        const client = clients[worker];
+        const op = makeOpFor(worker);
         const intended = scheduled;
         scheduled += gapMs;
         inflight += 1;
-        // fetch is stateful; a fresh ctx per request makes each fetch read from the start (stateless load).
-        op(client, { cursor: null })
-          .then(({ records, bytes }) => stats.record(performance.now() - intended, records, bytes))
-          .catch((err) => stats.error(err))
-          .finally(() => {
+        if (client instanceof Producer) {
+          // handed over now; answered (`phase.event`) once its records are
+          const { unit, entries } = handOver(op(), intended);
+          unit.done = () => {
             inflight -= 1;
+          };
+          client.produce(opts.topic, entries).catch((err) => {
+            stats.error(err);
+            unit.done();
           });
+        } else {
+          // a fetcher answers its fetches one at a time, so a request waits behind the ones before it, and its
+          // latency, from its schedule, shows that wait
+          client
+            .fetch(opts.topic)
+            .then((answer) => countOpenFetch(stats, answer, performance.now() - intended, opts.recordSize))
+            .catch((err) => stats.error(err))
+            .finally(() => {
+              inflight -= 1;
+            });
+        }
         now = performance.now();
       }
       if (performance.now() < deadline && !stats.saturated) {
@@ -380,141 +539,63 @@ async function openLoop(clients, makeOpFor, opts, durationMs, stats) {
     pump();
   });
 
-  // Drain outstanding requests so their coordinated-omission-corrected latencies land in the stats.
-  while (inflight > 0) await sleep(5);
+  // Drain outstanding requests so their coordinated-omission-corrected latencies land in the stats, for as
+  // long as the closed loop waits for its appends in flight (`finishClients`): a broker that stops
+  // answering without closing its connections does not hold the run forever.
+  const drainEnd = deadline + DRAIN_MS;
+  while (inflight > 0 && performance.now() < drainEnd) await sleep(5);
 }
 
-// Streaming is server-push, not request/await: subscribe and count pushed records for the duration.
-// Latency per push is not comparable to a round-trip, so the stream report is throughput-only.
-let streamRun = 0;
+// Streaming is server-push, not request/await: each consumer opens a consume stream on every range once, when
+// the run starts, and its pages are counted for the duration, warmup and measured window alike reading on
+// the same streams: one op per page with records, and its records, with no latency (a push carries no
+// client-side start). A range the broker refuses is counted once (a shed apart, anything else as an error)
+// and neither it nor a range a split makes of it is read again, as the Elixir generator's consumer does.
 async function streamDriver(clients, opts, durationMs, stats) {
-  // A fresh group per invocation so each run reads the backlog from the start: a warmup pass commits (acks)
-  // its way to the end of the backlog, so sharing a group with the measured run would leave it nothing.
-  const run = streamRun++;
-  const deadline = performance.now() + durationMs;
-  await Promise.all(
-    clients.map((_, index) => streamWorker(clients, index, `loadtest-${run}-${index}`, opts, deadline, stats))
-  );
-}
-
-// One stream connection until the deadline, mirroring stream_loop/4 and resubscribe/4 in the Elixir
-// generator. A subscription the server refused ends the worker, counted in `errors` under its reason. A
-// transport failure, whether the subscribe could not be sent or the connection dropped mid-stream, counts
-// a drop and resubscribes on a fresh connection, which replaces the dead one in `clients` so the caller's
-// final close reaches it.
-async function streamWorker(clients, index, group, opts, deadline, stats) {
-  for (;;) {
-    const outcome = await subscribeUntil(clients[index], group, opts, deadline, stats);
-    if (outcome !== 'dropped') return;
-    const client = await afterDrop(stats, deadline);
-    if (client === null) return;
-    clients[index].close();
-    clients[index] = client;
-  }
-}
-
-// Subscribes and resolves with how the subscription ended: 'deadline', 'refused' or 'dropped'. Whatever
-// happens after the first of these is ignored, pushes included, so nothing is counted past the deadline
-// even while the subscription stays open until the run closes its clients.
-function subscribeUntil(client, group, opts, deadline, stats) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const end = (outcome) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(outcome);
-    };
-    const failed = (err) => {
-      if (settled) return;
-      if (isTransport(err)) return end('dropped');
-      stats.error(err);
-      return end('refused');
-    };
-    const timer = setTimeout(() => end('deadline'), Math.max(0, deadline - performance.now()));
-
-    client
-      .subscribe(opts.topic, {
-        group,
-        window: opts.window,
-        max: opts.max,
-        onRecords: ({ records, cursor }) => {
-          // The workers' deadline timers are armed at different moments and can fire about a millisecond
-          // apart, so a push can reach a worker that has already settled while another has not. The guard
-          // keeps that push out of the count. No test pins it: it needs a push landing inside that
-          // millisecond, which no stub can place deterministically.
-          if (settled || records.length === 0) return;
-          stats.record(0, records.length, recordBytes(records));
-          client.streamAck(opts.topic, group, null, cursor, records.length);
-        },
-        onError: failed,
-      })
-      .catch(failed);
-  });
-}
-
-// A stream connection dropped: count it and reconnect, mirroring after_drop/1 in the Elixir generator.
-// Resolves with a fresh authenticated client, or null once the retry cap or the deadline is reached.
-async function afterDrop(stats, deadline) {
-  stats.drop();
-  for (let tries = 0; tries < MAX_RECONNECT_TRIES && performance.now() < deadline; tries++) {
-    await sleep(RECONNECT_BACKOFF_MS);
-    const client = await connectBefore(deadline);
-    if (client !== null) {
-      stats.reconnect();
-      return client;
-    }
-  }
-  return null;
-}
-
-// Connects and authenticates, resolving with the client, or with null when that fails or the deadline comes
-// first. A connect still in flight at the deadline is destroyed rather than awaited: the socket has no
-// connect timeout and the authentication waits up to 30s, and the rates divide by the time the run took,
-// so waiting on it would stretch the window past --duration. A connect that fails is destroyed too: an
-// authentication that was refused or timed out can leave its socket open, and since the run ends without
-// process.exit, an open socket nobody closes would keep the process alive after the report.
-function connectBefore(deadline) {
-  const client = newClient();
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      client.destroy();
-      resolve(null);
-    }, Math.max(0, deadline - performance.now()));
-    client.connect(cfg.username, cfg.password).then(
-      () => {
-        clearTimeout(timer);
-        resolve(client);
-      },
-      () => {
-        clearTimeout(timer);
-        client.destroy();
-        resolve(null);
-      }
-    );
-  });
+  // a refusal is counted whichever window it came in, as the Elixir generator counts it: kept for the
+  // measured window's report (`main`), since a refused range is not opened, nor refused, again
+  phase.event = (event) => {
+    if (event.kind === 'records' && event.count > 0) stats.record(0, event.count, event.count * opts.recordSize);
+    else if (event.kind === 'failed') opts.countConsumeRefusal(event.reason);
+  };
+  await Promise.all(clients.filter((c) => !c.topics.includes(opts.topic)).map((c) => c.start(opts.topic)));
+  await sleep(durationMs);
 }
 
 // Appends `count` records up front so fetch/stream/mixed have a backlog to read, from the pool when there
-// is one, walking it from its start.
+// is one, walking it from its start, through one producer with 16 appends in flight, as the Elixir
+// generator prepopulates. A refusal fails the run before it starts.
 async function prepopulate(opts) {
   const { topic, prepopulate: count, recordSize, keys, pool } = opts;
   if (count <= 0) return;
-  const client = await connect();
-  const value = makeValue(recordSize);
-  const CHUNK = 1000;
-  let done = 0;
-  while (done < count) {
-    const n = Math.min(CHUNK, count - done);
-    const batch = Array.from({ length: n }, (_, i) => ({
-      key: `key-${(done + i) % keys}`,
-      value: pool === null ? value : pool[(done + i) % pool.length],
-    }));
-    await withRetry(() => client.produce(topic, batch), transient);
-    done += n;
+  const failures = [];
+  const producer = new Producer(
+    new Router({ host: cfg.host, port: cfg.port }),
+    { user: cfg.username, pass: cfg.password, timeout: 30000 },
+    { maxInflight: 16, label: 'malachi-loadtest-prepopulate', onEvent: (e) => e.kind === 'failed' && failures.push(e.reason) },
+  );
+  try {
+    const value = makeValue(recordSize);
+    const CHUNK = 1000;
+    let done = 0;
+    while (done < count && failures.length === 0) {
+      const n = Math.min(CHUNK, count - done);
+      const batch = Array.from({ length: n }, (_, i) => ({
+        key: `k${(done + i) % keys}`,
+        value: pool === null ? value : pool[(done + i) % pool.length],
+      }));
+      await producer.produce(topic, handOver(batch, null).entries);
+      // a stall fails the setup after one wait, not after one wait per chunk
+      if ((await producer.wait(SETUP_TIMEOUT_MS, (p) => p.room())) === 'timeout') failures.push('prepopulate_timeout');
+      done += n;
+    }
+    if (failures.length === 0 && (await producer.wait(SETUP_TIMEOUT_MS)) === 'timeout') failures.push('prepopulate_timeout');
+    if (failures.length > 0) throw new Error(`could not prepopulate ${topic}: ${failures[0]}`);
+    // a JSON report is the whole of stdout
+    if (!opts.json) console.log(colors.gray(`   prepopulated ${done} records`));
+  } finally {
+    await producer.close();
   }
-  client.close();
-  console.log(colors.gray(`   prepopulated ${done} records`));
 }
 
 // ---- reproduce metadata ----
@@ -679,7 +760,7 @@ function report(scenario, opts, elapsedMs, stats) {
           topic: opts.topic,
           target_rate_per_s: openLoopMode ? opts.rate : null,
           saturated: openLoopMode ? stats.saturated : null,
-          operations: stats.count,
+          ops: stats.count,
           ops_per_s: Math.round(stats.count / secs),
           records: stats.records,
           records_per_s: Math.round(stats.records / secs),
@@ -687,10 +768,13 @@ function report(scenario, opts, elapsedMs, stats) {
           mb_per_s: Number((stats.bytes / 1e6 / secs).toFixed(3)),
           errors: stats.errors,
           error_reasons: stats.errorReasons,
-          // Counted only by the stream driver: elsewhere a transport failure is still one of `errors`, so a
-          // number here would claim a zero this generator never measured.
-          dropped: streaming ? stats.dropped : null,
-          reconnects: streaming ? stats.reconnects : null,
+          // every worker is a routing client that counts the connections it lost
+          dropped: stats.dropped,
+          overloaded: stats.overloaded,
+          rate_limited: stats.rateLimited,
+          moved: stats.moved,
+          redirects: stats.redirects,
+          route_refreshes: stats.routeRefreshes,
           latency_ms: streaming
             ? null
             : {
@@ -734,7 +818,7 @@ function report(scenario, opts, elapsedMs, stats) {
     .sort(([a, x], [b, y]) => y - x || a.localeCompare(b))
     .map(([reason, n]) => `${reason}=${n}`);
   if (reasons.length > 0) console.log(`   reasons:     ${colors.red(reasons.join('  '))}`);
-  if (streaming) console.log(`   dropped:     ${stats.dropped}  (reconnects ${stats.reconnects})`);
+  console.log(`   dropped:     ${stats.dropped}`);
   if (openLoopMode && stats.saturated) {
     console.log(colors.red(`   saturated:   server could not sustain ${opts.rate} rps (in-flight hit ${opts.maxInflight})`));
   }
@@ -763,9 +847,12 @@ function regimeFields(opts) {
   return {
     batch: opts.batch,
     record_size: opts.recordSize,
+    pipeline: opts.pipeline,
     payload: opts.payload,
     payload_seed: opts.payloadSeed,
     payload_pool_values: opts.pool ? opts.pool.length : null,
+    linger_ms: opts.lingerMs,
+    linger_bytes: opts.lingerBytes,
   };
 }
 
@@ -795,6 +882,11 @@ ${colors.yellow('Options')}
   --duration <s>     Test duration in seconds (default 10)
   --topic <t>        Topic (default loadtest_<timestamp>, auto-created)
   --batch <n>        Records per produce op (default 1)
+  --pipeline <n>     Appends a producer stream keeps in flight at most, under the window the broker
+                     grants (default 1)
+  --linger-ms <ms>   How long a range's records may wait to join one append (default 0: send at once)
+  --linger-bytes <b> How many bytes of records one append takes at most, unless one batch alone is more
+                     (an append never splits a batch; default one batch's worth)
   --record-size <b>  Value size in bytes (default 256)
   --keys <n>         Key cardinality (default 1000)
   --max <n>          Max records per fetch/push (default 100)
@@ -826,6 +918,7 @@ async function main() {
     'scenario', 'connections', 'duration', 'topic', 'batch', 'record-size',
     'keys', 'max', 'window', 'prepopulate', 'warmup', 'samples', 'rate', 'max-inflight',
     'connect-strategy', 'connect-concurrency', 'connect-stagger-ms', 'measure-marker', 'payload', 'payload-seed',
+    'pipeline', 'linger-ms', 'linger-bytes',
   ];
   const { flags } = parseArgs(process.argv.slice(2), valueFlags);
   if (flags.help) return help();
@@ -900,7 +993,16 @@ async function main() {
     measureMarker: measureMarker || null,
     payload: enums.payload,
     payloadSeed,
+    pipeline: int(flags.pipeline, 1),
+    lingerMs: int(flags['linger-ms'], 0),
   };
+  // One batch's worth unless given, counted as the producer counts it, with the longest key the run uses: an
+  // append never splits a hand-over, so with one range a batch is one append.
+  opts.lingerBytes = int(flags['linger-bytes'], opts.batch * framedRecordBytes(opts.recordSize, Buffer.byteLength(`k${opts.keys - 1}`)));
+  if (opts.pipeline < 1 || opts.lingerBytes < 1) {
+    console.error(colors.red('--pipeline and --linger-bytes must be positive integers'));
+    process.exit(1);
+  }
 
   // A json size too small for the document is refused before any connection opens.
   if (opts.payload === 'json') {
@@ -929,7 +1031,7 @@ async function main() {
     // rerun works; any other refusal fails here, naming its cause, rather than as a run full of errors.
     const admin = await connect();
     try {
-      await admin.createTopic(opts.topic);
+      await admin.createTopic(opts.topic, 8);
     } catch (err) {
       if (err.message !== 'already_exists') throw new Error(`could not create topic ${opts.topic}: ${err.message}`);
     } finally {
@@ -943,45 +1045,44 @@ async function main() {
     // One op per connection for the whole run, warmup and measured window alike, so each connection's
     // cursor carries on across them the way the Elixir worker's does (see scenarioOps).
     opts.poolOps = new Map();
+    // a consume stream refused before the measured window opened is counted in it (`streamDriver`)
+    const earlyRefusals = [];
+    let measured = null;
+    opts.countConsumeRefusal = (reason) => (measured === null ? earlyRefusals.push(reason) : measured.refusal(reason));
 
     await prepopulate(opts);
 
-    clients = await makeClients(opts.connections, opts);
+    clients = await makeClients(opts.connections, opts, (i) => connectWorker(scenario, i, opts));
 
     if (opts.warmup > 0) {
       const warmStats = new Stats();
       await runScenario(scenario, clients, opts, opts.warmup * 1000, warmStats);
       if (!opts.json) console.log(colors.gray(`   warmup done (${warmStats.count} ops discarded)`));
-      // Only the stream scenario reconnects here: a subscription can only be ended by closing its socket
-      // (there is no unsubscribe frame), so reusing it across warmup and measure would double-subscribe.
-      // Every other scenario keeps its warmed connections, as the Elixir generator always has.
-      // Reconnecting them all ran a second authentication storm inside every ceiling point (93s at 512
-      // connections on the CI runner) and measured a colder client than the Elixir generator did, so
-      // published Node numbers move with this change.
-      if (scenario === 'stream') {
-        clients.forEach((c) => c.close());
-        clients = await makeClients(opts.connections, opts);
-      }
+      // every worker keeps its connections and streams into the measured window, as the Elixir generator's do
     }
 
     const stats = new Stats();
+    measured = stats;
+    for (const reason of earlyRefusals) stats.refusal(reason);
     // The measured window begins here, after every connection authenticated and the warmup ended, which
     // no caller can infer from the spawn time (see --measure-marker in help()).
     if (opts.measureMarker) fs.writeFileSync(opts.measureMarker, '');
     const start = performance.now();
     await runScenario(scenario, clients, opts, opts.duration * 1000, stats);
     const elapsed = performance.now() - start;
+    const windowEnd = start + opts.duration * 1000;
+    await finishClients(clients, stats, windowEnd + DRAIN_MS);
 
     report(scenario, opts, elapsed, stats);
   } catch (err) {
     fail(err, cfg);
   } finally {
-    clients.forEach((c) => c.close());
+    await Promise.all(clients.map((c) => c.close()));
   }
 }
 
-// Builds the per-worker/per-request op selector for a scenario (shared by both drivers).
-// mixed: even indexes produce, odd indexes fetch.
+// Builds the per-worker produce op selector for a scenario (shared by both drivers); a reading worker takes
+// no op. mixed: even indexes produce, odd indexes fetch.
 function scenarioOps(scenario, opts) {
   // Constant bytes keep the one op every connection shared, its key sequence included, as the published
   // series were measured. A pool gets an op per connection, each walking it from its own batch; the closed
@@ -997,12 +1098,8 @@ function scenarioOps(scenario, opts) {
     return produceOps.get(key);
   };
   if (scenario === 'produce') return produceFor;
-  if (scenario === 'fetch') {
-    const op = fetchOp(opts);
-    return () => op;
-  }
-  const fetch = fetchOp(opts);
-  return (index) => (index % 2 === 0 ? produceFor(index) : fetch);
+  if (scenario === 'fetch') return () => null;
+  return (index) => (index % 2 === 0 ? produceFor(index) : null);
 }
 
 // Dispatches to the right driver for `durationMs`, recording into `stats`. --rate selects open-loop
@@ -1015,7 +1112,7 @@ function runScenario(scenario, clients, opts, durationMs, stats) {
   if (opts.rate > 0) {
     return openLoop(clients, makeOpFor, opts, durationMs, stats);
   }
-  return closedLoop(clients, makeOpFor, performance.now() + durationMs, stats);
+  return closedLoop(clients, makeOpFor, performance.now() + durationMs, stats, opts);
 }
 
 function int(v, fallback) {
@@ -1025,4 +1122,4 @@ function int(v, fallback) {
 
 if (require.main === module) main();
 
-module.exports = { Stats };
+module.exports = { Stats, countOpenFetch };

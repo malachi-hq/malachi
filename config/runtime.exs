@@ -220,6 +220,19 @@ config :malachi,
   # Backpressure valve (records): past this many parked records the broker sheds new produces with an
   # `:overloaded` error instead of letting them queue until the caller times out and the connection drops.
   group_commit_max_inflight: parse_int.("MALACHI_GROUP_COMMIT_MAX_INFLIGHT", 200_000),
+  # Producer streams (Malachi.ProducerStreams): the most a stream's window may grant, in appends and in
+  # inflated bytes; the records a range may have in flight before its streams' windows start to shrink, and
+  # the count at which they reach 0 (Malachi.StreamWindow); and the most one append's batch may inflate to.
+  stream_max_window_appends: parse_int.("MALACHI_STREAM_MAX_WINDOW_APPENDS", 64),
+  stream_max_window_bytes: parse_int.("MALACHI_STREAM_MAX_WINDOW_BYTES", 16_777_216),
+  stream_inflight_soft: parse_int.("MALACHI_STREAM_INFLIGHT_SOFT", 50_000),
+  stream_inflight_hard: parse_int.("MALACHI_STREAM_INFLIGHT_HARD", 200_000),
+  max_inflated_batch_bytes: parse_int.("MALACHI_MAX_INFLATED_BATCH_BYTES", 16_777_216),
+  # Consumer groups (Malachi.Consumer.GroupCoordinator): how long a member may go without a heartbeat or a
+  # commit before it is evicted and its ranges are handed to the others (the eviction runs on a tick of a
+  # third of it, at most 10 s). A positive count below 2^32: a whole number outside that is the default,
+  # logged, and anything that is not a whole number stops the node at boot, as every integer setting does.
+  group_session_ms: parse_int.("MALACHI_GROUP_SESSION_MS", 30_000),
   # 5ms is the measured sweet spot on a fast SSD: same-or-better throughput than 10ms with roughly half
   # the latency, while coalescing groups stay large enough not to swamp a slower disk with fsyncs. Lower
   # (2ms) wins on latency on fast storage; raise it on true-fsync disks that cap fsync IOPS.
@@ -240,6 +253,11 @@ config :malachi,
   # This node's broker attributes (opaque k/v gossiped via membership; e.g. "rack=a,dc=east"), used
   # by rack-aware placement. Parsed by Malachi.Application.parse_attributes/1. Absent => none.
   log_attributes: System.get_env("MALACHI_LOG_ATTRIBUTES"),
+  # Where a client reaches this node, gossiped so any node can tell a client where every broker is
+  # (Malachi.Cluster.Advertised). A node with peers must set the host to one clients can reach; the port
+  # defaults to MALACHI_TCP_PORT.
+  advertised_host: System.get_env("MALACHI_ADVERTISED_HOST"),
+  advertised_port: parse_int.("MALACHI_ADVERTISED_PORT", nil),
   # The attribute key to spread segment replicas over (e.g. "rack"); absent => no spread (plain HRW).
   log_spread_by: System.get_env("MALACHI_LOG_SPREAD_BY"),
   # Static cluster topology "node1=rack_a,node2=rack_b,...". The per-node value of :log_spread_by,
@@ -343,6 +361,8 @@ if config_env() != :test do
     # broker far below what it can do.
     publish_rate_limit: parse_int.("MALACHI_PUBLISH_RATE_LIMIT", 0),
     publish_rate_window_ms: parse_int.("MALACHI_PUBLISH_RATE_WINDOW_MS", 1_000),
+    publish_bytes_rate_limit: parse_int.("MALACHI_PUBLISH_BYTES_RATE_LIMIT", 0),
+    publish_bytes_rate_window_ms: parse_int.("MALACHI_PUBLISH_BYTES_RATE_WINDOW_MS", 1_000),
     subscribe_rate_limit: parse_int.("MALACHI_SUBSCRIBE_RATE_LIMIT", 0),
     subscribe_rate_window_ms: parse_int.("MALACHI_SUBSCRIBE_RATE_WINDOW_MS", 60_000),
     rate_limit_cleanup_interval_ms: parse_int.("MALACHI_RATE_LIMIT_CLEANUP_INTERVAL", 300_000),

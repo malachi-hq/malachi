@@ -2,6 +2,7 @@ defmodule Malachi.ApplicationTest do
   use ExUnit.Case, async: true
 
   alias Malachi.Application, as: App
+  alias Malachi.Cluster.Advertised
   alias Malachi.Cluster.Capabilities
   alias Malachi.Cluster.MemberIncarnation
 
@@ -632,11 +633,15 @@ defmodule Malachi.ApplicationTest do
       assert attributes[Capabilities.key()] == Capabilities.advertised()
     end
 
-    test "is the operator's configured attributes put through the capability merge" do
+    test "is the operator's configured attributes put through the capability merge, with the client address" do
       # The wiring, read rather than driven: :log_attributes is VM-wide application env and this module
       # is async, so setting it would race every other test and every application process that reads it.
+      {:ok, address} = App.advertised_address()
+
       assert App.membership_attributes() ==
-               Capabilities.attributes(App.parse_attributes(Application.get_env(:malachi, :log_attributes)))
+               App.parse_attributes(Application.get_env(:malachi, :log_attributes))
+               |> Capabilities.attributes()
+               |> Advertised.put(address)
     end
 
     test "the operator's attributes survive the merge" do
@@ -662,7 +667,7 @@ defmodule Malachi.ApplicationTest do
     test "a flag this node itself does not advertise cannot be switched on" do
       # The local node is always one of the configured nodes, and the membership view reports what this
       # build really advertises. So the loop is closed: nothing can enable a flag this node would then
-      # refuse to serve. The registry is empty here, so the name is injected; the advertisement is not.
+      # refuse to serve. The name is injected so no registered flag is touched; the advertisement is not.
       flag = :"app_flag_#{System.unique_integer([:positive])}"
 
       assert App.enable_cluster_flag(to_string(flag), known: [flag], nodes: [node()]) ==
@@ -1012,6 +1017,56 @@ defmodule Malachi.ApplicationLivePlacementTest do
       # empty: the point is that each takes the placement as an argument rather than a captured list.
       assert opts[:leading].([{:vn_a, 100, [node()]}]) == []
       assert opts[:version_servers].([{:vn_a, 100, [node()]}]) == []
+    end
+  end
+end
+
+defmodule Malachi.ApplicationAdvertisedAddressTest do
+  @moduledoc """
+  `Malachi.Application.ensure_advertised_address/2`, the startup gate on the address a node advertises.
+
+  `async: false`: the gate's refusal goes to standard error, and `capture_io(:stderr)` captures the one
+  device every process writes to, so a module run alongside it (the suite also prints compiler warnings
+  there while it loads files) would land in the output these tests read.
+  """
+  use ExUnit.Case, async: false
+
+  alias Malachi.Application, as: App
+
+  describe "ensure_advertised_address/2" do
+    import ExUnit.CaptureIO
+    import ExUnit.CaptureLog
+
+    defp gate(resolved) do
+      test = self()
+      halt = fn status -> send(test, {:halted, status}) end
+
+      output =
+        capture_io(:stderr, fn ->
+          capture_log(fn -> send(test, {:result, App.ensure_advertised_address(resolved, halt)}) end)
+        end)
+
+      {output, receive(do: ({:result, result} -> result))}
+    end
+
+    test "an address to advertise lets the node start" do
+      assert {"", :ok} = gate({:ok, %{host: "malachi-0.svc", port: 4040}})
+      refute_received {:halted, _status}
+    end
+
+    test "a node with peers and no host, or a loopback one, is refused with the startup refusal's status" do
+      {missing, _} = gate({:error, :missing_host})
+      assert_received {:halted, 78}
+      assert missing =~ "MALACHI_ADVERTISED_HOST is not set"
+
+      {loopback, _} = gate({:error, {:loopback_host, "127.0.0.1"}})
+      assert_received {:halted, 78}
+      assert loopback =~ "MALACHI_ADVERTISED_HOST=127.0.0.1 is a loopback or unspecified address"
+    end
+
+    test "this node's own configuration resolves (the suite runs it as a single node)" do
+      assert {:ok, %{host: host, port: port}} = App.advertised_address()
+      assert is_binary(host) and is_integer(port)
     end
   end
 end

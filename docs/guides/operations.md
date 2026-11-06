@@ -14,6 +14,12 @@ left at their development values.
 Only 4040 needs to be reachable by clients. Treat 4041 and 4042 as internal ports: they expose
 operational detail and user management.
 
+Each node gossips the address clients reach it at, so any node can tell a client where every broker is:
+set `MALACHI_ADVERTISED_HOST` to a host clients can resolve (and `MALACHI_ADVERTISED_PORT` when it differs
+from `MALACHI_TCP_PORT`). A node with peers in its control plane refuses to start, with exit status 78,
+when the host is unset, a loopback name or address, or the unspecified address a listener binds (`0.0.0.0`,
+`::`); a single node defaults to its node name's host.
+
 ## The console endpoint
 
 The operator console is served from its own port, beside the dashboard, until it reaches parity with it
@@ -47,6 +53,13 @@ answers `503` as described below.
   `Authorization: Bearer` or the `malachi_token` cookie a login on the dashboard sets, which the browser
   also sends to the console's port on the same host. Each route requires a console role
   ([console roles](authentication.md#console-roles)), and `GET /api/v1/me` says who the session is.
+- **Producers.** `GET /api/v1/producers`, at the `viewer` role, lists the producer streams open on the
+  node that answers, oldest first: each stream's topic, range, segment and primary, the label the client
+  opened it with, the client's address, its window, its next and acknowledged sequences and what it has
+  in flight. It pages with `page_size` (100 by default, at most 1000) and `page_token`; a connection that
+  does not answer in time is counted in `unanswered_connections` and makes the listing `complete: false`.
+  It lists one node's streams, so ask every node for the whole cluster's. The same streams are counted by
+  `malachi_producer_streams_open` and `malachi_producer_streams_total{event}`.
 
 ## Health checks
 
@@ -120,11 +133,14 @@ MALACHI_GROUP_COMMIT_INTERVAL_MS=5           # flush period; ~the latency each p
 MALACHI_GROUP_COMMIT_FLUSH_MAX_RECORDS=8000  # eager flush: bound each fsync even on slow disks
 MALACHI_GROUP_COMMIT_MAX_INFLIGHT=200000     # backpressure valve: shed with :overloaded past this
 
-# The produce path has TWO refusals, and a client is meant to tell them apart. :overloaded is the valve
-# above, the broker saying it is saturated right now; :rate_limited is the OPT-IN publish quota below,
-# this user saying it is over its own allowance. Off by default (0 = no limit); see docs/RATE_LIMITING.md.
-MALACHI_PUBLISH_RATE_LIMIT=0                 # produce requests per window, per user, PER NODE
+# The produce path has THREE refusals, and a client is meant to tell them apart. :overloaded is the valve
+# above, the broker saying it is saturated right now; :rate_limited is the OPT-IN publish quotas below,
+# this user saying it is over its own allowance for this window; :quota_too_small is one batch costing
+# more than a whole window, which no retry fixes. Off by default (0 = no limit); see docs/RATE_LIMITING.md.
+MALACHI_PUBLISH_RATE_LIMIT=0                 # produced records per window, per user, PER NODE
 MALACHI_PUBLISH_RATE_WINDOW_MS=1000
+MALACHI_PUBLISH_BYTES_RATE_LIMIT=0           # produced bytes per window, per user, PER NODE (a stream append's inflated)
+MALACHI_PUBLISH_BYTES_RATE_WINDOW_MS=1000
 
 # rf>1 (replicated), replication-level. Default OFF: enable only for hot-range, fsync-bound
 # workloads (many producers per range); on thin-spread loads it lowers throughput.
@@ -291,7 +307,10 @@ still answer health checks.
 `scripts/docker-upgrade-chaos.sh` certifies the procedure in
 [Upgrades and the rollback floor](#upgrades-and-the-rollback-floor): a cluster rolled from the release
 before this code to this code under the machine version pin, back again, then forward, finalized, with a canary
-feature switched on and a rollback that must be refused with exit 78.
+feature switched on and a rollback that must be refused with exit 78. While that release predates the stream
+keys, which no client speaks together with the keys before them, the roll is certified from this code to the
+canary build, and the release's data first: written by the release, carried over to this code with the pin
+moved to its machine version, and read back whole.
 
 ## Retention
 
@@ -569,6 +588,9 @@ An upgrade has two floors, and a rollback has to clear both: the **on-disk forma
 **control-plane machine version** further down. They move independently, so check them separately
 before rolling a release back.
 
+Every node with peers needs `MALACHI_ADVERTISED_HOST` set before it starts: without it the node exits 78,
+so set it on every node before rolling any of them.
+
 ### The on-disk format
 
 The root of the log data directory (`MALACHI_LOG_DATA_DIR`) holds a small text file, `malachi.format`:
@@ -606,8 +628,9 @@ A refused start exits with status **78** and logs one line that begins with `REF
 and names the directory, both format levels and the release to start instead. The same line is printed
 on stderr, so it reaches container logs even when the logger has not flushed. The same status covers a
 marker that cannot be parsed (restore it from a backup or another node) and one that cannot be read or
-written (fix the volume or its permissions), and a node whose build cannot honour a cluster flag that is
-already on (see [Cluster flags](#cluster-flags)).
+written (fix the volume or its permissions), a node whose build cannot honour a cluster flag that is
+already on (see [Cluster flags](#cluster-flags)), and a node with peers that has no address to advertise
+to clients, or a loopback or unspecified one (set `MALACHI_ADVERTISED_HOST`, see [Ports](#ports)).
 
 A service manager that restarts on failure will restart a refused node again and again. Tell it not to:
 
@@ -686,6 +709,12 @@ out of MALACHI_LOG_NODES, then run this again
 
 A node that is down counts as not supporting it. Upgrade it, or take it out of `MALACHI_LOG_NODES` on
 every node, before switching the flag on.
+
+The flags this build knows:
+
+| flag | switches on |
+|---|---|
+| `producer_streams` | nothing: retired. It switched on the routing, stream and group keys (`Malachi.Wire` 25 to 34) in the releases before they were always served. This build serves them whether it is on or not, and still advertises it, so a cluster that switched it on keeps booting this build. The group keys answer `unsupported` until the control plane reaches machine version 8, which removing `MALACHI_RA_MACHINE_VERSION` finalizes |
 
 Two things follow from a flag being permanent:
 
@@ -780,9 +809,11 @@ The checks that catch the common mistakes:
       with `old_ref` (see [Running the chaos drills](running-chaos-drills.md#rolling-upgrade-and-rollback)).
 - [ ] **`MALACHI_LOG_NODES` lists exactly the nodes you run.** A node left in the list that is not running
       blocks every cluster flag, and one missing from it is not counted when a flag is switched on.
+- [ ] **`MALACHI_ADVERTISED_HOST` names each node as clients reach it.** A node with peers refuses to
+      start without it, or with a loopback or unspecified address. See [Ports](#ports).
 - [ ] **Your service manager treats exit 78 differently from an ordinary failure.** Exit 78 means the
-      node cannot run with the binary it was given, so restarting it only hides that; an upgrade is what
-      helps. systemd can stop outright (`RestartPreventExitStatus=78`); Compose cannot tell the two
+      node cannot run with what it was given, its binary or its configuration, so restarting it only
+      hides that; the line it logs says which to fix. systemd can stop outright (`RestartPreventExitStatus=78`); Compose cannot tell the two
       apart, so bound the retries (`restart: on-failure:5`) and alert on exit code 78.
 - [ ] **`malachi_domain_violations` alerted on.**
 - [ ] If you use ACLs, **`MALACHI_ACL_STRICT=true`**. Without it grants are inert and global permissions

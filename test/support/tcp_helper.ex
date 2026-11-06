@@ -44,25 +44,34 @@ defmodule Malachi.Test.TCPHelper do
 
   # ---- binary Wire protocol helpers ----
 
-  @doc "Reads one length-prefixed Wire frame body from the socket (accumulating until complete)."
+  @doc """
+  Reads one length-prefixed Wire frame body from the socket (accumulating until complete). Bytes past the
+  frame, the start of the server's next frames when several reach the socket together, are kept for the
+  next read on the same socket from the same process.
+  """
   def recv_frame(socket, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 5000)
-    recv_frame_loop(socket, "", timeout, :os.system_time(:millisecond))
+    buffer = Process.delete({__MODULE__, :buffer, socket}) || ""
+    recv_frame_loop(socket, buffer, timeout, :os.system_time(:millisecond))
   end
 
   defp recv_frame_loop(socket, buffer, timeout, start_time) do
     case Wire.decode_frame(buffer) do
-      {:ok, body, _rest} ->
+      {:ok, body, rest} ->
+        if rest != "", do: Process.put({__MODULE__, :buffer, socket}, rest)
         {:ok, body}
 
       :incomplete ->
         remaining = max(timeout - (:os.system_time(:millisecond) - start_time), 0)
 
+        # a frame read only in part is kept too, for a later read to finish
         if remaining == 0 do
+          if buffer != "", do: Process.put({__MODULE__, :buffer, socket}, buffer)
           {:error, :timeout}
         else
           case :gen_tcp.recv(socket, 0, remaining) do
             {:ok, data} -> recv_frame_loop(socket, buffer <> data, timeout, start_time)
+            {:error, :timeout} -> recv_frame_loop(socket, buffer, timeout, start_time)
             {:error, _} = error -> error
           end
         end
@@ -89,41 +98,6 @@ defmodule Malachi.Test.TCPHelper do
     else
       {:error, Wire.decode_auth_resp(payload)}
     end
-  end
-
-  # ---- streaming helpers ----
-
-  @doc "Sends a subscribe frame (opens a push stream); no immediate response is expected."
-  def subscribe(socket, topic, group, window, max, correlation_id) do
-    subscribe(socket, topic, group, nil, window, max, correlation_id)
-  end
-
-  @doc "Sends a subscribe frame for a consumer-group `member` (server-scoped push stream)."
-  def subscribe(socket, topic, group, member, window, max, correlation_id) do
-    payload = Wire.encode_subscribe_req(topic, group, member, window, max)
-    :ok = :gen_tcp.send(socket, Wire.encode_request(Wire.subscribe_key(), correlation_id, payload))
-  end
-
-  @doc """
-  Reads one server push and asserts it carries `correlation_id` (the subscribe's). Returns
-  `{records, next_cursor}` decoded from the fetch-response payload.
-  """
-  def recv_push(socket, correlation_id, opts \\ []) do
-    {:ok, frame_body} = recv_frame(socket, opts)
-    {^correlation_id, error_code, payload} = Wire.decode_response(frame_body)
-    ^error_code = Wire.ok_code()
-    Wire.decode_fetch_resp(payload)
-  end
-
-  @doc "Sends a stream_ack frame (durable commit + window credit); fire-and-forget, no response."
-  def stream_ack(socket, topic, group, cursor, count, correlation_id) do
-    stream_ack(socket, topic, group, nil, cursor, count, correlation_id)
-  end
-
-  @doc "Sends a stream_ack frame for a consumer-group `member` (heartbeat + refresh + commit + credit)."
-  def stream_ack(socket, topic, group, member, cursor, count, correlation_id) do
-    payload = Wire.encode_stream_ack_req(topic, group, member, cursor, count)
-    :ok = :gen_tcp.send(socket, Wire.encode_request(Wire.stream_ack_key(), correlation_id, payload))
   end
 
   @doc """

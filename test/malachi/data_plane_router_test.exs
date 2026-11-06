@@ -7,6 +7,7 @@ defmodule Malachi.DataPlaneRouterTest do
   alias Malachi.BrokerServer
   alias Malachi.DataPlaneRouter
   alias Malachi.Log.Record
+  alias Malachi.Test.ReadBack
   alias Malachi.Test.TmpDir
 
   # Sharding is the measurement mode, which has no control plane cluster: every test starts there, and
@@ -138,8 +139,8 @@ defmodule Malachi.DataPlaneRouterTest do
       {:ok, _} = BrokerServer.create_topic(b, "shared", 8)
       {:ok, _} = BrokerServer.produce(a, "shared", [Record.new("only-a", key: "k")])
 
-      assert consume_values(a, "shared") == ["only-a"]
-      assert consume_values(b, "shared") == [], "broker b must not see broker a's records"
+      assert ReadBack.values(a, "shared") == ["only-a"]
+      assert ReadBack.values(b, "shared") == [], "broker b must not see broker a's records"
     end
   end
 
@@ -155,10 +156,5 @@ defmodule Malachi.DataPlaneRouterTest do
     end)
 
     broker
-  end
-
-  defp consume_values(broker, topic) do
-    {records, _next, _skips} = BrokerServer.consume(broker, topic, %{}, 1000, 0)
-    Enum.map(records, & &1.value)
   end
 end

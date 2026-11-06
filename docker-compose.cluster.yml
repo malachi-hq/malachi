@@ -57,6 +57,8 @@ x-malachi-node: &malachi-node
     MALACHI_RATE_LIMIT_ENABLED: "${MALACHI_RATE_LIMIT_ENABLED:-false}"
     MALACHI_PUBLISH_RATE_LIMIT: "${MALACHI_PUBLISH_RATE_LIMIT:-0}"
     MALACHI_PUBLISH_RATE_WINDOW_MS: "${MALACHI_PUBLISH_RATE_WINDOW_MS:-1000}"
+    MALACHI_PUBLISH_BYTES_RATE_LIMIT: "${MALACHI_PUBLISH_BYTES_RATE_LIMIT:-0}"
+    MALACHI_PUBLISH_BYTES_RATE_WINDOW_MS: "${MALACHI_PUBLISH_BYTES_RATE_WINDOW_MS:-1000}"
     # The load generator opens dozens of connections from ONE ip, which the shipped auth limit (10 per
     # minute per ip) is designed to stop. Whenever the limiter is switched on here it is to measure the
     # PUBLISH quota, so the auth limit has to be lifted out of the way or it silently starves the run of
@@ -110,6 +112,10 @@ services:
     <<: *malachi-node
     container_name: malachi-cluster-1
     hostname: malachi1
+    environment:
+      <<: *malachi-env
+      # where a client on the compose network reaches this node (Malachi.Cluster.Advertised)
+      MALACHI_ADVERTISED_HOST: malachi1
     volumes:
       - malachi-chaos-1:/data
 
@@ -117,6 +123,10 @@ services:
     <<: *malachi-node
     container_name: malachi-cluster-2
     hostname: malachi2
+    environment:
+      <<: *malachi-env
+      # where a client on the compose network reaches this node (Malachi.Cluster.Advertised)
+      MALACHI_ADVERTISED_HOST: malachi2
     volumes:
       - malachi-chaos-2:/data
 
@@ -124,6 +134,10 @@ services:
     <<: *malachi-node
     container_name: malachi-cluster-3
     hostname: malachi3
+    environment:
+      <<: *malachi-env
+      # where a client on the compose network reaches this node (Malachi.Cluster.Advertised)
+      MALACHI_ADVERTISED_HOST: malachi3
     volumes:
       - malachi-chaos-3:/data
 
@@ -133,7 +147,7 @@ services:
       dockerfile: benchmark/Dockerfile.loadtest
     cpuset: "${LT_CPUSET:-0,1,2,3}"
     environment:
-      ERL_FLAGS: "+S 4:4"
+      ERL_FLAGS: "${LT_ERL_FLAGS:-+S 4:4}"
     mem_limit: 1g
     depends_on:
       malachi1:

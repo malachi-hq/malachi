@@ -138,9 +138,10 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
       refute body =~ "| Maximum |"
     end
 
-    test "the backpressure section appears only for a run that counted it", context do
-      # A Node run outside the stream scenario writes the two counters it does not measure as null.
-      publish(context, "loadtest-node.json", loadtest_result(%{"dropped" => nil, "reconnects" => nil}))
+    test "the backpressure section appears only for a run that counted it, with the rows it carries", context do
+      # Both generators count the drops and the sheds. A result published before the reconnects field went
+      # still carries it, and no row renders it.
+      publish(context, "loadtest-node.json", loadtest_result(%{"dropped" => 1, "overloaded" => 0, "rate_limited" => 0}))
 
       publish(
         context,
@@ -150,14 +151,28 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
 
       run(context)
 
-      refute page(context, "loadtest-node-results.md") =~ "## Backpressure"
+      node = page(context, "loadtest-node-results.md")
+      assert node =~ "## Backpressure"
+      assert node =~ "| Dropped connections | 1 |"
+      refute node =~ "Reconnects"
 
       elixir = page(context, "loadtest-elixir-results.md")
       assert elixir =~ "## Backpressure"
       assert elixir =~ "| Server-shed produces | 3 |"
       # the two refusals are reported apart: saturation and quota mean different things to an operator
       assert elixir =~ "| Quota-refused produces | 2 |"
-      assert elixir =~ "| Reconnects | 1 |"
+      refute elixir =~ "Reconnects"
+    end
+
+    test "a result that counted none of the backpressure has no section for it", context do
+      publish(
+        context,
+        "loadtest-node.json",
+        loadtest_result(%{"dropped" => nil, "overloaded" => nil, "rate_limited" => nil})
+      )
+
+      run(context)
+      refute page(context, "loadtest-node-results.md") =~ "## Backpressure"
     end
 
     test "a result without a meta block still renders", context do
@@ -516,6 +531,26 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
 
       refute body =~ "Acknowledged writes still readable"
       refute body =~ "Post-chaos produce"
+    end
+
+    test "a skipped run says it was skipped and why, neither passed nor failed", context do
+      publish(
+        context,
+        "chaos-upgrade.json",
+        chaos_result(%{
+          "certification" => "UPGRADE AND ROLLBACK CERTIFICATION",
+          "verdict" => "skipped",
+          "skip_reason" => "v0.16.4 predates the stream keys",
+          "events" => []
+        })
+      )
+
+      run(context)
+      body = page(context, "chaos-upgrade-results.md")
+
+      assert body =~ "**UPGRADE AND ROLLBACK CERTIFICATION skipped**: v0.16.4 predates the stream keys."
+      refute body =~ "FAILED"
+      refute body =~ "passed"
     end
 
     test "the rolling upgrade drill has a page of its own, read from its own result", context do

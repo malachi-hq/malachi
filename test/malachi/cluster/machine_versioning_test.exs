@@ -61,10 +61,10 @@ defmodule Malachi.Cluster.MachineVersioningTest do
         # 3 where `Malachi.Cluster.PolicyRegistry` introduced `{:define_policy, name, policy}`, 4 where
         # `Malachi.Metadata` introduced `{:bind_topic_policy, topic, name}`, 5 where
         # `Malachi.Auth.UserRegistry` introduced the console roles, 6 where `Malachi.Cluster.Policy`
-        # introduced `retention.segment_max_age_ms`, and 7 where `Malachi.Metadata` made `{:set_segment_replicas, ...}`
-        # a compare-and-swap on the expected replica set; each time the others moved with it, paying nothing but
-        # a no-op `{:machine_version, n - 1, n}`.
-        assert unquote(machine).version() == 7
+        # introduced `retention.segment_max_age_ms`, 7 where `Malachi.Metadata` made `{:set_segment_replicas, ...}`
+        # a compare-and-swap on the expected replica set, and 8 where `Malachi.Metadata` introduced the group
+        # fence; each time the others moved with it, paying nothing but a no-op `{:machine_version, n - 1, n}`.
+        assert unquote(machine).version() == 8
 
         for version <- 0..unquote(machine).version(),
             do: assert(unquote(machine).which_module(version) == unquote(machine))
@@ -143,6 +143,8 @@ defmodule Malachi.Cluster.MachineVersioningTest do
 
   test "a topic export carries the current export format, and an old export without it still inserts" do
     {state, {:ok, _root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 2})
+    # a group fence is what the current format adds; a topic without one exports as format 0
+    {state, {:ok, 1}} = Metadata.apply(state, {:open_group, "g", "events"})
 
     export = Metadata.export_topic(state, "events")
     assert export.export_format == Metadata.export_format()

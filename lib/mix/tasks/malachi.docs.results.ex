@@ -324,8 +324,7 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
       {"Operations per second", number(result["ops_per_s"])},
       {"Data rate", suffix(result["mb_per_s"], " MB/s")},
       {"Records", number(result["records"])},
-      # The Node client calls it `operations` and the BEAM one `ops`; same measure, two spellings.
-      {"Operations", number(result["ops"] || result["operations"])},
+      {"Operations", number(result["ops"])},
       # The connection count at the sweep's peak: the load that drove this ceiling number.
       {"Peak connections", number(result["connections"])},
       # Absent on runs that did not sample them (skipped by table/1), so they never read as measured zeros.
@@ -358,15 +357,14 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
     for {key, label} <- @latency_labels, do: {label, suffix(latency[key], " ms")}
   end
 
-  # The BEAM generator counts all of these; the Node one counts only the drops and reconnects of a stream
-  # run and writes null for them in any other scenario. A section with nothing counted would read as "no
-  # backpressure occurred" rather than "this tool does not measure it", so it is left out entirely instead.
+  # Both generators count the drops and the sheds, and a row a result does not carry is left out
+  # (`table/2`). A section with nothing counted would read as "no backpressure occurred" rather than "this
+  # tool does not measure it", so it is left out entirely.
   defp backpressure_section(result) do
     rows = [
       {"Dropped connections", result["dropped"]},
       {"Server-shed produces", result["overloaded"]},
-      {"Quota-refused produces", result["rate_limited"]},
-      {"Reconnects", result["reconnects"]}
+      {"Quota-refused produces", result["rate_limited"]}
     ]
 
     if Enum.all?(rows, fn {_label, value} -> value == nil end) do
@@ -432,6 +430,10 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
 
     "**#{result["certification"]} passed** at replication factor #{result["replication_factor"]}: " <>
       "every invariant held through #{faults} injected #{plural(faults, "fault")}."
+  end
+
+  defp chaos_headline(%{"verdict" => "skipped"} = result) do
+    "**#{result["certification"]} skipped**: #{result["skip_reason"]}."
   end
 
   defp chaos_headline(result) do

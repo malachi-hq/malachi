@@ -5,7 +5,14 @@ defmodule Mix.Tasks.Malachi.Loadtest do
   #{@shortdoc}.
 
   One BEAM process per connection, so N connections use every scheduler (unlike a single-threaded
-  client). Connects to an already-running server over the binary wire protocol and drives load.
+  client). Connects to an already-running server over the binary wire protocol and drives load on the
+  stream keys: each producing, `stream` or `fetch` connection is a whole routing client, a producer
+  routing every record to its range's primary (`Malachi.Loadtest.Producer`), a `stream` worker reading
+  every range on consume streams (`Malachi.Loadtest.Consumer`), a `fetch` worker paging every range in
+  turn with `fetch_range` (`Malachi.Loadtest.Fetcher`); the report counts `moved`, `redirects` and
+  `route_refreshes`. A server that does not answer `cluster_state`, or a cluster that does not serve the
+  stream keys (one of a release before they were always served, with the `producer_streams` flag off),
+  fails the run before any worker connects.
 
       mix malachi.loadtest --scenario produce --connections 512 --batch 10 --duration 10
 
@@ -15,7 +22,11 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     * `--connections` concurrent connections (128)
     * `--duration` measured seconds (10), `--warmup` seconds excluded (2)
     * `--batch` records per produce (10), `--record-size` bytes (256), `--keys` cardinality (1000)
-    * `--pipeline` in-flight requests per connection, produce only (1 = closed-loop)
+    * `--pipeline` the appends each range's stream keeps in flight, produce only (1 = closed-loop),
+      further capped by the window the broker grants
+    * `--linger-ms` (0) and `--linger-bytes` (one batch): how long a range's share of each batch waits to
+      go out with others as one append, and how many bytes of them make one go at once; an append takes
+      whole shares only, as many as fit
     * `--max` records per fetch/push (100), `--window` stream credit (100)
     * `--prepopulate` records to seed before fetch/stream/mixed (10000 for those)
     * `--topic` (auto), `--topics` distinct topics to fan out over (1); N > 1 spreads load across
@@ -91,7 +102,9 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     json: :boolean,
     measure_marker: :string,
     payload: :string,
-    payload_seed: :integer
+    payload_seed: :integer,
+    linger_ms: :integer,
+    linger_bytes: :integer
   ]
 
   @impl Mix.Task

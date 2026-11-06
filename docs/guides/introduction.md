@@ -21,9 +21,9 @@ data independently, and a consumer can rewind.
 
 - **An append-only log per topic**, durable on disk (segments with CRC-checked records, fsync before ack)
   and replicated across nodes by **quorum**.
-- **A client that never sees partitions or offsets.** You produce by *key* and consume with an **opaque
-  cursor**. That indirection is the point: the broker can split, merge and restripe the underlying ranges
-  while the cluster runs, without breaking any client.
+- **A client that never chooses partitions.** You produce by *key*, and every record you consume comes with
+  its **position in its range's history**, which a split only extends. That is the point: the broker can
+  split, merge and restripe the underlying ranges while the cluster runs, without breaking any client.
 - **A metadata control plane on Raft** (`ra`), optionally **sharded** across virtual nodes so metadata
   itself scales, with online vnode splitting and re-sharding.
 - **Consumer groups** with server-side committed positions, plus **server-push streaming** with credit-based
@@ -36,7 +36,7 @@ data independently, and a consumer can rewind.
 | If you want to… | Read |
 |---|---|
 | Run it and append your first record | [Getting started](getting-started.md) |
-| Understand topics, keys, ranges and cursors | [The log model](log-model.md) |
+| Understand topics, keys, ranges and positions | [The log model](log-model.md) |
 | See the full architecture and design decisions | [Architecture](../ARCHITECTURE.md) |
 | Understand the auth architecture | [Auth and user management (ADR)](../AUTH_USER_MANAGEMENT.md) |
 

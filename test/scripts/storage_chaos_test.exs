@@ -63,6 +63,21 @@ defmodule StorageChaosTest do
       assert output =~ ~r/host load: load average/
       assert Enum.count(docker_calls(ctx), &String.contains?(&1, "down -v")) == 2
     end
+
+    # This build always serves the stream keys: the drill starts each phase's checker on a cluster it never
+    # switches the producer_streams flag on for.
+    test "starts each phase's checker after its cluster is up, without switching the stream keys on", ctx do
+      assert {_output, 0} = run_drill(ctx, [])
+      calls = docker_calls(ctx)
+      at = fn pattern -> for {call, i} <- Enum.with_index(calls), call =~ pattern, do: i end
+      ups = at.(~r/^up -d/)
+      checkers = at.("chaos_checker.exs produce")
+
+      assert length(ups) == 2 and length(checkers) == 2
+      assert at.("malachi.flag enable producer_streams") == []
+
+      for {up, checker} <- Enum.zip(ups, checkers), do: assert(up < checker)
+    end
   end
 
   describe "invariant 4 on a passing run" do

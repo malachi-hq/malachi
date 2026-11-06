@@ -17,9 +17,9 @@ defmodule Malachi.TCPAcceptor do
   alias Malachi.Auth.MtlsProvider
   alias Malachi.Auth.OidcConfig
   alias Malachi.Auth.SessionManager
+  alias Malachi.ConnectionStreams
   alias Malachi.I18n
   alias Malachi.IPAddress
-  alias Malachi.LogApi
   alias Malachi.TCPProtocol
   alias Malachi.Wire
 
@@ -409,8 +409,8 @@ defmodule Malachi.TCPAcceptor do
   defp oidc_client_error(reason) when reason in [:oidc_auth_disabled, :oidc_misconfigured], do: reason
   defp oidc_client_error(_validation_or_identity_error), do: :invalid_credentials
 
-  # Reads request frames and dispatches each; loops until the socket closes or errors. A `subscribe` frame
-  # switches the connection into `stream_loop/2` (server-push streaming) for the rest of its life.
+  # Reads request frames and dispatches each; loops until the socket closes or errors. A frame that opens a
+  # producer or consume stream switches the connection into `streams_loop/2` for the rest of its life.
   defp receive_loop(%{socket: socket, transport: transport, buffer: buffer} = state) do
     recv_timeout = Application.get_env(:malachi, :tcp_recv_timeout, 30_000)
 
@@ -418,7 +418,7 @@ defmodule Malachi.TCPAcceptor do
       {:ok, data} ->
         case process_buffered_frames(buffer <> data, state) do
           {:more, remaining} -> receive_loop(%{state | buffer: remaining})
-          {:stream, sub_corr, remaining} -> stream_loop(%{state | buffer: remaining}, sub_corr)
+          {:streams, streams, remaining} -> streams_loop(%{state | buffer: remaining}, streams)
           {:close, _reason} -> close_oversized(state)
         end
 
@@ -428,14 +428,27 @@ defmodule Malachi.TCPAcceptor do
   end
 
   # Processes complete frames until the buffer is exhausted (`{:more, trailing}`), a frame opens a stream
-  # (`{:stream, sub_corr, trailing}`, carrying any frames buffered after the subscribe), or an oversized
-  # frame is seen (`{:close, reason}`).
+  # (`{:streams, streams, trailing}`, carrying any frames buffered after it), or an oversized frame is seen
+  # (`{:close, reason}`).
   defp process_buffered_frames(buffer, state) do
     case Wire.decode_frame(buffer, max_frame_size()) do
       {:ok, frame_body, rest} ->
         case process_authenticated(frame_body, state) do
-          :ok -> process_buffered_frames(rest, state)
-          {:stream, sub_corr} -> {:stream, sub_corr, rest}
+          :ok ->
+            process_buffered_frames(rest, state)
+
+          {:opened, kind, corr, opened} ->
+            streams =
+              TCPProtocol.stream_opened(
+                state.socket,
+                state.transport,
+                ConnectionStreams.new(state.client_ip),
+                kind,
+                corr,
+                opened
+              )
+
+            {:streams, streams, rest}
         end
 
       :incomplete ->
@@ -451,61 +464,115 @@ defmodule Malachi.TCPAcceptor do
     TCPProtocol.process_frame(socket, frame_body, session, transport)
   end
 
-  # A subscribed connection becomes a one-stream duplex: switched to active mode so a single `receive`
-  # handles both the broker's `{:log_records, ...}` pushes (forwarded to the client as response frames
-  # tagged with the subscribe's correlation id) and the client's inbound ack frames. Any frames buffered
-  # alongside the subscribe are drained first. The stream ends when the socket closes; the broker drops
-  # the subscriber via the connection process's `:DOWN`.
-  defp stream_loop(%{buffer: buffer} = state, sub_corr) do
-    case handle_stream_buffer(buffer, state) do
-      {:more, remaining} ->
-        arm_active(state)
-        stream_recv(%{state | buffer: remaining}, sub_corr)
+  # A connection holding streams (`Malachi.ConnectionStreams`), producer and consume streams alike: switched
+  # to active mode so a single `receive` takes the client's frames (appends, read acks, closes, opens and any
+  # other request) and the broker's messages: answers to the appends in flight, views to read consume pages
+  # from, and moves. The socket is read only while every producer stream has room in its window, so a
+  # producer that outruns its grant is held back by TCP. Idle (no append in flight, no consume stream open
+  # and no frame) for the request timeout, the connection closes, as one in request mode does.
+  defp streams_loop(%{buffer: buffer} = state, streams) do
+    state = active(state)
 
-      {:close, _reason} ->
-        close_oversized(state)
+    case handle_streams_buffer(buffer, state, streams) do
+      {:more, remaining, streams} -> streams_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
+      {:close, _reason, streams} -> close_streams(state, streams)
     end
   end
 
-  defp stream_recv(%{socket: socket, transport: transport, buffer: buffer} = state, sub_corr) do
+  # An oversized frame ends the connection like a close does: the in-order jobs the client sent before it
+  # still run (`Malachi.ConnectionStreams.hand_off/1`).
+  defp close_streams(state, streams) do
+    :ok = ConnectionStreams.hand_off(streams)
+    close_oversized(state)
+  end
+
+  defp streams_closed(socket, transport, streams) do
+    :ok = ConnectionStreams.hand_off(streams)
+    close_socket(socket, transport)
+  end
+
+  # The connection is idle from the last thing that was about its streams: a frame from the client or a
+  # message for its streams. An operator's listing (`Malachi.ProducerDirectory`) is answered without
+  # counting, so watching a node does not keep its idle connections open.
+  defp active(state), do: Map.put(state, :idle_since, System.monotonic_time(:millisecond))
+
+  defp idle_left(state) do
+    idle_timeout = Application.get_env(:malachi, :tcp_recv_timeout, 30_000)
+    max(idle_timeout - (System.monotonic_time(:millisecond) - state.idle_since), 0)
+  end
+
+  defp streams_recv(%{socket: socket, transport: transport, buffer: buffer} = state, streams) do
     receive do
-      {:log_records, _topic, records, positions} ->
-        frame = Wire.encode_ok(sub_corr, Wire.encode_fetch_resp(records, LogApi.encode_cursor(positions)))
-        transport.send(socket, frame)
-        stream_recv(state, sub_corr)
-
       {tag, ^socket, data} when tag in [:tcp, :ssl] ->
-        case handle_stream_buffer(buffer <> data, state) do
-          {:more, remaining} ->
-            arm_active(state)
-            stream_recv(%{state | buffer: remaining}, sub_corr)
+        state = active(state)
 
-          {:close, _reason} ->
-            close_oversized(state)
+        case handle_streams_buffer(buffer <> data, state, streams) do
+          {:more, remaining, streams} -> streams_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
+          {:close, _reason, streams} -> close_streams(state, streams)
         end
 
+      # the client's leave or commit still waiting behind a running one is run all the same
       {tag, ^socket} when tag in [:tcp_closed, :ssl_closed] ->
-        close_socket(socket, transport)
+        streams_closed(socket, transport, streams)
 
       {tag, ^socket, _reason} when tag in [:tcp_error, :ssl_error] ->
-        close_socket(socket, transport)
+        streams_closed(socket, transport, streams)
+
+      {:describe_producer_streams, _from, _ref} = asked ->
+        :ok = Malachi.ProducerDirectory.answer(asked, streams)
+        streams_recv(state, streams)
+
+      message ->
+        state = active(state)
+
+        case ConnectionStreams.handle_message(streams, message) do
+          # a job that ended may have made room for frames left in the buffer
+          {streams, frames} ->
+            Enum.each(frames, &transport.send(socket, &1))
+
+            case handle_streams_buffer(buffer, state, streams) do
+              {:more, remaining, streams} -> streams_recv(%{state | buffer: remaining}, arm_if_room(state, streams))
+              {:close, _reason, streams} -> close_streams(state, streams)
+            end
+
+          :no ->
+            streams_recv(state, streams)
+        end
+    after
+      idle_left(state) ->
+        if ConnectionStreams.busy?(streams),
+          do: streams_recv(active(state), streams),
+          else: close_socket(socket, transport)
     end
   end
 
-  # Applies each complete inbound frame (an ack, per `TCPProtocol.process_stream_frame/3`) and returns the
-  # trailing partial data to keep buffered, or `{:close, reason}` on an oversized frame.
-  defp handle_stream_buffer(buffer, %{socket: socket, transport: transport} = state) do
+  # A connection at its cap of jobs (`Malachi.ConnectionStreams.job_room?/1`) leaves the rest of the buffer
+  # unread; the end of a job reads it on.
+  defp handle_streams_buffer(buffer, state, streams) do
+    if ConnectionStreams.job_room?(streams),
+      do: handle_streams_frame(buffer, state, streams),
+      else: {:more, buffer, streams}
+  end
+
+  defp handle_streams_frame(buffer, %{socket: socket, session: session, transport: transport} = state, streams) do
     case Wire.decode_frame(buffer, max_frame_size()) do
       {:ok, frame_body, rest} ->
-        TCPProtocol.process_stream_frame(socket, frame_body, transport)
-        handle_stream_buffer(rest, state)
+        streams = TCPProtocol.process_streams_frame(socket, frame_body, session, transport, streams)
+        handle_streams_buffer(rest, state, streams)
 
       :incomplete ->
-        {:more, buffer}
+        {:more, buffer, streams}
 
       {:error, :frame_too_large} ->
-        {:close, :frame_too_large}
+        {:close, :frame_too_large, streams}
     end
+  end
+
+  # Re-arms the socket for one more delivery only while every producer stream has room: a full window stops
+  # the reads, and the ack that frees it arms them again.
+  defp arm_if_room(state, streams) do
+    if ConnectionStreams.room?(streams), do: arm_active(state)
+    streams
   end
 
   # The largest request frame the server will accept. A declared length beyond this is rejected as soon as

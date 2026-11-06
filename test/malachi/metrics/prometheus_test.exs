@@ -50,6 +50,8 @@ defmodule Malachi.Metrics.PrometheusTest do
 
     assert out =~ ~s(malachi_memory_bytes{kind="total"} #{round(40.0 * 1_048_576)})
     assert out =~ ~s(malachi_rate_limit_blocked_total{action="auth"} 5)
+    assert out =~ ~s(malachi_rate_limit_blocked_total{action="publish"} 4)
+    assert out =~ ~s(malachi_rate_limit_blocked_total{action="publish_bytes"} 6)
     assert out =~ ~s(malachi_rate_limit_blocked_total{action="subscribe"} 1)
     assert out =~ ~s(malachi_rate_limit_blocked_total{action="dashboard_api"} 2)
     refute out =~ ~s(malachi_rate_limit_blocked_total{action="dashboard_auth"})
@@ -85,6 +87,11 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ ~s(malachi_storage_integrity_failures_total{reason="bad_crc"} 2)
     assert out =~ ~s(malachi_storage_integrity_failures_total{reason="incomplete"} 1)
     assert out =~ ~s(malachi_storage_integrity_failures_total{reason="bad_index"} 4)
+    assert out =~ "# TYPE malachi_producer_streams_total counter\n"
+    assert out =~ ~s(malachi_producer_streams_total{event="opened"} 5)
+    assert out =~ ~s(malachi_producer_streams_total{event="closed"} 2)
+    assert out =~ ~s(malachi_producer_streams_total{event="moved"} 1)
+    assert out =~ "# TYPE malachi_producer_streams_open gauge\nmalachi_producer_streams_open 2\n"
     assert out =~ "# TYPE malachi_storage_failures_total counter\n"
     assert out =~ ~s(malachi_storage_failures_total{reason="enospc"} 6)
     assert out =~ ~s(malachi_storage_failures_total{reason="eio"} 1)

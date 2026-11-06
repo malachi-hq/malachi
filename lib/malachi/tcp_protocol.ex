@@ -1,8 +1,9 @@
 defmodule Malachi.TCPProtocol do
   @moduledoc """
   The Malachi binary log protocol (`Malachi.Wire`). `process_frame/4` decodes a request frame,
-  dispatches by `api_key` to the NorthGuard log operations (create_topic/produce/fetch/commit), and sends
-  a response frame. Auth is handled by the acceptor (`TCPAcceptor`).
+  dispatches by `api_key` to the NorthGuard log operations (creating a topic, the routing, stream and group
+  keys, and the admin operations), and sends a response frame, or tells the acceptor a stream was opened.
+  Auth is handled by the acceptor (`TCPAcceptor`).
 
   This is also where the configured publish/subscribe rate limits are applied (`Malachi.RateLimiter`),
   keyed by the authenticated username and enforced per node. Both are off unless an operator configures
@@ -11,30 +12,40 @@ defmodule Malachi.TCPProtocol do
 
   A frame body comes from an untrusted client, so `process_frame/4` decodes inside a `try`: Wire's payload
   decoders raise on a malformed body, and the boundary answers a single error frame rather than crashing
-  the connection. The client deals in `topic` + key + an **opaque cursor**, never partitions or offsets.
+  the connection.
   """
 
   alias Malachi.Auth.AclStore
   alias Malachi.Auth.Authorization
   alias Malachi.Auth.ConsoleRole
+  alias Malachi.BrokerServer
   alias Malachi.Cluster.Policy
+  alias Malachi.ConnectionStreams
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.GroupCoordinator
+  alias Malachi.ConsumeStreams
   alias Malachi.DataPlaneRouter
   alias Malachi.LogApi
+  alias Malachi.Metadata
   alias Malachi.Metrics
   alias Malachi.Policies
+  alias Malachi.Position
+  alias Malachi.ProducerStreams
   alias Malachi.RateLimiter
+  alias Malachi.Routing
+  alias Malachi.StreamWindow
   alias Malachi.Wire
 
   @coordinator_name Malachi.LogGroupCoordinator
 
   @doc """
-  Processes one request frame body: decode, dispatch, and send a response frame; returns `:ok`. A
-  `subscribe` frame is the exception. It registers a push stream and returns `{:stream, correlation_id}`
-  (no immediate response), signalling the acceptor to switch that connection to its streaming loop.
+  Processes one request frame body: decode, dispatch, and send a response frame; returns `:ok`. An
+  `open_stream` or `open_consume` the broker opened is the exception: it returns `{:opened, kind,
+  correlation_id, opened}` (no response yet), for the acceptor to record the stream
+  (`stream_opened/6`), which answers the client.
   """
-  @spec process_frame(term(), binary(), map(), atom()) :: :ok | {:stream, non_neg_integer()}
+  @spec process_frame(term(), binary(), map(), atom()) ::
+          :ok | {:opened, :producer | :consumer, non_neg_integer(), map()}
   def process_frame(socket, frame_body, session, transport) do
     result =
       case frame_body do
@@ -54,8 +65,8 @@ defmodule Malachi.TCPProtocol do
       end
 
     case result do
-      {:stream, _sub_corr} = stream ->
-        stream
+      {:opened, _kind, _corr, _opened} = opened ->
+        opened
 
       frame when is_binary(frame) ->
         transport.send(socket, frame)
@@ -64,45 +75,186 @@ defmodule Malachi.TCPProtocol do
   end
 
   @doc """
-  Processes one client frame while the connection is in streaming mode. The only inbound frame is a
-  `stream_ack` (applied for its window credit + durable commit); any other frame gets an error response
-  and the stream continues. Returns `:ok`. A malformed frame is answered, not fatal: the stream ends
-  only when the socket closes (the broker then drops the subscriber via the process `:DOWN`).
+  Processes one client frame on a connection that holds streams (`Malachi.ConnectionStreams`): appends,
+  read acks and closes go to the streams, `open_stream` and `open_consume` open another, and every other
+  request is answered as on any connection. Returns the streams after the frame.
   """
-  @spec process_stream_frame(term(), binary(), atom()) :: :ok
-  def process_stream_frame(socket, frame_body, transport) do
-    {api_key, correlation_id, payload} = Wire.decode_request(frame_body)
+  @spec process_streams_frame(term(), binary(), map(), atom(), ConnectionStreams.t()) :: ConnectionStreams.t()
+  def process_streams_frame(socket, frame_body, session, transport, streams) do
+    case frame_body do
+      <<api_key::16, correlation_id::32, payload::binary>> ->
+        try do
+          streams_frame(api_key, correlation_id, payload, session, streams, socket, transport)
+        rescue
+          _malformed ->
+            transport.send(socket, Wire.encode_error(correlation_id, :malformed_request))
+            streams
+        end
 
-    if api_key == Wire.stream_ack_key() do
-      {topic, group, member, cursor, count} = Wire.decode_stream_ack_req(payload)
-      # the subscription already gated :consume; the session's permissions are immutable, so an ack here
-      # is necessarily authorized. Fire-and-forget: credit comes back as more pushes. A member ack also
-      # heartbeats the coordinator and refreshes the member's ranges (an empty ack = a heartbeat).
-      if member != nil and group != nil do
-        LogApi.stream_ack_member(broker_for(topic), coordinator_for(topic), topic, group, member, cursor, count)
-      else
-        LogApi.stream_ack(broker_for(topic), topic, group, cursor, count)
-      end
-
-      :ok
-    else
-      transport.send(socket, Wire.encode_error(correlation_id, :unexpected_frame))
-      :ok
+      _short ->
+        transport.send(socket, Wire.encode_error(0, :malformed_request))
+        streams
     end
-  rescue
-    _malformed ->
-      transport.send(socket, Wire.encode_error(0, :malformed_request))
-      :ok
   end
+
+  defp streams_frame(api_key, correlation_id, payload, session, streams, socket, transport) do
+    cond do
+      api_key == Wire.append_key() ->
+        {stream_id, sequence, batch} = Wire.decode_append_req(payload)
+        append(correlation_id, stream_id, sequence, batch, session, streams, socket, transport)
+
+      api_key == Wire.consume_ack_key() ->
+        consume_ack(correlation_id, Wire.decode_consume_ack_req(payload), streams, socket, transport)
+
+      waits_beside?(api_key) ->
+        beside(api_key, correlation_id, payload, session, streams, socket, transport)
+
+      # a leave waits for the member's joins and commits sent before it (see `beside/7`)
+      api_key == Wire.leave_group_key() ->
+        request = Wire.decode_leave_group_req(payload)
+
+        ConnectionStreams.run_in_order(
+          streams,
+          fn -> leave_answer(request, correlation_id, session) end,
+          Wire.encode_error(correlation_id, :internal_error)
+        )
+
+      api_key == Wire.close_stream_key() ->
+        stream_id = Wire.decode_close_stream_req(payload)
+
+        case ConnectionStreams.close(streams, stream_id) do
+          {:ok, streams} ->
+            transport.send(socket, Wire.encode_ok(correlation_id, <<>>))
+            streams
+
+          :unknown ->
+            transport.send(socket, Wire.encode_error(correlation_id, :unknown_stream))
+            streams
+        end
+
+      true ->
+        case process_frame(socket, <<api_key::16, correlation_id::32, payload::binary>>, session, transport) do
+          {:opened, kind, corr, opened} -> stream_opened(socket, transport, streams, kind, corr, opened)
+          :ok -> streams
+        end
+    end
+  end
+
+  @doc """
+  Records a stream the broker opened (the `{:opened, kind, corr, opened}` `process_frame/4` returned) and
+  answers the client with its id: a producer stream with its segment, window and routes version, a consume
+  stream with the position its first push starts at. Returns the streams.
+  """
+  @spec stream_opened(term(), atom(), ConnectionStreams.t(), :producer | :consumer, non_neg_integer(), map()) ::
+          ConnectionStreams.t()
+  def stream_opened(socket, transport, streams, :producer, corr, opened) do
+    {streams, stream_id} = ConnectionStreams.open_producer(streams, Map.put(opened, :corr, corr))
+
+    resp = %{
+      stream_id: stream_id,
+      segment: Metadata.segment_seq(opened.segment_id),
+      window_appends: opened.granted.appends,
+      window_bytes: opened.granted.bytes,
+      routes_version: opened.routes_version
+    }
+
+    transport.send(socket, Wire.encode_ok(corr, Wire.encode_open_stream_resp(resp)))
+    streams
+  end
+
+  def stream_opened(socket, transport, streams, :consumer, corr, opened) do
+    {streams, stream_id} = ConnectionStreams.open_consumer(streams, Map.put(opened, :corr, corr))
+    resp = %{stream_id: stream_id, position: Position.encode(opened.range_id, opened.position)}
+    transport.send(socket, Wire.encode_ok(corr, Wire.encode_open_consume_resp(resp)))
+    streams
+  end
+
+  # A read ack has no response: what it changes shows up as pushes. One for a stream this connection does
+  # not hold is answered, so a client acking the wrong id learns it.
+  defp consume_ack(
+         correlation_id,
+         %{stream_id: stream_id, position: position, window: window},
+         streams,
+         socket,
+         transport
+       ) do
+    # the window a consumer asks for is capped as at open
+    window = if window > 0, do: stream_window(window), else: 0
+
+    case ConsumeStreams.ack(streams.consumers, stream_id, position, window) do
+      {:unknown, _stream_id} ->
+        transport.send(socket, Wire.encode_error(correlation_id, :unknown_stream))
+        streams
+
+      {consumers, frames} ->
+        Enum.each(frames, &transport.send(socket, &1))
+        %{streams | consumers: consumers}
+    end
+  end
+
+  # One append: the topic permission is checked again on every frame (an operator can revoke it while the
+  # stream is open). A refusal uses up no sequence, so the appends after it would break the
+  # sequence: it ends the stream, as a client that is refused retires it, and every later append is
+  # answered `unknown_stream`. The publish quotas are charged inside `ProducerStreams.append/6`, once
+  # the batch is decoded, by its inflated records and bytes (`charge_publish/3`).
+  defp append(correlation_id, stream_id, sequence, batch, session, streams, socket, transport) do
+    case ProducerStreams.topic(streams.producers, stream_id) do
+      nil ->
+        transport.send(socket, Wire.encode_error(correlation_id, :unknown_stream))
+        streams
+
+      topic ->
+        if topic_allowed?(session, :produce, topic) do
+          # `topic/2` above names only an open stream, so the append is taken or answered here
+          charge = &charge_publish(session, &1, &2)
+
+          {producers, frames} =
+            ProducerStreams.append(streams.producers, stream_id, sequence, batch, max_inflated_batch_bytes(), charge)
+
+          Enum.each(frames, &transport.send(socket, &1))
+          %{streams | producers: producers}
+        else
+          transport.send(socket, Wire.encode_error(correlation_id, :permission_denied))
+          {:ok, producers} = ProducerStreams.close(streams.producers, stream_id)
+          %{streams | producers: producers}
+        end
+    end
+  end
+
+  # Charges a produce's records and bytes to the user's publish quotas (records under `:publish`, bytes
+  # under `:publish_bytes`), both or neither. A cost bigger than a whole window of its quota can never be
+  # admitted, so it is refused as `quota_too_small` rather than as a `rate_limited` the client would retry
+  # forever. The quota charges the attempt: a produce the broker then refuses (overloaded, sealed, a key
+  # outside its range) has spent its records and bytes all the same, since on a path that can fail after
+  # the batch was written (a replication timeout) no refund could tell whether it landed. Unconfigured
+  # quotas, the default, cost five config reads (each quota's limit and window, and whether limiting is
+  # on) and touch no table.
+  defp charge_publish(session, records, bytes) do
+    charges = [
+      {:publish, RateLimiter.action_config(:publish), records},
+      {:publish_bytes, RateLimiter.action_config(:publish_bytes), bytes}
+    ]
+
+    case RateLimiter.charge_in_caller(session.username, charges) do
+      :ok ->
+        :ok
+
+      {:error, :rate_limit_exceeded, action, _retry_after_ms} ->
+        Metrics.increment_rate_limit_blocked(action)
+        {:error, :rate_limited}
+
+      {:error, :cost_exceeds_limit, action} ->
+        Metrics.increment_rate_limit_blocked(action)
+        {:error, :quota_too_small}
+    end
+  end
+
+  defp max_inflated_batch_bytes, do: Application.get_env(:malachi, :max_inflated_batch_bytes, 16_777_216)
 
   # api_key is a value (not a literal), so match it against the Wire accessors with a cond.
   defp dispatch(api_key, correlation_id, payload, session) do
     cond do
       api_key == Wire.create_topic_key() -> create_topic(correlation_id, payload, session)
-      api_key == Wire.produce_key() -> produce(correlation_id, payload, session)
-      api_key == Wire.fetch_key() -> fetch(correlation_id, payload, session)
-      api_key == Wire.commit_key() -> commit(correlation_id, payload, session)
-      api_key == Wire.subscribe_key() -> subscribe(correlation_id, payload, session)
       api_key == Wire.leave_group_key() -> leave_group(correlation_id, payload, session)
       # admin management ops (user + ACL CRUD) live in their own dispatch to keep each cond small
       true -> dispatch_admin(api_key, correlation_id, payload, session)
@@ -133,37 +285,383 @@ defmodule Malachi.TCPProtocol do
       api_key == Wire.list_policies_key() -> list_policies(correlation_id, payload, session)
       api_key == Wire.bind_topic_policy_key() -> bind_topic_policy(correlation_id, payload, session)
       api_key == Wire.get_topic_policy_key() -> get_topic_policy(correlation_id, payload, session)
-      true -> Wire.encode_error(correlation_id, :unknown_api_key)
+      true -> dispatch_routing(api_key, correlation_id, payload, session)
     end
   end
 
-  # Registers the caller as a push subscriber and signals the acceptor to enter streaming mode. Bounds the
-  # client-supplied window/batch. On a permission failure returns an error frame (the connection stays in
-  # request/response mode).
-  defp subscribe(correlation_id, payload, session) do
-    {topic, group, member, window_raw, max_raw} = Wire.decode_subscribe_req(payload)
+  # The routing, stream and group keys a routing client speaks (#275). Every other key, the retired data
+  # keys 2 to 6 among them, is `unknown_api_key`.
+  defp dispatch_routing(api_key, correlation_id, payload, session) do
+    cond do
+      api_key == Wire.cluster_state_key() ->
+        cluster_state(correlation_id, payload)
 
-    with_topic_permission(session, :consume, topic, correlation_id, fn ->
-      with_rate_limit(:subscribe, session, correlation_id, fn ->
-        window = stream_window(window_raw)
-        max = fetch_max(max_raw)
+      api_key == Wire.topic_routes_key() ->
+        topic_routes(correlation_id, payload, session)
 
-        # a consumer-group member gets a stream scoped to its ranges (opaque); otherwise the whole group
-        result =
-          if member != nil and group != nil do
-            LogApi.subscribe_member(broker_for(topic), coordinator_for(topic), topic, group, member, window, max)
-          else
-            LogApi.subscribe(broker_for(topic), topic, group, window, max)
-          end
+      api_key == Wire.open_stream_key() ->
+        open_stream(correlation_id, payload, session)
 
-        # `:not_owner` (stale routing during a failover) answers an error frame instead of entering stream
-        # mode; the client re-resolves and re-subscribes against the new owner.
-        case result do
-          :ok -> {:stream, correlation_id}
-          {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
-        end
-      end)
+      api_key == Wire.open_consume_key() ->
+        open_consume(correlation_id, payload, session)
+
+      api_key == Wire.fetch_range_key() ->
+        fetch_range(correlation_id, payload, session)
+
+      group_key?(api_key) ->
+        group_frame(api_key, correlation_id, payload, session)
+
+      # An append, read ack or close outside a connection that holds streams names a stream this connection
+      # never opened.
+      api_key in [Wire.append_key(), Wire.consume_ack_key(), Wire.close_stream_key()] ->
+        Wire.encode_error(correlation_id, :unknown_stream)
+
+      true ->
+        Wire.encode_error(correlation_id, :unknown_api_key)
+    end
+  end
+
+  # A producer stream on one range (`Malachi.ProducerStreams`). The client opens it against the routes it
+  # read: routes that differ from the vnode's are `stale_routes`, and a range whose active segment another
+  # node leads (or that a split or merge retired) is `moved`, so the client reads the routes again and
+  # opens the stream where they say.
+  defp open_stream(correlation_id, payload, session) do
+    req = Wire.decode_open_stream_req(payload)
+
+    with :ok <- open_allowed(session, req.topic),
+         {:ok, %{version: version}} <- Routing.read_topic_routes(req.topic),
+         :ok <- current_routes(version, req.routes_version),
+         {:ok, token, segment_id, broker_pid} <-
+           BrokerServer.open_stream(broker_for(req.topic), {req.topic, req.range}, self()),
+         # opening can place the range's first segment, which changes the routes: the client is told the
+         # version that names it
+         {:ok, %{version: version}} <- Routing.read_topic_routes(req.topic) do
+      {:opened, :producer, correlation_id,
+       %{
+         broker: broker_for(req.topic),
+         broker_pid: broker_pid,
+         topic: req.topic,
+         range_id: {req.topic, req.range},
+         token: token,
+         segment_id: segment_id,
+         routes_version: version,
+         label: req.label,
+         granted:
+           StreamWindow.grant(
+             req.window_appends,
+             req.window_bytes,
+             StreamWindow.max_appends(),
+             StreamWindow.max_bytes()
+           )
+       }}
+    else
+      {:moved, _reason, _targets} -> Wire.encode_error(correlation_id, :moved)
+      {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+    end
+  end
+
+  defp open_allowed(session, topic) do
+    if topic_allowed?(session, :produce, topic), do: :ok, else: {:error, :permission_denied}
+  end
+
+  # A consume stream on one range (`Malachi.ConsumeStreams`), opened where the range is served, against
+  # the routes the client read, as a producer stream is. It spends one token of the subscribe quota (the
+  # `:subscribe` rate-limit action; `read_allowed/2` says when): the credit window, not a quota, bounds what
+  # it reads. The
+  # pages go out with codec `none`, so a client that does not accept it is refused.
+  defp open_consume(correlation_id, payload, session) do
+    req = Wire.decode_open_consume_req(payload)
+
+    with :ok <- read_allowed(session, req),
+         {:ok, start} <- read_start(req),
+         {:ok, %{version: version}} <- Routing.read_topic_routes(req.topic),
+         :ok <- current_routes(version, req.routes_version),
+         :ok <- rate_limit_check(:subscribe, session),
+         {:ok, token, position, broker_pid} <-
+           BrokerServer.open_consume(broker_for(req.topic), {req.topic, req.range}, start, self()) do
+      {:opened, :consumer, correlation_id,
+       %{
+         broker: broker_for(req.topic),
+         broker_pid: broker_pid,
+         topic: req.topic,
+         range_id: {req.topic, req.range},
+         token: token,
+         position: position,
+         window: stream_window(req.window),
+         max: fetch_max(req.max),
+         max_bytes: page_bytes(req.max_bytes),
+         # checked again before every page, as an append is: an operator can revoke either while it is open
+         allowed: fn -> consume_allowed(session, req.topic) end
+       }}
+    else
+      {:moved, _reason, _targets} -> Wire.encode_error(correlation_id, :moved)
+      {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+    end
+  end
+
+  # One page of one range, read where the range is served, waiting up to `wait_ms` for records when there
+  # are none past the start yet. It spends one subscribe token, as an `open_consume` does.
+  defp fetch_range(correlation_id, payload, session) do
+    case fetch_request(payload, session) do
+      {:ok, fetch} ->
+        fetch_answer(correlation_id, fetch, ask_fetch(fetch))
+
+      {:error, reason} ->
+        Wire.encode_error(correlation_id, normalize(reason))
+    end
+  end
+
+  # What a `fetch_range` asks of the session and the routes, and of the broker once those pass: the range,
+  # its start, how long to wait and how big a page.
+  defp fetch_request(payload, session) do
+    req = Wire.decode_fetch_range_req(payload)
+
+    with :ok <- read_allowed(session, req),
+         {:ok, start} <- read_start(req),
+         {:ok, %{version: version}} <- Routing.read_topic_routes(req.topic),
+         :ok <- current_routes(version, req.routes_version),
+         :ok <- rate_limit_check(:subscribe, session) do
+      {:ok,
+       %{
+         broker: broker_for(req.topic),
+         range_id: {req.topic, req.range},
+         start: start,
+         wait_ms: fetch_wait(req.wait_ms),
+         max: fetch_max(req.max),
+         max_bytes: page_bytes(req.max_bytes)
+       }}
+    end
+  end
+
+  # The frame a `fetch_range` is answered with, from the broker's reply: the page read through the view it
+  # handed over, or the refusal.
+  defp fetch_answer(correlation_id, fetch, reply) do
+    with {:ok, position, view, reporter} <- reply,
+         {:ok, page, _count} <-
+           ConsumeStreams.read_page(view, fetch.range_id, position, fetch.max, fetch.max_bytes, reporter) do
+      Wire.encode_ok(
+        correlation_id,
+        IO.iodata_to_binary(Wire.encode_page(ConsumeStreams.wire_page(page, fetch.range_id)))
+      )
+    else
+      {:moved, _reason, _targets} -> Wire.encode_error(correlation_id, :moved)
+      {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+    end
+  end
+
+  # The keys whose answer waits on another process, run beside a connection that holds streams so the wait
+  # holds none of them back (`Malachi.ConnectionStreams.run/3`): a `fetch_range` waiting for records, and the
+  # group keys, which ask a coordinator that may be on another node and, for a commit, the control plane
+  # after it.
+  defp waits_beside?(api_key), do: api_key == Wire.fetch_range_key() or group_key?(api_key)
+
+  # A group request is decoded here, where a malformed one is answered `malformed_request` as on any
+  # connection; only the asking runs beside it. Joins and commits run in the order they came, with any
+  # `leave_group`, as each changes the member's standing or the checkpoint it moves: a leave sent after a
+  # commit must not overtake it, nor a join overtake the leave. A heartbeat changes neither and runs at once.
+  defp beside(api_key, correlation_id, payload, session, streams, socket, transport) do
+    if api_key == Wire.fetch_range_key() do
+      fetch_range_async(correlation_id, payload, session, streams, socket, transport)
+    else
+      request = group_request(api_key, payload)
+      job = fn -> group_answer(request, correlation_id, session) end
+      fallback = Wire.encode_error(correlation_id, :internal_error)
+
+      # a join still waiting when the connection closes is not made: nobody would heartbeat the member
+      case elem(request, 0) do
+        :join -> ConnectionStreams.run_in_order(streams, job, fallback, on_close: :drop)
+        :commit -> ConnectionStreams.run_in_order(streams, job, fallback)
+        :heartbeat -> ConnectionStreams.run(streams, job, fallback)
+      end
+    end
+  end
+
+  # The broker's answer to a `fetch_range`, waiting for records up to the request's wait. A broker that goes
+  # down meanwhile, or does not answer within the wait and its margin, is `broker_down`, not an exit that
+  # takes the connection with it.
+  defp ask_fetch(fetch) do
+    BrokerServer.fetch_range(fetch.broker, fetch.range_id, fetch.start, fetch.wait_ms)
+  catch
+    :exit, _reason -> {:error, :broker_down}
+  end
+
+  # A `fetch_range` on a connection that holds streams: the request is checked here, and its wait runs
+  # beside the connection (`Malachi.ConnectionStreams.run/3`), so it does not hold the streams back.
+  defp fetch_range_async(correlation_id, payload, session, streams, socket, transport) do
+    case fetch_request(payload, session) do
+      {:ok, fetch} ->
+        ConnectionStreams.run(
+          streams,
+          fn -> fetch_answer(correlation_id, fetch, ask_fetch(fetch)) end,
+          Wire.encode_error(correlation_id, :internal_error)
+        )
+
+      {:error, reason} ->
+        transport.send(socket, Wire.encode_error(correlation_id, normalize(reason)))
+        streams
+    end
+  end
+
+  defp group_key?(api_key), do: api_key in Wire.join_group_key()..Wire.commit_offsets_key()
+
+  defp group_frame(api_key, correlation_id, payload, session),
+    do: api_key |> group_request(payload) |> group_answer(correlation_id, session)
+
+  defp group_request(api_key, payload) do
+    cond do
+      api_key == Wire.join_group_key() -> {:join, Wire.decode_join_group_req(payload)}
+      api_key == Wire.group_heartbeat_key() -> {:heartbeat, Wire.decode_group_heartbeat_req(payload)}
+      true -> {:commit, Wire.decode_commit_offsets_req(payload)}
+    end
+  end
+
+  defp group_answer({:join, req}, correlation_id, session),
+    do: group_assignment(correlation_id, req, session, &GroupCoordinator.join_group/4)
+
+  defp group_answer({:heartbeat, req}, correlation_id, session),
+    do: group_assignment(correlation_id, req, session, &GroupCoordinator.heartbeat_group/4)
+
+  defp group_answer({:commit, req}, correlation_id, session), do: commit_offsets(correlation_id, req, session)
+
+  # A group member's assignment (`join_group` or `group_heartbeat`), from the topic's group coordinator,
+  # which lives beside the data path (`Malachi.Consumer.GroupCoordinator`, reached from any node through
+  # `Malachi.Consumer.CoordinatorRouter`): the generation, the session to heartbeat within and the ranges, as
+  # their sequence numbers. A heartbeat's generation is not checked: it is answered with the current one, so
+  # a member that missed a rebalance learns it here.
+  defp group_assignment(correlation_id, req, session, ask) do
+    with :ok <- group_allowed(session, req.topic),
+         {:ok, assignment} <-
+           ask_coordinator(fn -> ask.(coordinator_for(req.topic), req.group, req.topic, req.member) end) do
+      resp = %{assignment | ranges: Enum.map(assignment.ranges, fn {_topic, seq} -> seq end)}
+      Wire.encode_ok(correlation_id, Wire.encode_assignment_resp(resp))
+    else
+      {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+    end
+  end
+
+  # A member's checkpoint of its ranges' positions (`commit_offsets`). The coordinator first checks that
+  # every range is the member's and was handed to it at or before the generation it commits at, then the
+  # positions go to the control plane carrying that generation, which refuses them if a range was already
+  # committed at a higher one: a rebalance that lands between the two cannot let an earlier owner's commit
+  # overwrite a later owner's. A control plane that does not answer in time is `timeout`, which the member
+  # may retry, as the commit may or may not have been applied.
+  defp commit_offsets(correlation_id, req, session) do
+    with :ok <- group_allowed(session, req.topic),
+         {:ok, positions} <- issued_positions(req),
+         :ok <-
+           ask_coordinator(fn ->
+             GroupCoordinator.validate_commit(
+               coordinator_for(req.topic),
+               req.group,
+               req.topic,
+               req.member,
+               req.generation,
+               Map.keys(positions)
+             )
+           end),
+         :ok <- commit_fenced(req, positions) do
+      Wire.encode_ok(correlation_id, <<>>)
+    else
+      # the control plane found the coordinator that handed this generation out superseded by another
+      # that opened the group since: it opens the group again, and the member, told its generation is
+      # stale, learns the new one on its next heartbeat
+      {:error, :stale_epoch} ->
+        GroupCoordinator.drop_epoch(coordinator_for(req.topic), req.group, req.topic, Bitwise.bsr(req.generation, 32))
+        Wire.encode_error(correlation_id, :stale_generation)
+
+      {:error, reason} ->
+        Wire.encode_error(correlation_id, normalize(reason))
+    end
+  end
+
+  # The positions of a commit, by range, each the range whose read issued it and the position in that
+  # range's history; one token that does not decode, or that another topic's read minted, refuses the
+  # commit as `invalid_position`. Whether each names a place in its range's history the broker checks
+  # (`Malachi.BrokerServer.commit_positions/5`).
+  defp issued_positions(req) do
+    Enum.reduce_while(req.positions, {:ok, %{}}, fn %{range: range, position: token}, {:ok, positions} ->
+      case Position.resolve(token, req.topic) do
+        {:ok, issuer, at} -> {:cont, {:ok, Map.put(positions, {req.topic, range}, {issuer, at})}}
+        {:error, _reason} = error -> {:halt, error}
+      end
     end)
+  end
+
+  defp commit_fenced(req, positions) do
+    Malachi.Application.group_command_reply(
+      BrokerServer.commit_positions(broker_for(req.topic), req.group, req.topic, positions, req.generation)
+    )
+  catch
+    :exit, _reason -> {:error, :timeout}
+  end
+
+  defp group_allowed(session, topic),
+    do: if(topic_allowed?(session, :consume, topic), do: :ok, else: {:error, :permission_denied})
+
+  # A coordinator reached by name on this node or another (`CoordinatorRouter.resolve/2`) can be gone for a
+  # moment while a vnode's leadership moves: that is `:not_owner`, which the client answers by asking again,
+  # not an exit that takes the connection with it.
+  defp ask_coordinator(call) do
+    call.()
+  catch
+    :exit, _reason -> {:error, :not_owner}
+  end
+
+  # What reading a range asks of the session and of the request before anything else: the consume
+  # permission on the topic and a codec the pages can go out in. The subscribe token is spent after these
+  # and the routes check, right before the broker is asked, so a request this node refuses on its own
+  # spends none; a refusal from the broker (`moved`, a position it does not hold) has spent it.
+  defp read_allowed(session, req) do
+    cond do
+      not topic_allowed?(session, :consume, req.topic) -> {:error, :permission_denied}
+      :none not in req.accept -> {:error, :unsupported_codec}
+      true -> :ok
+    end
+  end
+
+  # Where a read starts, as the broker takes it: a position token becomes the range that issued it and the
+  # position in that range's history (`Malachi.Position.resolve/2`), which the broker checks against the
+  # range read (`Malachi.Broker.consume_start/3`); a token that does not decode, or that another topic's
+  # read minted, is `invalid_position` here. Checked before the subscribe token is spent, as `read_allowed/2`.
+  defp read_start(%{start: {:position, token}, topic: topic}) do
+    with {:ok, issuer, at} <- Position.resolve(token, topic), do: {:ok, {:position, issuer, at}}
+  end
+
+  defp read_start(%{start: start}), do: {:ok, start}
+
+  # Whether a consume stream on `topic` may still push: the consume permission.
+  defp consume_allowed(session, topic) do
+    if topic_allowed?(session, :consume, topic), do: :ok, else: {:error, :permission_denied}
+  end
+
+  # The soft byte limit of a page, capped by the inflated batch size the server takes in.
+  defp page_bytes(max_bytes), do: min(max_bytes, max_inflated_batch_bytes())
+
+  defp current_routes(version, version), do: :ok
+  defp current_routes(_current, _stale), do: {:error, :stale_routes}
+
+  # Any authenticated session: the answer names brokers and vnodes, never a topic.
+  defp cluster_state(correlation_id, payload) do
+    :ok = Wire.decode_cluster_state_req(payload)
+
+    case Routing.read_cluster_state() do
+      {:ok, state} -> Wire.encode_ok(correlation_id, Wire.encode_cluster_state_resp(state))
+      {:error, reason} -> Wire.encode_error(correlation_id, reason)
+    end
+  end
+
+  # A producer and a consumer both need a topic's routes, so either permission on it is enough.
+  defp topic_routes(correlation_id, payload, session) do
+    topic = Wire.decode_topic_routes_req(payload)
+
+    if topic_allowed?(session, :produce, topic) or topic_allowed?(session, :consume, topic) do
+      case Routing.read_topic_routes(topic) do
+        {:ok, routes} -> Wire.encode_ok(correlation_id, Wire.encode_topic_routes_resp(routes))
+        {:error, reason} -> Wire.encode_error(correlation_id, reason)
+      end
+    else
+      Wire.encode_error(correlation_id, :permission_denied)
+    end
   end
 
   defp create_topic(correlation_id, payload, session) do
@@ -174,69 +672,16 @@ defmodule Malachi.TCPProtocol do
     end)
   end
 
-  defp produce(correlation_id, payload, session) do
-    {topic, records} = Wire.decode_produce_req(payload)
-
-    with_topic_permission(session, :produce, topic, correlation_id, fn ->
-      with_rate_limit(:publish, session, correlation_id, fn ->
-        case LogApi.produce_records(broker_for(topic), topic, records) do
-          {:ok, count} -> Wire.encode_ok(correlation_id, <<count::32>>)
-          {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
-        end
-      end)
-    end)
-  end
-
-  defp fetch(correlation_id, payload, session) do
-    {topic, cursor, group, member, max_raw, wait_raw} = Wire.decode_fetch_req(payload)
-
-    with_topic_permission(session, :consume, topic, correlation_id, fn ->
-      max = fetch_max(max_raw)
-      wait_ms = fetch_wait(wait_raw)
-
-      result =
-        cond do
-          # a consumer-group member: the server scopes the fetch to the member's assigned ranges and
-          # returns records + an opaque cursor (the client never sees a range id)
-          member != nil and group != nil ->
-            LogApi.fetch_member(broker_for(topic), coordinator_for(topic), topic, group, member, max, wait_ms)
-
-          # an explicit cursor (client-managed paging) takes precedence over a group resume
-          cursor != nil ->
-            LogApi.fetch(broker_for(topic), topic, cursor, max, wait_ms)
-
-          group != nil ->
-            LogApi.fetch_group(broker_for(topic), topic, group, max, wait_ms)
-
-          true ->
-            LogApi.fetch(broker_for(topic), topic, :start, max, wait_ms)
-        end
-
-      case result do
-        {:ok, records, next_cursor} ->
-          Wire.encode_ok(correlation_id, Wire.encode_fetch_resp(records, next_cursor))
-
-        {:error, reason} ->
-          Wire.encode_error(correlation_id, normalize(reason))
-      end
-    end)
-  end
-
-  defp commit(correlation_id, payload, session) do
-    {topic, group, cursor} = Wire.decode_commit_req(payload)
-
-    with_topic_permission(session, :consume, topic, correlation_id, fn ->
-      ok_or_error(correlation_id, LogApi.commit(broker_for(topic), topic, group, cursor), <<>>)
-    end)
-  end
-
   # Removes a member from its consumer group (fast rebalance on a clean shutdown). Acks with an empty ok.
-  defp leave_group(correlation_id, payload, session) do
-    {topic, group, member} = Wire.decode_leave_group_req(payload)
+  defp leave_group(correlation_id, payload, session),
+    do: payload |> Wire.decode_leave_group_req() |> leave_answer(correlation_id, session)
 
+  defp leave_answer({topic, group, member}, correlation_id, session) do
     with_topic_permission(session, :consume, topic, correlation_id, fn ->
-      _ = GroupCoordinator.leave(coordinator_for(topic), group, topic, member)
-      Wire.encode_ok(correlation_id, <<>>)
+      case ask_coordinator(fn -> GroupCoordinator.leave(coordinator_for(topic), group, topic, member) end) do
+        :ok -> Wire.encode_ok(correlation_id, <<>>)
+        {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
+      end
     end)
   end
 
@@ -415,47 +860,50 @@ defmodule Malachi.TCPProtocol do
   # only when the coarse permission does not already settle it (the thunk), keeping the produce/consume hot
   # path free of an ACL lookup for the common non-strict case. A denial returns a permission-denied frame.
   defp with_topic_permission(session, operation, topic, correlation_id, fun) do
-    strict? = Application.get_env(:malachi, :acl_strict, false)
-
-    allowed? =
-      Authorization.allow?(session.permissions, operation, strict?, fn ->
-        AclStore.authorized?(session.username, operation, topic)
-      end)
-
-    if allowed?, do: fun.(), else: Wire.encode_error(correlation_id, :permission_denied)
+    if topic_allowed?(session, operation, topic),
+      do: fun.(),
+      else: Wire.encode_error(correlation_id, :permission_denied)
   end
 
-  # Runs `fun` (which returns a response frame) only if the session's user is within the configured limit
-  # for `action`; otherwise a `rate_limited` error frame and a bump of the matching blocked counter, which
-  # is what makes `rate_limit_blocked{action=...}` able to move at all.
+  defp topic_allowed?(session, operation, topic) do
+    strict? = Application.get_env(:malachi, :acl_strict, false)
+
+    Authorization.allow?(session.permissions, operation, strict?, fn ->
+      AclStore.authorized?(session.username, operation, topic)
+    end)
+  end
+
+  # Whether the session's user is within the configured limit for `action`: `:ok`, or `{:error,
+  # :rate_limited}` and a bump of the matching blocked counter, which is what makes
+  # `rate_limit_blocked{action=...}` able to move at all.
   #
-  # Ordering matters: this sits INSIDE the permission check, so a request the caller was never allowed to
-  # make cannot spend tokens from the quota. Unconfigured is the default and the whole cost is one config
-  # read. A produce spends one token per request, not per record (the batch size is already bounded by
-  # `max_frame_size`); a per-record cost would be a different quota and is left as future work.
+  # Ordering matters: the callers check it AFTER the permission, so a request the caller was never allowed
+  # to make cannot spend tokens from the quota. Unconfigured is the default and the whole cost is two config
+  # reads (the limit and the window). An `open_consume` and a `fetch_range` spend one `:subscribe` token; an
+  # append is charged by its records and bytes (`charge_publish/3`).
   #
   # The check runs in this connection's own process (`check_limit_in_caller/3`) rather than through the
   # limiter GenServer, which would put every connection in the system behind one process on the hottest
-  # path. The count stays exact; what that door gives up is the token bucket's smoothing, so a client can
+  # path. Its count is exact; what that door gives up is the token bucket's smoothing, so a client can
   # burst to 2x the limit across a window boundary. Windows follow the monotonic clock, so a system clock
   # step does not open a new one. See the limiter's own docs for the measurements.
   #
   # `retry_after_ms` is computed by the limiter but deliberately not carried on the wire: the error frame's
   # payload is a bare reason string, and `Malachi.Wire` freezes that encoding, so carrying it would take a
   # new api_key.
-  defp with_rate_limit(action, session, correlation_id, fun) do
+  defp rate_limit_check(action, session) do
     case RateLimiter.action_config(action) do
       nil ->
-        fun.()
+        :ok
 
       config ->
         case RateLimiter.check_limit_in_caller(session.username, action, config) do
           :ok ->
-            fun.()
+            :ok
 
           {:error, :rate_limit_exceeded, _retry_after_ms} ->
             Metrics.increment_rate_limit_blocked(action)
-            Wire.encode_error(correlation_id, :rate_limited)
+            {:error, :rate_limited}
         end
     end
   end
@@ -469,7 +917,7 @@ defmodule Malachi.TCPProtocol do
   defp normalize(reason) when is_atom(reason) or is_binary(reason), do: reason
   defp normalize(reason), do: inspect(reason)
 
-  # Bound the client-supplied page size and long-poll wait (opt-in, capped).
+  # Bound the client-supplied page size and `fetch_range` wait (opt-in, capped).
   defp fetch_max(max) when is_integer(max) and max > 0, do: min(max, 1_000)
   defp fetch_max(_max), do: 100
 

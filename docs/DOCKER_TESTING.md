@@ -54,8 +54,8 @@ make docker-regression-test
 | 3.5 | Static assets shipped in the image | `scripts/docker-static-assets-check.sh` (see below) |
 | 4 | TCP server listening | port 4040 open |
 | 5 | Container process health | `bin/malachi pid` |
-| 6 | Log produce/fetch workflow | `create_topic`, `produce_records`, then `fetch` by opaque cursor |
-| 7 | Consumer-group resume | `fetch_group`, `commit`, resume returns empty (at-least-once) |
+| 6 | Log produce/read workflow | over the wire with `Malachi.Loadtest.Client`: `create_topic`, a produce on a producer stream, then a read of every range |
+| 7 | Consumer-group resume | `join`, a read from the group's checkpoint, `commit`, and a second read from it returns empty (at-least-once) |
 | 8 | High-volume throughput | 1000 records in one produce |
 | 9 | Memory stability under load | 5000 records, memory before/after |
 | 10 | Concurrent multi-topic | 10 topics, 100 records each, all drained back |
@@ -173,6 +173,7 @@ docker run -d --name test-malachi \
   -e MALACHI_PRODUCER_PASS="your_producer_password" \
   -e MALACHI_CONSUMER_PASS="your_consumer_password" \
   -e MALACHI_APP_PASS="your_app_password" \
+  -e MALACHI_REQUIRE_TLS=false \
   hectorcardoso/malachi:latest
 docker logs -f test-malachi
 ```
@@ -189,15 +190,19 @@ Expected startup logs (locale `en_US`):
 
 The client protocol is binary, so do not hand-write frames. Either use the reference Node client in
 [`scripts/`](https://github.com/malachi-hq/malachi/tree/main/scripts) (`producer.js`, `consumer.js`), or
-drive the in-process API through `bin/malachi rpc`, which is what the regression script does:
+drive `Malachi.Loadtest.Client` through `bin/malachi rpc`, which is what the regression script does. It
+is a client of the stream and group keys over the wire, connected here to the node's own listener as
+admin; it speaks plain TCP, hence `MALACHI_REQUIRE_TLS=false` above:
 
 ```bash
 docker exec test-malachi bin/malachi rpc '
+  alias Malachi.Loadtest.Client
+  {:ok, client} = Client.connect(host: "127.0.0.1", port: Malachi.TCPAcceptorPool.port(), user: "admin", pass: System.fetch_env!("MALACHI_ADMIN_PASS"))
   topic = "smoke"
-  _ = Malachi.LogApi.create_topic(Malachi.LogBroker, topic)
-  {:ok, 1} = Malachi.LogApi.produce_records(Malachi.LogBroker, topic, [%Malachi.Log.Record{key: "k", value: "hello"}])
-  {:ok, records, _cursor} = Malachi.LogApi.fetch(Malachi.LogBroker, topic, :start, 10)
-  IO.inspect(Enum.map(records, & &1.value))
+  _ = Client.create_topic(client, topic, 8)
+  {:ok, 1} = Client.produce(client, topic, [Malachi.Log.Record.new("hello", key: "k")], 10_000)
+  {:ok, %{values: values}} = Client.read(client, topic)
+  IO.inspect(values)
 '
 ```
 

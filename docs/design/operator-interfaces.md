@@ -134,7 +134,7 @@ This section is the vocabulary. Every interface uses these nouns, in these words
 | Field | Type | Meaning |
 |---|---|---|
 | `name` | string | Matches `~r/\A[A-Za-z0-9._-]+\z/`; becomes a directory path segment |
-| `keyspace_size` | positive integer | `2^bits`, bits in 1..32. Today always 256, because `LogApi` forces 8 bits (`log_api.ex:43,51`) |
+| `keyspace_size` | positive integer | `2^bits`, bits in 1..32. Today always 256, because `LogApi` forces 8 bits whatever a `create_topic` asks for (`log_api.ex:15,20`) |
 | `state` | `active` or `sealed` | |
 | `next_range_seq` | integer | The per topic range id counter |
 | `policy` | policy name or nil | Storage policy. Nil means the global policy applies |
@@ -216,17 +216,21 @@ private field with no accessor at all.
 
 ### 3.4 Cursor
 
-`log_api.ex:259`: `Base.url_encode64(:erlang.term_to_binary(positions))`, where positions is
-`%{range_id => :start | {source_index, source_offset}}`.
+`Malachi.Position`: a cursor is a position token of one range, version 1 being 19 bytes,
+`<<1, topic_tag::32, issuer_seq::32, source_index::16, offset::64>>`, at most 64 bytes on the wire. It
+is the `next` of a page, the start of an `open_consume` or a `fetch_range`, and a group's checkpoint
+(`commit_offsets`). Inside the server, and in the control plane's checkpoints, a position stays
+`{source_index, source_offset}`.
 
 `source_index` indexes the range's history sources: every sealed ancestor filtered to this range's
-key slice, followed by the range itself. Validation is four guards before deserialization, including
-a 262144 byte cap and an explicit rejection of the compressed term tag because a 2.6 KB token
-inflates about six thousand times (`log_api.ex:324-373`).
+key slice, followed by the range itself. Decoding is a plain binary match that builds no term, and a
+broker takes a token only when it minted it for the range read or for an ancestor whose history the
+range's starts with and whose keys hold the range's (`Malachi.Broker.position_lineage/4`); any other is
+`invalid_position`.
 
-**There is no cursor comparison function anywhere in the codebase**, and no way to translate a cursor
-to a position an operator could reason about. The interface therefore treats a cursor as an opaque
-identity: copy it, paste it, seek to it, and show what is around it.
+`Malachi.Position.compare/2` orders two tokens of one topic and issuer and answers `:incomparable` for
+any other pair; nothing subtracts one from another. The interface therefore treats a cursor as an
+opaque identity: copy it, paste it, compare it, seek to it, and show what is around it.
 
 ### 3.5 Consumer group
 
@@ -239,9 +243,9 @@ Assignment is by range, via rendezvous hashing with replication factor 1
 (`assignment.ex:28-41`). Generation increments only when the computed assignment actually changed.
 
 **Lag cannot be computed.** No function anywhere subtracts a committed position from a range end.
-The committed position is a `{source_index, source_offset}` pair against a sources list whose shape
-changes on every split, and the range's end offset lives in `Malachi.Broker.offsets`, read by the
-private `next_offset/2`. Section 6.5 specifies what the interface shows instead.
+The committed position is stored as a `{source_index, source_offset}` pair (and handed to clients as a
+token) against a sources list whose shape changes on every split, and the range's end offset lives in
+`Malachi.Broker.offsets`, read by the private `next_offset/2`. Section 6.5 specifies what the interface shows instead.
 
 ### 3.6 Cluster, ring and control plane
 
@@ -450,7 +454,7 @@ binds it to the activity rail, and the web renders it as the sidebar.
 | 4 | **Segments** | Inventory, Copies, Scrub, Rebuilds |
 | 5 | **Consumers** | Groups, Assignment, Positions, Skips |
 | 6 | **Records** | Inspect, Produce |
-| 7 | **Cluster** | Nodes, Ring and vnodes, Raft, Compatibility, Upgrade |
+| 7 | **Cluster** | Nodes, Producers, Ring and vnodes, Raft, Compatibility, Upgrade |
 | 8 | **Signals** | Insights, Issues |
 | 9 | **Access** | Users, ACLs, Sessions, Lockouts, Audit |
 | 10 | **Settings** | Appearance, Language, Density, Keymap, About |
@@ -714,7 +718,8 @@ globals allow list, and no per record VM reset**, so state one record's script s
 next. Any Malachi equivalent declares its resource limits explicitly and resets between records, or
 it uses a language that cannot carry state at all, which is what Kafbat UI chose with CEL.
 
-GAP: all of it. There is no read by cursor on the wire and no HTTP route. This is the single largest
+GAP: all of it. The wire reads one range from a cursor (`fetch_range`, 31), but nothing filters or
+searches records, and there is no HTTP route. This is the single largest
 feature gap between Malachi and every product studied.
 
 ### 6.8 Cluster
@@ -743,6 +748,27 @@ beside it, so the operator sees the fault tolerance the upgrade is temporarily c
 GAP: every field on this screen. The node list, the ring, the lease, the vnode placement and the
 machine versions are all cross node Erlang only today, and `mix malachi.ring --show` is the sole
 existing read, in tab separated text with no JSON mode.
+
+### 6.8.1 Producers
+
+The producer streams open on a node: who writes where, and how far. One row per stream: topic, range,
+segment, primary, label, client address, window (appends and bytes), next and acknowledged sequence,
+appends and bytes in flight, and when it opened, with the summary strip showing the open count and the
+streams opened, closed and moved since the node started. A stream that keeps moving, or one whose
+acknowledged sequence stops while its next keeps climbing, is the row an operator wants.
+
+The label is what the client named itself when it opened the stream (`Malachi.Wire` `open_stream`),
+shown as printable ASCII only and at most 128 bytes, so a client cannot put control characters or an
+unbounded string in front of an operator. NorthGuard keeps track of its clients in a separate client
+management layer (its Conductor); here the node a producer is connected to answers for it, from the
+connection that holds the stream (`Malachi.ProducerDirectory`).
+
+SOURCE: `GET /api/v1/producers` (row 14 of table 10.3), the streams of the node that answers, paged with
+a page token, with a total that is a lower bound when a connection did not answer within the listing's
+bound and `complete: false` on a walk that may have missed streams for that reason; and the
+Prometheus series `malachi_producer_streams_total{event}` and `malachi_producer_streams_open`. GAP: the
+whole cluster's streams in one listing, which is each node's listing gathered across nodes, and
+per-stream rates, which the connection would have to count.
 
 ### 6.9 Signals
 
@@ -1114,6 +1140,7 @@ Auth is the console role each route requires (#228, `Malachi.Console.Access.rout
 | `PUT`/`DELETE /policies/:name`, `/topics/:t/policy` | Editor | |
 | `GET /users`, `/users/:u/acls`, `PUT /users/:u/role` | Admin | Full CRUD |
 | `GET /api/v1/me` | Any session | Role, capabilities, permissions, locale, cluster identity |
+| `GET /api/v1/producers` | Viewer | The node's open producer streams, paged (6.8.1) |
 | `GET /health`, `/ready` | Public | |
 
 ### 10.2 The rate limiter, which blocks everything else
@@ -1157,6 +1184,7 @@ is `gte`. **No page numbers, no "N of M", and no scrollbar proportional to the d
 | 11 | `GET /api/v1/metrics/history` | Sparklines without waiting | The data already sits in ETS |
 | 12 | `GET /api/v1/i18n?locale=` | 12.2 | |
 | 13 | Per range load signal | 6.4's heatmap | #29. The hardest one: the measurement does not exist |
+| 14 | `GET /api/v1/producers` | 6.8.1 | The open producer streams of the answering node. **Delivered for one node (#275)**; the cluster wide listing is a gap |
 
 ### 10.4 Mutations
 

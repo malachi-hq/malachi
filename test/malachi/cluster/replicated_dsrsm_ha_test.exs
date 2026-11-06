@@ -8,8 +8,10 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
   @moduletag :multinode
 
   alias Malachi.Cluster.DSRSM
+  alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicatedDSRSM
+  alias Malachi.Cluster.RingTopology
   alias Malachi.Metadata
   alias Malachi.Test.Distribution
   alias Malachi.Test.TmpDir
@@ -40,6 +42,31 @@ defmodule Malachi.Cluster.ReplicatedDSRSMHaTest do
       reply ->
         reply
     end
+  end
+
+  test "a vnode answers any node with the first member of its placement gone" do
+    # The node running this test hosts no member, so nothing local stands in: the location starts at the
+    # member that dies. Addressed through that one member, the two left would elect a leader and no command
+    # or read could reach it: a failover seal then never lands, and every range of the vnode stops taking
+    # writes until the member returns.
+    peers = for _ <- 1..3, do: start_peer()
+    [{first_peer, first} | _] = peers
+    members = Enum.map(peers, &elem(&1, 1))
+    vnode = :"rd_first_#{System.unique_integer([:positive])}"
+
+    {:ok, ring} = HashRing.add_vnode(HashRing.new(), vnode, 0)
+    {:ok, _server_id} = MetadataServer.start(vnode, members)
+    location = RingTopology.location(vnode, members)
+    assert hd(location) == {vnode, first}
+    replicated = %ReplicatedDSRSM{ring: ring, vnodes: %{vnode => location}}
+
+    assert {:ok, _root} = commit(replicated, "before", {:create_topic, "before", 4})
+    :ok = Distribution.stop_peer(first_peer)
+
+    assert {:ok, _root} = commit(replicated, "after", {:create_topic, "after", 4})
+    assert {:ok, topics} = ReplicatedDSRSM.query(replicated, "after", &Map.keys(&1.topics))
+    assert Enum.sort(topics) == ["after", "before"]
+    assert MetadataServer.ready?(location)
   end
 
   test "each vnode is replicated over the node set and survives losing a member" do

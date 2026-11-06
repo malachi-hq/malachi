@@ -34,7 +34,9 @@ defmodule Malachi.BrokerServer do
   require OpenTelemetry.Tracer, as: Tracer
 
   alias Malachi.Broker
+  alias Malachi.Broker.ReadView
   alias Malachi.Broker.Skip
+  alias Malachi.BrokerServer.ConsumeIndex
   alias Malachi.Cluster.BoundedFanout
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
@@ -42,12 +44,13 @@ defmodule Malachi.BrokerServer do
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Cluster.ReplicatedMetadata
   alias Malachi.Cluster.ReplicationServer
+  alias Malachi.Cluster.ReplicaTracker
   alias Malachi.Cluster.RingTopology
   alias Malachi.Consumer.CoordinatorRouter
-  alias Malachi.Consumer.GroupCoordinator
   alias Malachi.I18n
   alias Malachi.Metadata
   alias Malachi.Retention.SkipReporter
+  alias Malachi.StreamWindow
   alias Malachi.Telemetry
   alias Malachi.UnexpectedMessage
   alias OpenTelemetry.Ctx
@@ -67,6 +70,10 @@ defmodule Malachi.BrokerServer do
   # timeout. A spurious resend is safe: the roll stays owed and a fence is idempotent, answering the same
   # numbers.
   @roll_fence_retry_ms 1_000
+
+  # The bound on each replica's answer when a restarted node learns the read horizon of the ranges it leads
+  # (`probe_horizons/2`): every call runs at once, so it is also what one pass of them costs.
+  @horizon_probe_timeout 250
 
   # A binding waits for its commit for at most 2 s inside this loop (`Malachi.Cluster.ReplicatedMetadata`),
   # so the caller waits a little longer than that plus a busy mailbox, and never less: a caller that gave
@@ -121,8 +128,8 @@ defmodule Malachi.BrokerServer do
     * `:group_commit_max_inflight` - past this many parked records, shed produces with `:overloaded`
       instead of dropping the connection (default 200000, or app env).
     * `:segment_max_bytes` - byte threshold at which the active segment asks to roll.
-    * `:skip_reporter` - the `Malachi.Retention.SkipReporter` that push subscriptions report skipped
-      data to. Defaults to `Malachi.Retention.SkipReporter.name_for/1` of `:name` (nil, so no reporting,
+    * `:skip_reporter` - the `Malachi.Retention.SkipReporter` that consume streams and `fetch_range`
+      report skipped data to. Defaults to `Malachi.Retention.SkipReporter.name_for/1` of `:name` (nil, so no reporting,
       for an unnamed server).
     * remaining options are forwarded to a started `Malachi.Cluster.ReplicationServer` (segment log
       options such as `:max_bytes`, `:flush_bytes`, `:index_interval`); ignored with `:brokers`.
@@ -160,13 +167,107 @@ defmodule Malachi.BrokerServer do
   @spec topics_bound_to(GenServer.server(), Malachi.Metadata.policy_name()) :: [Malachi.Metadata.topic_name()]
   def topics_bound_to(server, name), do: GenServer.call(server, {:topics_bound_to, name})
 
-  @doc "Routes, replicates and commits records; returns `{:ok, placements}` or an error."
+  # How much longer than its own wait a `fetch_range/4` call waits for the broker to answer it.
+  @fetch_range_margin_ms 5_000
+
+  @doc """
+  Opens a producer stream on `range_id` for `pid` (`Malachi.ProducerStreams`): `{:ok, token, segment_id,
+  broker}` when this node leads the range's active segment (opened now if the range has none), `broker`
+  being this server's pid, the process whose index holds the stream; `{:moved, reason,
+  targets}` when the stream belongs elsewhere (the segment is led by another node, or the range was
+  retired), or `{:error, reason}`. The token closes the stream and names it in `{:stream_moved, token,
+  reason, targets}`, which the broker sends `pid` when the range moves on.
+  """
+  @spec open_stream(GenServer.server(), Metadata.range_id(), pid()) ::
+          {:ok, reference(), Metadata.segment_id(), pid()} | {:moved, atom(), list()} | {:error, term()}
+  def open_stream(server, range_id, pid \\ self()), do: GenServer.call(server, {:open_stream, range_id, pid})
+
+  @doc "Closes the producer or consume stream `token` names. Idempotent."
+  @spec close_stream(GenServer.server(), reference()) :: :ok
+  def close_stream(server, token), do: GenServer.call(server, {:close_stream, token})
+
+  @doc """
+  Opens a consume stream on `range_id` for `pid` (`Malachi.ConsumeStreams`), from `start` (resolved by
+  `Malachi.Broker.consume_start/3`). Served where the range is read: where its active segment is led, or
+  on any node while it has none (opening never places one): `{:ok, token, position, broker}` here,
+  `{:moved, reason, targets}` when it belongs elsewhere, or `{:error, reason}`.
+
+  The broker reads nothing for the stream: it hands the connection a `Malachi.Broker.ReadView` of the
+  range in `{:consume_wake, token, view, skip_reporter}`, at once and then each time the range grows past
+  the end the connection said it had read to (`arm_consume/3`), and the connection reads and pushes. When
+  the range moves on it is sent `{:stream_moved, token, reason, targets}`, as a producer stream is.
+  """
+  @spec open_consume(GenServer.server(), Metadata.range_id(), term(), pid()) ::
+          {:ok, reference(), {non_neg_integer(), non_neg_integer()}, pid()}
+          | {:moved, atom(), list()}
+          | {:error, term()}
+  def open_consume(server, range_id, start, pid \\ self()),
+    do: GenServer.call(server, {:open_consume, range_id, start, pid})
+
+  @doc """
+  The consume stream `token` read its range up to `seen_end` (the durable end of the last view it was
+  handed) and waits for more: it is woken once the range's durable records end past that.
+  """
+  @spec arm_consume(GenServer.server(), reference(), non_neg_integer()) :: :ok
+  def arm_consume(server, token, seen_end), do: GenServer.cast(server, {:arm_consume, token, seen_end})
+
+  @doc "Hands the consume stream `token` a fresh view of its range at once (after a read that failed)."
+  @spec refresh_consume(GenServer.server(), reference()) :: :ok
+  def refresh_consume(server, token), do: GenServer.cast(server, {:refresh_consume, token})
+
+  @doc """
+  The read of one page of `range_id` from `start` (`fetch_range`, wire key 31), served where the range is
+  read, as `open_consume/4` is: `{:ok, position, view, skip_reporter}` once the range holds records past
+  `position`, or after `wait_ms` without any (the read then finds none), for the caller to read through
+  `view`. `{:moved, reason, targets}` or `{:error, reason}` as `open_consume/4` answers.
+  """
+  @spec fetch_range(GenServer.server(), Metadata.range_id(), term(), non_neg_integer()) ::
+          {:ok, {non_neg_integer(), non_neg_integer()}, ReadView.t(), atom() | pid() | nil}
+          | {:moved, atom(), list()}
+          | {:error, term()}
+  def fetch_range(server, range_id, start, wait_ms),
+    do: GenServer.call(server, {:fetch_range, range_id, start, wait_ms}, wait_ms + @fetch_range_margin_ms)
+
+  @doc """
+  Sends an append of a producer stream without waiting for it, under `label`, adding the request to
+  `reqids` (`:gen_server.send_request/4`); the broker's span of it is a child of the span in `ctx`. Its
+  answer, `{produce_reply, scale}` with `scale` the share of the stream's window the range's load leaves,
+  arrives as a message `:gen_server.check_response/3` reads.
+
+  The append is written as one append into one segment this node leads, or not at all. One that would go
+  to a segment led by another node (the range's segment sealed and its successor was placed elsewhere, or a
+  failover moved it), or whose records go to more than one range (a split or merge retired the range), is
+  answered `{:error, :not_primary}` before anything of it is planned, and `{:error, {:sealed,
+  end_offset}}` when the seal refused it after it was sent and its successor is led elsewhere. Either
+  answer means nothing of the append was stored, and the stream is told where its range went
+  (`{:stream_moved, ...}`).
+  """
+  @spec send_stream_produce(
+          GenServer.server(),
+          Malachi.Metadata.range_id(),
+          [Malachi.Log.Record.t()],
+          term(),
+          :gen_server.request_id_collection(),
+          :otel_ctx.t()
+        ) ::
+          :gen_server.request_id_collection()
+  def send_stream_produce(server, range_id, records, label, reqids, ctx),
+    do: :gen_server.send_request(server, {:stream_produce, range_id, records, ctx}, label, reqids)
+
+  @doc """
+  Routes, replicates and commits records; returns `{:ok, placements}` or an error. The in-process produce
+  of a whole topic: from any node, each range's records are planned into its active segment wherever that
+  segment is led, unlike a producer stream's append (`send_stream_produce/6`), which is refused with
+  `:not_primary` when it cannot be written as one append into one segment its node leads. A record written
+  through a node that does not lead its segment is readable where the range is read once its segment seals
+  or that node answers a later produce on the range (`Malachi.Broker.durable_end/2`).
+  """
   @spec produce(GenServer.server(), Malachi.Metadata.topic_name(), [Malachi.Log.Record.t()]) ::
           {:ok, %{Malachi.Metadata.range_id() => {non_neg_integer(), non_neg_integer()}}}
           | {:error, term()}
   def produce(server, topic, records) do
-    # Carry the caller's trace context (the LogApi produce span) into the broker process so the
-    # server-side work becomes a child span (cross-process propagation, O5b).
+    # Carry the caller's trace context into the broker process so the server-side work becomes a child
+    # of the caller's span (cross-process propagation, O5b).
     # The timeout leaves room for the server-side completion paths (replication no_quorum at ~5s and
     # the async-produce safety timer) to reply with a real error before the call ever exits.
     GenServer.call(server, {:produce, topic, records, Ctx.get_current()}, @produce_call_timeout)
@@ -183,31 +284,6 @@ defmodule Malachi.BrokerServer do
           {:ok, [Malachi.Log.Record.t()], Broker.consume_cursor(), [Skip.t()]} | {:error, term()}
   def read_consume(server, range_id, cursor, max_records),
     do: GenServer.call(server, {:read_consume, range_id, cursor, max_records})
-
-  @doc """
-  Consumes a topic's current ranges from `positions`, returning `{records, next_positions, skips}`.
-  When `wait_ms > 0` and nothing is available yet, the call blocks (long-poll) until a produce to the
-  topic delivers data or `wait_ms` elapses (then `records` and `skips` are `[]`). With `wait_ms == 0`
-  it returns immediately. `positions`/`next_positions` map each range id to its
-  `Broker.consume_cursor`.
-
-  `skips` are the stretches of history the returned positions moved past because they were no longer
-  stored (`Malachi.Broker.Skip`), for the caller to attribute: this server does not know which consumer
-  group a fetch belongs to, so it neither counts nor logs them here.
-  """
-  @spec consume(
-          GenServer.server(),
-          Malachi.Metadata.topic_name(),
-          map(),
-          pos_integer(),
-          non_neg_integer(),
-          [term()] | nil
-        ) ::
-          {[Malachi.Log.Record.t()], map(), [Skip.t()]} | {:error, term()}
-  def consume(server, topic, positions, max_records, wait_ms, ranges \\ nil) do
-    # The call may block up to wait_ms server-side; give it headroom over the default 5s call timeout.
-    GenServer.call(server, {:consume, topic, positions, max_records, wait_ms, ranges}, wait_ms + 5_000)
-  end
 
   @doc "Streams one bounded page of a range's cross-epoch history (see `Malachi.Broker.stream_history/5`)."
   @spec stream_history(GenServer.server(), Malachi.Metadata.range_id(), Broker.history_cursor(), pos_integer()) ::
@@ -299,62 +375,38 @@ defmodule Malachi.BrokerServer do
   @spec apply_heal(GenServer.server(), [Malachi.Metadata.command()]) :: :ok | {:error, term()}
   def apply_heal(server, commands), do: GenServer.call(server, {:apply_heal, commands})
 
-  @doc "Durably commits a consumer group's position for a topic; returns the control-plane reply."
+  @doc """
+  A group member's commit taken at `generation` (`Malachi.Broker.commit_offset/5`): `:ok`, or `{:error,
+  :stale_generation}` when a range in it was already committed at a higher generation.
+  """
   @spec commit_offset(
           GenServer.server(),
           Malachi.Metadata.group(),
           Malachi.Metadata.topic_name(),
-          Malachi.Metadata.offsets()
-        ) ::
-          term()
-  def commit_offset(server, group, topic, offsets),
-    do: GenServer.call(server, {:commit_offset, group, topic, offsets})
-
-  @doc "A consumer group's committed offsets for a topic (empty if it never committed)."
-  @spec committed_offsets(GenServer.server(), Malachi.Metadata.group(), Malachi.Metadata.topic_name()) ::
-          Malachi.Metadata.offsets()
-  def committed_offsets(server, group, topic), do: GenServer.call(server, {:committed_offsets, group, topic})
-
-  @doc """
-  Subscribes the calling process as a streaming consumer of `topic` for consumer `group`: records
-  are pushed to it as `{:log_records, topic, records, next_positions}` as they are produced, resuming
-  from the group's committed position and bounded by a credit `window` (at most `window` records in
-  flight, at most `max` per push). Ack with `stream_ack/5` to return credit and commit progress. `:ok`.
-  """
-  @spec subscribe(
-          GenServer.server(),
-          Malachi.Metadata.topic_name(),
-          Malachi.Metadata.group(),
-          pos_integer(),
-          pos_integer(),
-          keyword()
-        ) ::
-          :ok
-  def subscribe(server, topic, group, window, max, group_opts \\ []) do
-    GenServer.call(server, {:subscribe, topic, group, window, max, self(), group_opts})
-  end
-
-  @doc """
-  Acks `count` streamed records of `topic`/`group` at `positions` (a decoded cursor): returns that much
-  window credit (unblocking further pushes) and durably commits the group's position. Returns `:ok`.
-  """
-  @spec stream_ack(
-          GenServer.server(),
-          Malachi.Metadata.topic_name(),
-          Malachi.Metadata.group(),
           Malachi.Metadata.offsets(),
-          non_neg_integer(),
-          [term()] | nil,
-          GenServer.server() | nil
-        ) ::
-          :ok
-  def stream_ack(server, topic, group, positions, count, ranges \\ nil, coordinator \\ nil) do
-    GenServer.call(server, {:stream_ack, topic, group, positions, count, self(), ranges, coordinator})
-  end
+          non_neg_integer()
+        ) :: term()
+  def commit_offset(server, group, topic, offsets, generation),
+    do: GenServer.call(server, {:commit_offset, group, topic, offsets, generation})
 
-  @doc "Removes the calling process's streaming subscription to `topic`. Returns `:ok`."
-  @spec unsubscribe(GenServer.server(), Malachi.Metadata.topic_name()) :: :ok
-  def unsubscribe(server, topic), do: GenServer.call(server, {:unsubscribe, topic, self()})
+  @doc """
+  A group member's commit of positions as clients send them back, each with the range whose read issued
+  it (`Malachi.Broker.commit_positions/5`): `{:error, :invalid_position}` when one does not name a place in
+  its range's history (`Malachi.Broker.position_lineage/4`), else what `commit_offset/5` answers.
+  """
+  @spec commit_positions(
+          GenServer.server(),
+          Malachi.Metadata.group(),
+          Malachi.Metadata.topic_name(),
+          %{Malachi.Metadata.range_id() => Broker.issued_position()},
+          non_neg_integer()
+        ) :: term()
+  def commit_positions(server, group, topic, positions, generation),
+    do: GenServer.call(server, {:commit_positions, group, topic, positions, generation})
+
+  @doc "Opens consumer `group` of `topic` for a group coordinator: `{:ok, epoch}` (`Malachi.Broker.open_group/3`)."
+  @spec open_group(GenServer.server(), Malachi.Metadata.group(), Malachi.Metadata.topic_name()) :: term()
+  def open_group(server, group, topic), do: GenServer.call(server, {:open_group, group, topic})
 
   @doc "Stops the server (and its replication storage)."
   @spec stop(GenServer.server()) :: :ok
@@ -391,6 +443,12 @@ defmodule Malachi.BrokerServer do
 
     {max_inflight_records, opts} =
       Keyword.pop(opts, :group_commit_max_inflight, Application.get_env(:malachi, :group_commit_max_inflight, 200_000))
+
+    {stream_inflight_soft, opts} =
+      Keyword.pop(opts, :stream_inflight_soft, StreamWindow.inflight_soft())
+
+    {stream_inflight_hard, opts} =
+      Keyword.pop(opts, :stream_inflight_hard, StreamWindow.inflight_hard())
 
     {live_brokers, opts} = Keyword.pop(opts, :live_brokers)
     {broker_attributes, opts} = Keyword.pop(opts, :broker_attributes)
@@ -488,14 +546,8 @@ defmodule Malachi.BrokerServer do
       # `replicated` follow the ring this node adopted last (see `adopt_bootstrap/3`), not the one it
       # booted with.
       bootstrap: bootstrap,
-      # Long-poll: fetches that found nothing and are willing to wait, parked here until a produce to
-      # their topic wakes them (with data) or their timer fires (empty). See `handle_call({:consume,…})`.
-      waiters: [],
-      # Streaming subscribers: `%{topic => [subscriber]}`. A subscriber is pushed records as they
-      # are produced, bounded by a credit window (in_flight < window); acks return credit and durably
-      # commit the group's position. See `wake_subscribers/3` / `push_subscriber/2`.
-      subscribers: %{},
-      # Where a push reports the data it moved a subscriber past (see `push_subscriber/3`); nil = nowhere.
+      # Where a consume stream or a `fetch_range` reports the data it moved its reader past (handed to it
+      # with each view, see `wake_ranges/2`); nil = nowhere.
       skip_reporter: skip_reporter,
       # Group commit (NorthGuard fps-store style): when on, produce buffers the batch and defers the
       # client reply until the next flush (~`gc_interval` ms), so many concurrent producers coalesce into
@@ -514,6 +566,17 @@ defmodule Malachi.BrokerServer do
       # (graceful) instead of letting them queue until the caller's call times out and drops the connection.
       max_inflight_records: max_inflight_records,
       gc_timer: nil,
+      # Records dispatched for each range and not yet answered (the async path), which scale a producer
+      # stream's window between these two limits (`Malachi.StreamWindow`).
+      range_inflight: %{},
+      stream_inflight_soft: stream_inflight_soft,
+      stream_inflight_hard: stream_inflight_hard,
+      # Open producer streams, by the monitor ref of the connection that holds them: the range and the
+      # segment and primary each was opened on. A stream whose range moves on is sent `{:stream_moved, ...}`
+      # and dropped (`sweep_streams/1`).
+      streams: %{},
+      # Open consume streams and waiting `fetch_range` calls, by range (`ConsumeIndex`).
+      consume: ConsumeIndex.new(),
       # In-flight async produces (the non-group-commit path): ref => the parked caller, its computed
       # placements, how many replication dispatches are still owed, the records of the dispatches that went
       # out behind this frontend's own fence (`parts`, so they can be planned again), and the safety timer.
@@ -563,9 +626,88 @@ defmodule Malachi.BrokerServer do
     {:reply, Broker.topics_bound_to(state.broker, name), state}
   end
 
+  # A producer stream on one range (`Malachi.ProducerStreams`), opened where the range's active segment is
+  # led: a node that does not lead it answers where it is, so the client talks to the primary directly.
+  def handle_call({:open_stream, range_id, pid}, _from, state), do: do_open_stream(range_id, pid, state)
+
+  def handle_call({:close_stream, token}, _from, state) do
+    if is_map_key(state.streams, token) or ConsumeIndex.consumer?(state.consume, token) do
+      Process.demonitor(token, [:flush])
+      {:reply, :ok, drop_stream(state, token)}
+    else
+      {:reply, :ok, state}
+    end
+  end
+
+  # A consume stream on one range (`Malachi.ConsumeStreams`), served where the range is served
+  # (`with_consume_range/3`): its records are read through views of the range, up to where they are
+  # durable, wherever its sealed segments live.
+  def handle_call({:open_consume, range_id, start, pid}, _from, state) do
+    with_consume_range(range_id, state, fn state ->
+      case Broker.consume_start(state.broker, range_id, start) do
+        {:ok, position} ->
+          token = Process.monitor(pid)
+
+          state =
+            wake_ranges(%{state | consume: ConsumeIndex.put_consumer(state.consume, token, pid, range_id)}, [range_id])
+
+          {:reply, {:ok, token, position, self()}, state}
+
+        {:error, _reason} = error ->
+          {:reply, error, state}
+      end
+    end)
+  end
+
+  def handle_call({:fetch_range, range_id, start, wait_ms}, from, state) do
+    with_consume_range(range_id, state, fn state ->
+      case Broker.consume_start(state.broker, range_id, start) do
+        {:ok, position} ->
+          # a range whose end or horizon the recovery has not learned is answered at once, for its read to
+          # refuse (`metadata_unavailable`): held, it would wait on an end nothing can make it pass
+          if wait_ms == 0 or Broker.unrecovered?(state.broker, range_id) or
+               Broker.horizon_pending?(state.broker, range_id) or
+               Broker.consume_ready?(state.broker, range_id, position) do
+            {:reply, fetch_reply(state, %{range_id: range_id, position: position}), state}
+          else
+            ref = make_ref()
+            timer = Process.send_after(self(), {:fetch_range_timeout, ref}, wait_ms)
+            waiter = %{from: from, range_id: range_id, position: position, timer: timer}
+            {:noreply, %{state | consume: ConsumeIndex.put_waiter(state.consume, ref, waiter)}}
+          end
+
+        {:error, _reason} = error ->
+          {:reply, error, state}
+      end
+    end)
+  end
+
+  # An append on a producer stream: the produce of one range, refused whole when a key falls outside it or
+  # when a segment it would be planned into is led by another node (`lead_append/3`), answered with the
+  # produce's own reply and how much of its window the range's load leaves.
+  def handle_call({:stream_produce, range_id, records, ctx}, from, state) do
+    {topic, _seq} = range_id
+
+    with {:keys, true} <- {:keys, Broker.keys_in_range?(state.broker, range_id, records)},
+         {:ok, state} <- lead_append(state, topic, records) do
+      case handle_call({:produce, topic, records, ctx}, {:stream, from, range_id}, state) do
+        {:reply, reply, state} ->
+          reply_produce({:stream, from, range_id}, reply, state)
+          {:noreply, state}
+
+        noreply ->
+          noreply
+      end
+    else
+      {:keys, false} -> {:reply, {{:error, :key_outside_range}, stream_load(state, range_id)}, state}
+      {:error, reason, state} -> {:reply, {{:error, reason}, stream_load(state, range_id)}, state}
+    end
+  end
+
   def handle_call({:produce, topic, records, ctx}, from, state) do
-    # Attach the caller's context so the broker span is a child of the LogApi produce span, and the
-    # downstream replication span (started inside Broker.produce) is a grandchild. Detach after.
+    # Attach the caller's context so the broker span is a child of the caller's (for a stream append, the
+    # `malachi.produce` span `Malachi.ProducerStreams` opened), and the downstream replication span
+    # (started inside Broker.produce) is a grandchild. Detach after.
     token = Ctx.attach(ctx)
 
     try do
@@ -580,17 +722,6 @@ defmodule Malachi.BrokerServer do
       end
     after
       Ctx.detach(token)
-    end
-  end
-
-  def handle_call({:consume, topic, positions, max_records, wait_ms, ranges}, from, state) do
-    # The vnode owning this topic may never have answered, in which case this broker knows of no ranges
-    # for it and every read would report the topic drained. Saying so is the whole point: an empty page
-    # here is a successful wrong answer, and a client cannot tell it from having caught up.
-    if topic_metadata_ready?(state, topic) do
-      consume_or_park(topic, positions, max_records, wait_ms, ranges, from, state)
-    else
-      {:reply, {:error, :metadata_unavailable}, state}
     end
   end
 
@@ -626,7 +757,7 @@ defmodule Malachi.BrokerServer do
     case fence_parent(state, range_id) do
       {:ok, state} ->
         {broker, reply} = Broker.split_range(state.broker, range_id)
-        {:reply, reply, %{state | broker: broker}}
+        {:reply, reply, sweep_streams(%{state | broker: broker})}
 
       {:error, {^range_id, reason}, state} ->
         {:reply, {:error, {:fence_failed, range_id, reason}}, state}
@@ -640,7 +771,7 @@ defmodule Malachi.BrokerServer do
     with {:ok, state} <- fence_parent(state, range_id_a),
          {:ok, state} <- fence_parent(state, range_id_b) do
       {broker, reply} = Broker.merge_ranges(state.broker, range_id_a, range_id_b)
-      {:reply, reply, %{state | broker: broker}}
+      {:reply, reply, sweep_streams(%{state | broker: broker})}
     else
       {:error, {range_id, reason}, state} -> {:reply, {:error, {:fence_failed, range_id, reason}}, state}
     end
@@ -672,7 +803,7 @@ defmodule Malachi.BrokerServer do
 
   def handle_call({:apply_heal, commands}, _from, state) do
     {broker, reply} = Broker.apply_heal_reply(state.broker, commands)
-    {:reply, reply, %{state | broker: broker}}
+    {:reply, reply, sweep_streams(%{state | broker: broker})}
   end
 
   def handle_call({:delete_segment, segment_id}, _from, state) do
@@ -680,73 +811,19 @@ defmodule Malachi.BrokerServer do
     {:reply, reply, %{state | broker: broker}}
   end
 
-  def handle_call({:commit_offset, group, topic, offsets}, _from, state) do
-    {broker, reply} = Broker.commit_offset(state.broker, group, topic, offsets)
+  def handle_call({:commit_offset, group, topic, offsets, generation}, _from, state) do
+    {broker, reply} = Broker.commit_offset(state.broker, group, topic, offsets, generation)
     {:reply, reply, %{state | broker: broker}}
   end
 
-  def handle_call({:committed_offsets, group, topic}, _from, state) do
-    {:reply, Broker.committed_offsets(state.broker, group, topic), state}
+  def handle_call({:commit_positions, group, topic, positions, generation}, _from, state) do
+    {broker, reply} = Broker.commit_positions(state.broker, group, topic, positions, generation)
+    {:reply, reply, %{state | broker: broker}}
   end
 
-  def handle_call({:subscribe, topic, group, window, max, pid, group_opts}, _from, state) do
-    ref = Process.monitor(pid)
-    ranges = Keyword.get(group_opts, :ranges)
-    positions = Broker.committed_offsets(state.broker, group, topic)
-    # scope a member's start positions to its ranges (a whole-group subscriber keeps them all)
-    positions = if ranges, do: Map.take(positions, ranges), else: positions
-
-    subscriber =
-      push_subscriber(state.broker, state.skip_reporter, %{
-        pid: pid,
-        ref: ref,
-        topic: topic,
-        group: group,
-        positions: positions,
-        window: window,
-        in_flight: 0,
-        max: max,
-        # consumer-group member scoping: `member`/`ranges` scope the push to the member's ranges (nil =
-        # whole group); `coordinator` lets the :DOWN handler leave the group on disconnect. The LogApi
-        # layer supplies these (the broker must never call the coordinator itself, deadlock).
-        member: Keyword.get(group_opts, :member),
-        ranges: ranges,
-        coordinator: Keyword.get(group_opts, :coordinator)
-      })
-
-    subscribers = Map.update(state.subscribers, topic, [subscriber], &[subscriber | &1])
-    {:reply, :ok, %{state | subscribers: subscribers}}
-  end
-
-  def handle_call({:stream_ack, topic, group, positions, count, pid, ranges, coordinator}, _from, state) do
-    # commit the group's position durably, then return `count` credit to this subscriber and push more.
-    # `ranges` (from the LogApi member poll) refreshes this member's assignment, so a rebalance is picked
-    # up on the ack (nil keeps the current scope: a whole-group or unchanged member subscription).
-    # `coordinator` refreshes the member's resolved coordinator ref, so after a vnode leadership change
-    # the :DOWN leave targets the current owner (nil keeps the ref captured at subscribe).
-    {broker, _reply} = Broker.commit_offset(state.broker, group, topic, positions)
-
-    subs =
-      state.subscribers
-      |> Map.get(topic, [])
-      |> Enum.map(fn sub ->
-        if sub.pid == pid do
-          push_subscriber(broker, state.skip_reporter, %{
-            sub
-            | in_flight: max(sub.in_flight - count, 0),
-              ranges: ranges || sub.ranges,
-              coordinator: coordinator || sub.coordinator
-          })
-        else
-          sub
-        end
-      end)
-
-    {:reply, :ok, %{state | broker: broker, subscribers: Map.put(state.subscribers, topic, subs)}}
-  end
-
-  def handle_call({:unsubscribe, topic, pid}, _from, state) do
-    {:reply, :ok, drop_subscriber(state, topic, pid)}
+  def handle_call({:open_group, group, topic}, _from, state) do
+    {broker, reply} = Broker.open_group(state.broker, group, topic)
+    {:reply, reply, %{state | broker: broker}}
   end
 
   def handle_call(:reconcile_now, _from, state) do
@@ -758,6 +835,11 @@ defmodule Malachi.BrokerServer do
   end
 
   @impl true
+  def handle_cast({:arm_consume, token, seen_end}, state), do: {:noreply, arm(state, token, seen_end)}
+
+  # -1: any durable end wakes it, so it is handed a fresh view now
+  def handle_cast({:refresh_consume, token}, state), do: {:noreply, arm(state, token, -1)}
+
   # Adopt a ring change (a vnode split) gossiped in via the membership hook: rebuild the metadata routing
   # (cache ring + write router), the refresh source and the bootstrap pass, so the periodic reconcile
   # re-seeds against the new topology instead of reverting to the boot ring, and bootstraps the vnodes
@@ -799,13 +881,16 @@ defmodule Malachi.BrokerServer do
         {:noreply, state}
 
       pending ->
+        {state, pending} = settle_dispatch(state, pending, dispatch)
+
         case result do
           {:ok, actual} ->
             # The range's primary serializes appends and assigns the REAL offsets (the NorthGuard
             # invariant). When several broker frontends interleave on one range, the primary-assigned
             # end can differ from this frontend's precomputed one; the frontend ADOPTS the primary's
-            # truth (placements and local counter follow it) instead of failing the produce. That is
-            # what lets any node accept a produce for any range with no client-side routing.
+            # truth (placements and local counter follow it) instead of failing the produce. Only the
+            # in-process `produce/3` plans into a segment another node leads, so only it interleaves:
+            # a producer stream's append is planned only where its frontend leads (`lead_append/3`).
             {state, pending} = adopt_result(state, pending, dispatch, actual)
 
             if pending.remaining == 1 do
@@ -823,7 +908,11 @@ defmodule Malachi.BrokerServer do
           # the client's retry opens or adopts the successor instead of racing :segment_overlap.
           {:error, {:sealed, end_offset}} ->
             broker = Broker.forget_sealed(state.broker, dispatch.range_id, dispatch.segment_id, end_offset)
-            {:noreply, sealed_dispatch(%{state | broker: broker}, ref, pending, dispatch, end_offset)}
+            # the settled pending goes back first: a dispatch parked behind the fence is finished later from
+            # what `async_produces` holds, and must not be released from the in-flight count twice
+            async_produces = Map.put(state.async_produces, ref, pending)
+            state = sweep_streams(%{state | broker: broker, async_produces: async_produces})
+            {:noreply, sealed_dispatch(state, ref, pending, dispatch, end_offset)}
 
           {:error, reason} ->
             {:noreply, finish_async_produce(state, ref, pending, {:error, reason})}
@@ -835,7 +924,7 @@ defmodule Malachi.BrokerServer do
   # that fence go again: on success the successor is now open to them, and on failure they learn so from
   # the primary rather than from a wait.
   def handle_info({:seal_result, {:roll_fence, roll}, reply}, state) do
-    state = record_roll_fence(state, roll, reply)
+    state = state |> record_roll_fence(roll, reply) |> sweep_streams()
     {:noreply, release_fence_parked(state, roll.range_id, :replan)}
   end
 
@@ -855,25 +944,11 @@ defmodule Malachi.BrokerServer do
     end
   end
 
-  def handle_info({:longpoll_timeout, ref}, state) do
-    case Enum.split_with(state.waiters, &(&1.ref == ref)) do
-      {[waiter], rest} ->
-        GenServer.reply(waiter.from, {[], waiter.positions, waiter.skips})
-        {:noreply, %{state | waiters: rest}}
-
-      # Already woken by a produce (timer raced the reply); nothing to do.
-      {[], _rest} ->
-        {:noreply, state}
-    end
-  end
-
   # --- the reconcile task's replies ---
   #
-  # All four sit ABOVE the generic `:DOWN` clause below, which matches ANY monitor ref and reads it as
-  # a subscriber's: a reconcile task's DOWN landing there would be absorbed without a trace. They are
-  # also above the `handle_info/2` catch-all, which counts an unmatched message instead of crashing,
-  # so a mistyped pattern here shows up as a drop rather than as a failure. Both are why each of these
-  # shapes has a test of its own.
+  # All four sit ABOVE the `handle_info/2` catch-all, which counts an unmatched message instead of
+  # crashing, so a mistyped pattern here shows up as a drop rather than as a failure. That is why each of
+  # these shapes has a test of its own.
   #
   # `ref` repeated between the message and the state is the match: Elixir unifies a variable that
   # appears twice in one pattern, so these only fire for the task this server is currently waiting on.
@@ -918,22 +993,28 @@ defmodule Malachi.BrokerServer do
 
   # --- end of the reconcile task's replies ---
 
-  # A streaming subscriber's process died: drop it from every topic it was subscribed to.
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
-    # a departing group member leaves its group for a fast rebalance: done in an unlinked task, since the
-    # coordinator's leave calls back into this broker and a synchronous call from here would deadlock.
-    for {_topic, subs} <- state.subscribers,
-        sub <- subs,
-        sub.ref == ref,
-        sub.member != nil,
-        sub.coordinator != nil do
-      Task.start(fn -> GroupCoordinator.leave(sub.coordinator, sub.group, sub.topic, sub.member) end)
+  # A producer or consume stream's connection went away: drop the stream.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{streams: streams} = state)
+      when is_map_key(streams, ref) do
+    {:noreply, drop_stream(state, ref)}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{consume: %ConsumeIndex{consumers: consumers}} = state)
+      when is_map_key(consumers, ref) do
+    {:noreply, drop_stream(state, ref)}
+  end
+
+  # A `fetch_range` that waited `wait_ms` for records and got none: answered with a view to read nothing
+  # from, unless the range grew meanwhile and it was answered then.
+  def handle_info({:fetch_range_timeout, ref}, state) do
+    case ConsumeIndex.pop_waiter(state.consume, ref) do
+      :error ->
+        {:noreply, state}
+
+      {waiter, consume} ->
+        GenServer.reply(waiter.from, fetch_reply(state, waiter))
+        {:noreply, %{state | consume: consume}}
     end
-
-    subscribers =
-      Map.new(state.subscribers, fn {topic, subs} -> {topic, Enum.reject(subs, &(&1.ref == ref))} end)
-
-    {:noreply, %{state | subscribers: subscribers}}
   end
 
   def handle_info(:refresh_brokers, state) do
@@ -954,8 +1035,8 @@ defmodule Malachi.BrokerServer do
   end
 
   # Group-commit flush: one fsync per pipeline covers every parked producer. Fsync first (durable), then
-  # reply to each caller and wake its topic's long-poll consumers and subscribers, so consumers only ever
-  # observe durable data. `broker.brokers` is the set of local pipelines a segment can live on (one for
+  # reply to each caller and wake the readers of the ranges it wrote, so consumers only ever observe
+  # durable data. `broker.brokers` is the set of local pipelines a segment can live on (one for
   # rf=1, or several when striping), so flushing all of them covers wherever the buffered batches landed.
   def handle_info(:group_flush, state) do
     {:noreply, do_flush(state)}
@@ -1005,14 +1086,13 @@ defmodule Malachi.BrokerServer do
 
     if flushed_ok? do
       Enum.reduce(pending, base, fn waiter, st ->
-        GenServer.reply(waiter.from, waiter.reply)
+        # the load the reply reports is the one this flush is relieving
+        reply_produce(waiter.from, waiter.reply, state)
 
-        st
-        |> wake_waiters(waiter.topic, waiter.reply)
-        |> wake_subscribers(waiter.topic, waiter.reply)
+        wake_readers(st, waiter.reply)
       end)
     else
-      Enum.each(pending, &GenServer.reply(&1.from, {:error, :flush_failed}))
+      Enum.each(pending, &reply_produce(&1.from, {:error, :flush_failed}, state))
       base
     end
   end
@@ -1053,13 +1133,12 @@ defmodule Malachi.BrokerServer do
   # left unrecovered, refusing consumes until a later pass or a produce learns the end
   # (`Malachi.Broker.seed_unrecovered_range/3`). Sealed-only ranges compute the end from the sealed
   # metadata (start_offset + length).
-  defp recover_range_state(broker) do
-    metadata = DSRSM.merged_metadata(broker.dsrsm)
+  defp recover_range_state(broker), do: broker.dsrsm |> topic_ranges() |> Enum.reduce(broker, &recover_one_range/2)
 
-    metadata.topics
+  defp topic_ranges(dsrsm) do
+    DSRSM.merged_metadata(dsrsm).topics
     |> Map.keys()
-    |> Enum.flat_map(fn topic -> Enum.map(DSRSM.ranges_of_topic(broker.dsrsm, topic), &{topic, &1.id}) end)
-    |> Enum.reduce(broker, &recover_one_range/2)
+    |> Enum.flat_map(fn topic -> Enum.map(DSRSM.ranges_of_topic(dsrsm, topic), &{topic, &1.id}) end)
   end
 
   defp recover_one_range({topic, range_id}, broker) do
@@ -1071,13 +1150,72 @@ defmodule Malachi.BrokerServer do
         min_seq = segments |> Enum.map(fn %{id: {_range, seq}} -> seq end) |> Enum.max() |> Kernel.+(1)
 
         case recovered_next_offset(segments) do
-          next when is_integer(next) -> Broker.seed_range_state(broker, range_id, next, min_seq)
+          next when is_integer(next) ->
+            broker |> Broker.seed_range_state(range_id, next, min_seq) |> await_local_horizon(topic, range_id)
+
           # The primary did not answer, so the end is unknown. Any horizon guessed here is wrong in one
           # direction: the segment's start would serve the range's earlier segments and hide the active
           # one, zero would hide everything, and either page comes back empty and successful. So the
           # range refuses its reads until a later pass (every reconcile runs this again) learns the end.
-          :unreachable -> Broker.seed_unrecovered_range(broker, range_id, min_seq)
+          :unreachable ->
+            Broker.seed_unrecovered_range(broker, range_id, min_seq)
         end
+    end
+  end
+
+  # A range's read horizon lives only in the memory of the frontend that answered its produces
+  # (`Malachi.Broker.mark_durable/2`), so a restart loses it: the active segment then read nothing until a
+  # new produce was answered or it sealed, every consume page empty and successful over records that were
+  # acknowledged. For each range whose active segment this node leads (the frontend its streams read from)
+  # and whose horizon `known` does not hold, this asks every replica what it durably holds and answers the
+  # end at least a quorum of them reached: every acknowledgement quorum and every seal quorum share a
+  # replica with those, so no seal can cut below it. `durable_stats/4` flushes before it answers, as for
+  # the seal, so a buffered record is never counted. A range with fewer answers than a quorum is left out
+  # and asked again on the next pass; one that is known is never asked again.
+  #
+  # It runs in the reconcile's remote half, every call at once under one bound, so it never holds the loop
+  # for longer than the bound (and only at boot or on `reconcile_now/2`, which run that half on the loop).
+  defp probe_horizons(dsrsm, known) do
+    calls =
+      for {topic, range_id} <- topic_ranges(dsrsm),
+          not MapSet.member?(known, range_id),
+          %{replica_set: [primary | _] = replicas} = segment <- [active_segment(dsrsm, topic, range_id)],
+          local_ref?(primary),
+          replica <- replicas,
+          do: {range_id, segment, replica}
+
+    calls
+    |> BoundedFanout.map(
+      @horizon_probe_timeout,
+      fn {_range_id, segment, replica} ->
+        ReplicationServer.durable_stats(replica, segment.id, segment.start_offset, @horizon_probe_timeout)
+      end,
+      fn _call -> {:error, :timeout} end
+    )
+    |> Enum.zip(calls)
+    |> Enum.group_by(fn {_answer, {range_id, segment, _replica}} -> {range_id, length(segment.replica_set)} end)
+    |> Enum.flat_map(fn {{range_id, replicas}, answers} ->
+      ends = for {{:ok, end_offset, _bytes}, _call} <- answers, do: end_offset
+      quorum = ReplicaTracker.quorum_size(replicas)
+      if length(ends) >= quorum, do: [{range_id, ends |> Enum.sort(:desc) |> Enum.at(quorum - 1)}], else: []
+    end)
+    |> Map.new()
+  end
+
+  # Monotone and clamped to each range's end (`Malachi.Broker.seed_durable/3`), so a horizon probed while
+  # the loop moved on never rewinds it nor passes the end the loop knows.
+  defp seed_horizons(broker, horizons),
+    do: Enum.reduce(horizons, broker, fn {range_id, offset}, acc -> Broker.seed_durable(acc, range_id, offset) end)
+
+  defp active_segment(dsrsm, topic, range_id),
+    do: Enum.find(DSRSM.segments_of_range(dsrsm, topic, range_id), &(&1.state == :active))
+
+  # A range whose active segment this node leads serves its reads here, from a horizon a restart forgot:
+  # until the probe of this or a later pass learns it, its reads refuse (`Malachi.Broker.await_horizon/2`).
+  defp await_local_horizon(broker, topic, range_id) do
+    case active_segment(broker.dsrsm, topic, range_id) do
+      %{replica_set: [primary | _]} -> if local_ref?(primary), do: Broker.await_horizon(broker, range_id), else: broker
+      nil -> broker
     end
   end
 
@@ -1193,10 +1331,13 @@ defmodule Malachi.BrokerServer do
       {broker, :ok} ->
         %{state | broker: broker}
 
-      # The store is fenced and the metadata is not, as in `fence_and_seal/2`, and just as loud. Unlike a
-      # split, the roll stays owed: its fence is resent once the retry window passes, and answers the same
-      # numbers, so the seal is recorded again rather than left to a heal pass. The answer did arrive, so the
-      # fence is no longer awaited: a produce refused by it fails at once instead of being held for nothing.
+      # The store is fenced and the metadata is not, as in `fence_and_seal/2`, and just as loud. While the
+      # roll is still owed its fence is resent once the retry window passes, and answers the same numbers, so
+      # the seal is recorded again. A produce this frontend sent after the fence may have been refused with
+      # `{:sealed, _}` first, though, and that cleared the roll (`Malachi.Broker.forget_sealed/4`): then
+      # nothing here resends it, and the range takes no write until the heal pass seals the segment
+      # (`Malachi.Cluster.OrphanedFence`, one heal interval). The answer did arrive, so the fence is no
+      # longer awaited: a produce refused by it fails at once instead of being held for nothing.
       {broker, {:error, reason}} ->
         Logger.error(I18n.t(:seal_record_failed, segment_id: inspect(roll.segment_id), reason: inspect(reason)))
         Telemetry.orphaned_fence(roll.segment_id, reason)
@@ -1217,14 +1358,16 @@ defmodule Malachi.BrokerServer do
   # frontend's roll overtaking its own produce, not a writer racing a seal it has not seen, so it is not
   # failed back to the client: it waits for the fence's answer if that is still on its way, and is planned
   # again at once if the answer already landed (the primary sends the answer before the refusal, so that
-  # is the common order). Only once: a dispatch that is itself a second attempt fails as before.
+  # is the common order). Only once: a dispatch that is itself a second attempt fails as before. A producer
+  # stream's dispatch is planned again only into segments this node leads, and otherwise fails as a second
+  # attempt does (`replan_dispatch/5`).
   defp sealed_dispatch(state, ref, pending, %{behind_fence: true} = dispatch, end_offset) do
     %{range_id: range_id, segment_id: segment_id} = dispatch
 
     if Broker.awaiting_fence?(state.broker, range_id, segment_id, now_ms(), @roll_fence_retry_ms) do
       park_on_fence(state, range_id, {:async, ref, dispatch, end_offset})
     else
-      replan_dispatch(state, ref, pending, dispatch)
+      replan_dispatch(state, ref, pending, dispatch, end_offset)
     end
   end
 
@@ -1271,7 +1414,7 @@ defmodule Malachi.BrokerServer do
     case {Map.get(state.async_produces, ref), mode} do
       # Already finished: another of its dispatches failed, or its safety timer fired.
       {nil, _mode} -> state
-      {pending, :replan} -> replan_dispatch(state, ref, pending, dispatch)
+      {pending, :replan} -> replan_dispatch(state, ref, pending, dispatch, end_offset)
       {pending, :refuse} -> finish_async_produce(state, ref, pending, {:error, {:sealed, end_offset}})
     end
   end
@@ -1279,7 +1422,7 @@ defmodule Malachi.BrokerServer do
   defp release_parked_entry(state, {:grouped, from, topic, records}, _mode) do
     case grouped_append(from, topic, records, state) do
       {:reply, reply, state} ->
-        GenServer.reply(from, reply)
+        reply_produce(from, reply, state)
         state
 
       {:noreply, state} ->
@@ -1289,26 +1432,239 @@ defmodule Malachi.BrokerServer do
 
   # Plans one refused dispatch's records again, as a produce of their own folded into the one they belong to:
   # the refused dispatch is replaced by whatever the new plan owes (one dispatch into the successor, or more
-  # if the range split meanwhile), and its placement by the new ones.
-  defp replan_dispatch(state, ref, pending, dispatch) do
+  # if the range split meanwhile), and its placement by the new ones. A producer stream's records are
+  # planned again only into one segment this node leads (`lead_append/3`): otherwise the produce, whose one
+  # dispatch this was, fails with the refusal that dispatch got (`{:sealed,
+  # end_offset}`), as a second attempt does, and the stream's producer, told where the range went by the
+  # sweep, sends it again there.
+  defp replan_dispatch(state, ref, pending, dispatch, end_offset) do
     {records, parts} = Map.pop!(pending.parts, dispatch)
     pending = %{pending | parts: parts}
 
-    case Broker.produce_plan(state.broker, pending.topic, records) do
-      {broker, {:ok, placements, dispatches}} ->
+    with {:ok, state} <- lead_replan(state, pending, records),
+         {broker, {:ok, placements, dispatches}} <- Broker.produce_plan(state.broker, pending.topic, records) do
+      state = %{state | broker: broker}
+      {_parts, tags} = dispatch_async(state, ref, dispatches, false)
+      {state, pending} = owe_dispatches(state, pending, tags)
+
+      pending = %{
+        pending
+        | placements: pending.placements |> Map.delete(dispatch.range_id) |> Map.merge(placements),
+          remaining: pending.remaining - 1 + length(dispatches)
+      }
+
+      %{state | async_produces: Map.put(state.async_produces, ref, pending)}
+    else
+      {:error, :not_primary, state} -> finish_async_produce(state, ref, pending, {:error, {:sealed, end_offset}})
+      {:error, reason, state} -> finish_async_produce(state, ref, pending, {:error, reason})
+      {broker, {:error, _reason} = error} -> finish_async_produce(%{state | broker: broker}, ref, pending, error)
+    end
+  end
+
+  # Only a producer stream's produce is held to the segments this node leads; `produce/3` plans anywhere.
+  defp lead_replan(state, %{from: {:stream, _from, _range_id}, topic: topic}, records),
+    do: lead_append(state, topic, records)
+
+  defp lead_replan(state, _pending, _records), do: {:ok, state}
+
+  # Whether a producer stream's append can be written as one append into one segment this node leads: the
+  # condition a stream is opened under (`with_local_range/3`), `local_ref?/1` on the segment's primary. A
+  # range with no active segment has it opened now (`Malachi.Broker.produce_primaries/3`), as the plan would
+  # open it, so an append that arrives after its segment sealed places the successor. Otherwise nothing is
+  # planned and the append is refused with `:not_primary`:
+  #
+  #   * its segment is led elsewhere. A frontend that dispatched there would answer the append and raise the
+  #     read horizon in its own memory (`Malachi.Broker.mark_durable/2`), which the primary that serves the
+  #     range's reads (`with_consume_range/3`) never learns, so the acknowledged record would stay
+  #     unreadable there until the segment sealed or that primary answered a later produce on the range;
+  #   * its records go to more than one range (a split or merge retired the stream's range, and its keys now
+  #     belong to several). Planned, it would be several dispatches, and one of them refused while another
+  #     landed would answer the append with an error over records that were stored. Held to one range, every
+  #     refusal of a stream append (`:not_primary`, or the `{:sealed, end_offset}` of its one dispatch)
+  #     means nothing of it was stored, which is what lets a producer send it again as routing.
+  #
+  # The streams held here are swept, so one whose segment the range has moved past is told where it went
+  # now (`{:stream_moved, ...}`) and its producer opens again where the move says and sends the append there.
+  defp lead_append(state, topic, records) do
+    case Broker.produce_primaries(state.broker, topic, records) do
+      {broker, {:ok, primaries}} ->
         state = %{state | broker: broker}
-        dispatch_async(state, ref, dispatches, false)
 
-        pending = %{
-          pending
-          | placements: pending.placements |> Map.delete(dispatch.range_id) |> Map.merge(placements),
-            remaining: pending.remaining - 1 + length(dispatches)
-        }
+        if map_size(primaries) <= 1 and Enum.all?(Map.values(primaries), &local_ref?/1),
+          do: {:ok, state},
+          else: {:error, :not_primary, sweep_streams(state)}
 
-        %{state | async_produces: Map.put(state.async_produces, ref, pending)}
+      {broker, {:error, reason}} ->
+        {:error, reason, %{state | broker: broker}}
+    end
+  end
 
-      {broker, {:error, _reason} = error} ->
-        finish_async_produce(%{state | broker: broker}, ref, pending, error)
+  defp do_open_stream(range_id, pid, state) do
+    with_local_range(range_id, state, fn state, segment_id, primary ->
+      token = Process.monitor(pid)
+      stream = %{pid: pid, range_id: range_id, segment_id: segment_id, primary: primary}
+      {:reply, {:ok, token, segment_id, self()}, %{state | streams: Map.put(state.streams, token, stream)}}
+    end)
+  end
+
+  # Runs `serve` with that segment and its primary when this node leads `range_id`'s active segment
+  # (placing the range's first segment when it has none), the condition a producer stream is served under;
+  # otherwise answers where the range is served: the node that leads it (`:elsewhere`), or the ranges a
+  # split or merge left (`:retired`). Reading has its own condition (`with_consume_range/3`).
+  defp with_local_range({topic, _seq} = range_id, state, serve) do
+    if topic_metadata_ready?(state, topic) do
+      case Broker.stream_segment(state.broker, range_id) do
+        {broker, {:ok, segment_id, primary}} ->
+          state = %{state | broker: broker}
+
+          if local_ref?(primary),
+            do: serve.(state, segment_id, primary),
+            else: {:reply, {:moved, :elsewhere, [{range_id, {segment_id, primary}}]}, state}
+
+        {broker, {:error, :range_sealed}} ->
+          {:reply, {:moved, :retired, targets(broker, Broker.stream_target(broker, range_id))},
+           %{state | broker: broker}}
+
+        {broker, {:error, _reason} = error} ->
+          {:reply, error, %{state | broker: broker}}
+      end
+    else
+      {:reply, {:error, :metadata_unavailable}, state}
+    end
+  end
+
+  # Runs `serve` when `range_id` is read here: its active segment is led here, or it has none right now (a
+  # segment just sealed by a roll or a failover, or a range nothing has written to), when its history is
+  # readable from any node and no record can land until a segment opens; a consume stream then moves when
+  # that segment opens on another node (`sweep_consumers/1`). Otherwise answers where the range is read,
+  # as `with_local_range/3` does. Reading never places a segment.
+  defp with_consume_range({topic, _seq} = range_id, state, serve) do
+    cond do
+      not topic_metadata_ready?(state, topic) -> {:reply, {:error, :metadata_unavailable}, state}
+      not Broker.range_known?(state.broker, range_id) -> {:reply, {:error, :no_such_range}, state}
+      true -> consume_target(state, range_id, serve)
+    end
+  end
+
+  defp consume_target(state, range_id, serve) do
+    case Broker.stream_target(state.broker, range_id) do
+      {:retired, _ranges} = target -> {:reply, {:moved, :retired, targets(state.broker, target)}, state}
+      {:active, segment_id, primary} -> consume_here(state, range_id, segment_id, primary, serve)
+      :none -> serve.(state)
+    end
+  end
+
+  defp consume_here(state, range_id, segment_id, primary, serve) do
+    if local_ref?(primary),
+      do: serve.(state),
+      else: {:reply, {:moved, :elsewhere, [{range_id, {segment_id, primary}}]}, state}
+  end
+
+  # A broker reference that lives on this node: `{name, node}` on this node, a local pid, or a bare name.
+  defp local_ref?({_name, ref_node}) when is_atom(ref_node), do: ref_node == node()
+  defp local_ref?(pid) when is_pid(pid), do: node(pid) == node()
+  defp local_ref?(name) when is_atom(name), do: true
+  defp local_ref?(_other), do: false
+
+  defp reply_produce({:stream, from, range_id}, reply, state),
+    do: GenServer.reply(from, {reply, stream_load(state, range_id)})
+
+  defp reply_produce(from, reply, _state), do: GenServer.reply(from, reply)
+
+  # How much of a stream's window the range's load leaves (`Malachi.StreamWindow.scale/3`): with group
+  # commit, the node's parked records from half of the most it parks; otherwise the range's records in
+  # flight between the stream limits.
+  defp stream_load(%{group_commit: true} = state, _range_id),
+    do: StreamWindow.scale(state.pending_records, div(state.max_inflight_records, 2), state.max_inflight_records)
+
+  defp stream_load(state, range_id),
+    do:
+      StreamWindow.scale(
+        Map.get(state.range_inflight, range_id, 0),
+        state.stream_inflight_soft,
+        state.stream_inflight_hard
+      )
+
+  # Tells every open stream whose range has moved on where it belongs now, and drops it: its segment
+  # sealed (a roll, or a seal found on a refusal or by the reconcile), its primary changed (a failover), or
+  # its range was retired by a split or merge. Run after each of those.
+  defp sweep_streams(%{streams: streams, consume: %ConsumeIndex{consumers: consumers, waiters: waiters}} = state)
+       when map_size(streams) == 0 and map_size(consumers) == 0 and map_size(waiters) == 0,
+       do: state
+
+  defp sweep_streams(state) do
+    state = sweep_consumers(state)
+
+    streams =
+      Map.filter(state.streams, fn {token, stream} ->
+        case Broker.stream_target(state.broker, stream.range_id) do
+          {:active, segment_id, primary} when segment_id == stream.segment_id and primary == stream.primary ->
+            true
+
+          target ->
+            Process.demonitor(token, [:flush])
+
+            send(
+              stream.pid,
+              {:stream_moved, token, moved_reason(target), targets(state.broker, target, stream.range_id)}
+            )
+
+            false
+        end
+      end)
+
+    %{state | streams: streams}
+  end
+
+  # Tells every consume stream and `fetch_range` waiter whose range is no longer read here where it is read
+  # now, and drops it: its range was retired by a split or merge (a position read in a split's parent goes
+  # on in each child, see `Malachi.Wire`), or its active segment opened on another node. A range with no
+  # active segment keeps its readers (`with_consume_range/3`).
+  defp sweep_consumers(state) do
+    {consumers, waiters, consume} = ConsumeIndex.take_unless(state.consume, &read_here?(state.broker, &1))
+
+    Enum.each(consumers, fn {token, consumer} ->
+      Process.demonitor(token, [:flush])
+      target = Broker.stream_target(state.broker, consumer.range_id)
+      send(consumer.pid, {:stream_moved, token, moved_reason(target), targets(state.broker, target, consumer.range_id)})
+    end)
+
+    Enum.each(waiters, fn {_ref, waiter} ->
+      Process.cancel_timer(waiter.timer)
+      target = Broker.stream_target(state.broker, waiter.range_id)
+      GenServer.reply(waiter.from, {:moved, moved_reason(target), targets(state.broker, target, waiter.range_id)})
+    end)
+
+    %{state | consume: consume}
+  end
+
+  defp read_here?(broker, range_id) do
+    case Broker.stream_target(broker, range_id) do
+      {:active, _segment_id, primary} -> local_ref?(primary)
+      {:retired, _ranges} -> false
+      :none -> true
+    end
+  end
+
+  # Drops the producer or consume stream `token`.
+  defp drop_stream(state, token),
+    do: %{state | streams: Map.delete(state.streams, token), consume: ConsumeIndex.drop_consumer(state.consume, token)}
+
+  # A failover seals the segment before it moves the replicas (`Malachi.Cluster.Failover`), so it reaches a
+  # stream as `:sealed`, as a roll does: either way the range goes on in another segment.
+  defp moved_reason({:retired, _ranges}), do: :retired
+  defp moved_reason(_sealed_or_replaced), do: :sealed
+
+  # Where a moved stream goes: each range with its active segment and primary, when it has one.
+  defp targets(broker, target, range_id \\ nil)
+  defp targets(broker, {:retired, ranges}, _range_id), do: Enum.map(ranges, &{&1, active_of(broker, &1)})
+  defp targets(_broker, {:active, segment_id, primary}, range_id), do: [{range_id, {segment_id, primary}}]
+  defp targets(_broker, :none, range_id), do: [{range_id, nil}]
+
+  defp active_of(broker, range_id) do
+    case Broker.stream_target(broker, range_id) do
+      {:active, segment_id, primary} -> {segment_id, primary}
+      _none -> nil
     end
   end
 
@@ -1317,9 +1673,13 @@ defmodule Malachi.BrokerServer do
   # The remote half of a reconcile, and the ONLY half that may run off this server's loop. It takes and
   # returns plain data: handing it `state.broker` and applying what it gave back would discard every
   # produce, seal and fence the loop handled while it ran.
-  defp run_reconcile(bootstrap, metadata_refresh, read_timeout) do
+  defp run_reconcile(bootstrap, metadata_refresh, read_timeout, known_horizons) do
     bootstrap_missing_vnodes(bootstrap, read_timeout)
-    metadata_refresh.()
+
+    case metadata_refresh.() do
+      {dsrsm, unreachable} -> {dsrsm, unreachable, probe_horizons(dsrsm, known_horizons)}
+      nil -> nil
+    end
   end
 
   # Starts the tick's reconcile off the loop. At most one at a time: a control plane slow enough that a
@@ -1335,10 +1695,11 @@ defmodule Malachi.BrokerServer do
   defp start_reconcile_task(state) do
     generation = state.reconcile_generation
     {bootstrap, refresh, read_timeout} = {state.bootstrap, state.metadata_refresh, state.reconcile_read_timeout}
+    known = Broker.durable_ranges(state.broker)
 
     task =
       Task.Supervisor.async_nolink(Malachi.TaskSupervisor, fn ->
-        {:reconciled, generation, run_reconcile(bootstrap, refresh, read_timeout)}
+        {:reconciled, generation, run_reconcile(bootstrap, refresh, read_timeout, known)}
       end)
 
     timer = Process.send_after(self(), {:reconcile_deadline, task.ref}, state.reconcile_deadline)
@@ -1356,7 +1717,8 @@ defmodule Malachi.BrokerServer do
   defp reconcile_synchronously(%{metadata_refresh: nil} = state), do: state
 
   defp reconcile_synchronously(state) do
-    result = run_reconcile(state.bootstrap, state.metadata_refresh, state.reconcile_read_timeout)
+    known = Broker.durable_ranges(state.broker)
+    result = run_reconcile(state.bootstrap, state.metadata_refresh, state.reconcile_read_timeout, known)
 
     # A task already in flight read the control plane BEFORE this pass did, so its result would install
     # that older read over the one this pass is about to install. The journal cannot repair it either:
@@ -1377,7 +1739,7 @@ defmodule Malachi.BrokerServer do
         # sharded refresh reports its silent vnodes by id and never answers nil.
         state
 
-      {dsrsm, unreachable} ->
+      {dsrsm, unreachable, horizons} ->
         # Refresh the range end offsets along with the metadata: a frontend's read horizon is its
         # local offsets map, which only advances for produces IT handles, so writes flowing through
         # OTHER frontends (or landed while this node was down) would otherwise stay invisible to its
@@ -1400,32 +1762,20 @@ defmodule Malachi.BrokerServer do
           |> Broker.replay_journal(journaled)
           |> Broker.drop_stale_active_segments()
 
-        %{
+        sweep_streams(%{
           state
-          | broker: recover_range_state(broker),
+          | broker: broker |> recover_range_state() |> seed_horizons(horizons),
             seen_vnodes: seen_vnodes(state, dsrsm, unreachable)
-        }
-        |> wake_all_subscribers()
+        })
+        |> wake_all_ranges()
     end
   end
 
-  # A streaming subscriber is pushed to on subscribe, on its ack, and on a produce to its topic, and
-  # nowhere else, which leaves it stranded in two ways. One that subscribed while its topic's vnode
-  # was still blank was pushed nothing and nothing pushes it again: an ack cannot, having no records
-  # to acknowledge, so a produce THROUGH THIS BROKER is the only way out. And a produce through a
-  # different frontend is exactly what never arrives here, since it wakes that broker's subscribers
-  # and not this one's. A topic written through one node and streamed from another delivered nothing.
-  #
-  # This is the same gap the offsets refresh above exists to close, described in its own comment: a
-  # frontend only learns about writes it did not handle on this tick. Subscribers belong on the same
-  # tick for the same reason.
-  #
-  # A caught-up subscriber costs a local lookup per range and no round trip: `locate_segment` answers
-  # `:eof` from the offsets map before any read function is called. The subscriber that does have a
-  # backlog pays for records it was owed anyway.
-  defp wake_all_subscribers(state) do
-    Enum.reduce(Map.keys(state.subscribers), state, &wake_subscribers(&2, &1, {:ok, []}))
-  end
+  # A consume stream or a `fetch_range` is woken by a produce through this broker to its range, and a write
+  # through another node (or one that landed while this node was down) never reaches it that way: the
+  # reconcile tick above is where this broker learns of it, so every range with a reader is woken on that
+  # tick too. A seal of another node's writes makes them durable here, and reaches its readers then.
+  defp wake_all_ranges(state), do: wake_ranges(state, ConsumeIndex.ranges(state.consume))
 
   # The vnodes this broker has read at least once since boot. A vnode that has never answered has no
   # view to fall back on, so its topics cannot be served at all, and that is the difference between a
@@ -1505,47 +1855,6 @@ defmodule Malachi.BrokerServer do
     :exit, _reason -> unanswered
   end
 
-  # Reads a topic's current ranges from `positions`, cross-epoch (see `Broker.read_consume/5`), and
-  # returns {records, next_positions, skips}. This is the read orchestration the LogApi used to do client-side;
-  # holding it here lets a single call serve a fetch and lets produce re-run it to wake long-pollers.
-  # `ranges` nil consumes every active range of the topic (whole-group / single consumer); a range list
-  # (a group member's assignment) consumes only those, intersected with the active set, so a stale
-  # assigned range that has since split is skipped, and the client never sees ranges either way.
-  defp consume_or_park(topic, positions, max_records, wait_ms, ranges, from, state) do
-    case consume_ranges(state.broker, topic, positions, max_records, ranges) do
-      # A read that failed is not a read that found nothing: waiting would only park the client on a
-      # broken range until its long poll expires and then hand it the same empty page.
-      {:error, _reason} = error ->
-        {:reply, error, state}
-
-      # Caught up and willing to wait: park the request; a later produce to this topic (or the
-      # timeout) replies. The page found no records, but it can still have made progress: a source whose
-      # data is gone advances the cursor and reports what it skipped. Parking on the ORIGINAL position
-      # would rescan that dead source on every wake and hold the skip back until the range gets traffic
-      # again, so the waiter parks on what the page reached and carries its skips to whichever of the
-      # wake or the timeout answers it.
-      {:ok, {[], next_positions, skips}} when wait_ms > 0 ->
-        ref = make_ref()
-        timer = Process.send_after(self(), {:longpoll_timeout, ref}, wait_ms)
-
-        waiter = %{
-          ref: ref,
-          timer: timer,
-          from: from,
-          topic: topic,
-          positions: next_positions,
-          skips: skips,
-          max: max_records,
-          ranges: ranges
-        }
-
-        {:noreply, %{state | waiters: [waiter | state.waiters]}}
-
-      {:ok, {records, next_positions, skips}} ->
-        {:reply, {records, next_positions, skips}, state}
-    end
-  end
-
   # What readiness reports: every vnode on the ring has been read at least once, so this node holds a
   # view of the whole keyspace and can answer for any topic routed to it. The same question the read
   # path asks per topic in `topic_metadata_ready?/2`, asked about the node, because a load balancer
@@ -1578,41 +1887,6 @@ defmodule Malachi.BrokerServer do
     end
   end
 
-  # The skips of every range read ride along, in range order, for whoever delivers the page to attribute.
-  defp consume_ranges(broker, topic, positions, max_records, ranges) do
-    broker
-    |> selected_ranges(topic, ranges)
-    |> Enum.reduce_while({:ok, {[], positions, []}}, fn range_id, {:ok, {acc, positions, skips}} ->
-      cursor = Map.get(positions, range_id, :start)
-
-      case Broker.read_consume(broker, range_id, cursor, max_records, &read_replica/4) do
-        {:ok, records, next_cursor, range_skips} ->
-          {:cont, {:ok, {acc ++ records, Map.put(positions, range_id, next_cursor), skips ++ range_skips}}}
-
-        # A range the control plane no longer knows (a stale assignment whose range has since split)
-        # holds nothing for this consumer; skipping it is the right answer, not a failure.
-        {:error, :no_such_range} ->
-          {:cont, {:ok, {acc, positions, skips}}}
-
-        # Anything else is a read that FAILED: an unreachable segment primary, a storage error. This
-        # used to fall into the same skip, so the page came back short (often empty) and successful,
-        # which a consumer reads as "caught up" and commits past. Fail the fetch instead; a client can
-        # retry a failure, and cannot detect a lie.
-        {:error, reason} ->
-          {:halt, {:error, reason}}
-      end
-    end)
-  end
-
-  defp selected_ranges(broker, topic, nil), do: Broker.active_range_ids(broker, topic)
-
-  defp selected_ranges(broker, topic, ranges) do
-    assigned = MapSet.new(ranges)
-    broker |> Broker.active_range_ids(topic) |> Enum.filter(&MapSet.member?(assigned, &1))
-  end
-
-  # After a successful produce to `topic`, re-consume each parked waiter on that topic; reply (and
-  # drop) the ones that now have data, leaving the rest parked until their timeout.
   # Synchronous produce (group commit off): replicate the batch through `replicate/5`, which fsyncs on a
   # quorum before returning, then reply and wake consumers. The historical default; unchanged behavior.
   # Non-blocking produce (the NorthGuard end-to-end pipelined shape): plan the produce in this loop
@@ -1630,7 +1904,7 @@ defmodule Malachi.BrokerServer do
         # folded in by `adopt_result/4` as each dispatch lands, say where the segment really ends.
         state = %{state | broker: broker}
         ref = make_ref()
-        parts = dispatch_async(state, ref, dispatches, true)
+        {parts, tags} = dispatch_async(state, ref, dispatches, true)
 
         timer = Process.send_after(self(), {:produce_timeout, ref}, @async_produce_timeout)
 
@@ -1640,9 +1914,11 @@ defmodule Malachi.BrokerServer do
           placements: placements,
           remaining: length(dispatches),
           parts: parts,
-          timer: timer
+          timer: timer,
+          owed: %{}
         }
 
+        {state, pending} = owe_dispatches(state, pending, tags)
         {:noreply, %{state | async_produces: Map.put(state.async_produces, ref, pending)}}
 
       {broker, {:error, _reason} = error} ->
@@ -1658,7 +1934,7 @@ defmodule Malachi.BrokerServer do
   defp dispatch_async(state, ref, dispatches, first_attempt?) do
     now = now_ms()
 
-    Enum.reduce(dispatches, %{}, fn d, parts ->
+    Enum.reduce(dispatches, {%{}, []}, fn d, {parts, tags} ->
       behind_fence? =
         first_attempt? and Broker.awaiting_fence?(state.broker, d.range_id, d.segment_id, now, @roll_fence_retry_ms)
 
@@ -1674,8 +1950,40 @@ defmodule Malachi.BrokerServer do
         {ref, tag}
       )
 
-      if behind_fence?, do: Map.put(parts, tag, d.records), else: parts
+      parts = if behind_fence?, do: Map.put(parts, tag, d.records), else: parts
+      {parts, [tag | tags]}
     end)
+  end
+
+  # The records each range has in flight (dispatched, no answer yet), which a producer stream's window
+  # scales by (`Malachi.StreamWindow`). A produce owes the counter its dispatches until each answers or
+  # the produce finishes, whichever comes first: a straggler answering after that changes nothing.
+  defp owe_dispatches(state, pending, tags) do
+    range_inflight =
+      Enum.reduce(tags, state.range_inflight, fn tag, acc ->
+        Map.update(acc, tag.range_id, tag.count, &(&1 + tag.count))
+      end)
+
+    {%{state | range_inflight: range_inflight},
+     %{pending | owed: Enum.reduce(tags, pending.owed, &Map.put(&2, &1, true))}}
+  end
+
+  defp settle_dispatch(state, pending, tag) do
+    if Map.has_key?(pending.owed, tag),
+      do: {release_inflight(state, [tag]), %{pending | owed: Map.delete(pending.owed, tag)}},
+      else: {state, pending}
+  end
+
+  defp release_inflight(state, tags) do
+    range_inflight =
+      Enum.reduce(tags, state.range_inflight, fn tag, acc ->
+        case Map.get(acc, tag.range_id, 0) - tag.count do
+          left when left > 0 -> Map.put(acc, tag.range_id, left)
+          _none -> Map.delete(acc, tag.range_id)
+        end
+      end)
+
+    %{state | range_inflight: range_inflight}
   end
 
   # Folds one dispatch's primary-assigned end offset into the produce: when it matches the plan this
@@ -1700,11 +2008,10 @@ defmodule Malachi.BrokerServer do
 
   defp finish_async_produce(state, ref, pending, reply) do
     Process.cancel_timer(pending.timer)
-    GenServer.reply(pending.from, reply)
+    state = release_inflight(state, Map.keys(pending.owed))
+    reply_produce(pending.from, reply, state)
 
-    %{state | async_produces: Map.delete(state.async_produces, ref)}
-    |> wake_waiters(pending.topic, reply)
-    |> wake_subscribers(pending.topic, reply)
+    wake_readers(%{state | async_produces: Map.delete(state.async_produces, ref)}, reply)
   end
 
   # Group-commit produce: `append/5` buffers the batch (no fsync) and reserves offsets exactly as the sync
@@ -1753,7 +2060,8 @@ defmodule Malachi.BrokerServer do
           end
 
         {broker, {:error, _reason} = error} ->
-          {:reply, error, %{state | broker: broker}}
+          # a sealed refusal dropped the segment from the cache: a stream bound to it is moved now
+          {:reply, error, sweep_streams(%{state | broker: broker})}
       end
     end
   end
@@ -1765,91 +2073,57 @@ defmodule Malachi.BrokerServer do
 
   defp ensure_flush_timer(state), do: state
 
-  defp wake_waiters(state, _topic, {:error, _reason}), do: state
+  # After a produce, wakes the readers of the ranges it wrote: an acknowledged produce's records are
+  # durable, which is what consume streams and `fetch_range` read up to. A reconcile tick wakes every range
+  # (`wake_all_ranges/1`).
+  defp wake_readers(state, {:error, _reason}), do: state
 
-  defp wake_waiters(state, topic, {:ok, _placements}) do
-    {on_topic, others} = Enum.split_with(state.waiters, &(&1.topic == topic))
-
-    still_waiting =
-      Enum.reduce(on_topic, [], fn waiter, keep ->
-        case consume_ranges(state.broker, waiter.topic, waiter.positions, waiter.max, waiter.ranges) do
-          # A failed re-read keeps the waiter parked: its own timeout is the right place to give up,
-          # and replying an empty page here would be the silent short read the failure is hiding.
-          {:error, _reason} ->
-            [waiter | keep]
-
-          # Still nothing to deliver, but the re-read can have moved past a source whose data is gone:
-          # keep the waiter parked on that progress, with the skips it has gathered so far.
-          {:ok, {[], next_positions, skips}} ->
-            [%{waiter | positions: next_positions, skips: waiter.skips ++ skips} | keep]
-
-          {:ok, {records, next_positions, skips}} ->
-            Process.cancel_timer(waiter.timer)
-            GenServer.reply(waiter.from, {records, next_positions, waiter.skips ++ skips})
-            keep
-        end
-      end)
-
-    %{state | waiters: others ++ still_waiting}
+  defp wake_readers(state, {:ok, placements}) do
+    placements = Map.new(placements)
+    wake_ranges(%{state | broker: Broker.mark_durable(state.broker, placements)}, Map.keys(placements))
   end
 
-  # After a successful produce to `topic`, push newly-available records to each of its subscribers, each
-  # bounded by its own window credit.
-  defp wake_subscribers(state, _topic, {:error, _reason}), do: state
+  # Hands the readers of each of `range_ids` whose range's durable records now end past what they read a
+  # view of the range to read from, one view per range: a waiting consume stream (`armed`) is sent
+  # `{:consume_wake, ...}` and reads until it asks again, a waiting `fetch_range` is answered.
+  defp wake_ranges(state, range_ids) do
+    range_ids
+    |> Enum.filter(&ConsumeIndex.readers?(state.consume, &1))
+    |> Enum.reduce(state, fn range_id, state ->
+      durable_end = Broker.durable_end(state.broker, range_id)
+      own = Broker.own_source(state.broker, range_id)
+      ready? = &(own != nil and Broker.ready_at?(&1.position, own, durable_end))
+      {consumers, waiters, consume} = ConsumeIndex.take_ready(state.consume, range_id, durable_end, ready?)
 
-  defp wake_subscribers(state, topic, {:ok, _placements}) do
-    case Map.get(state.subscribers, topic) do
-      nil ->
-        state
+      if consumers != [] or waiters != [] do
+        view = Broker.consume_view(state.broker, range_id)
 
-      subs ->
-        %{
-          state
-          | subscribers:
-              Map.put(state.subscribers, topic, Enum.map(subs, &push_subscriber(state.broker, state.skip_reporter, &1)))
-        }
-    end
-  end
+        Enum.each(consumers, fn {token, consumer} ->
+          send(consumer.pid, {:consume_wake, token, view, state.skip_reporter})
+        end)
 
-  # Pushes up to the subscriber's remaining window credit (min with `max`) of records from its current
-  # position, advancing the position and the in-flight count. A no-op when out of credit or caught up.
-  # The push is the one delivery path that already serves a known group, so it reports the skips it
-  # delivered itself, to the reporter beside this broker; fetches hand theirs back to `Malachi.LogApi`.
-  defp push_subscriber(broker, skip_reporter, subscriber) do
-    budget = min(subscriber.max, subscriber.window - subscriber.in_flight)
-
-    if budget <= 0 do
-      subscriber
-    else
-      # `subscriber.ranges` scopes the push to a group member's assigned ranges (nil = the whole group).
-      case consume_ranges(broker, subscriber.topic, subscriber.positions, budget, subscriber.ranges) do
-        # Push nothing on a failed read rather than advancing the subscriber past records it never
-        # received; the next produce (or ack) retries the push.
-        {:error, _reason} ->
-          subscriber
-
-        # Nothing to push, but the read can still have moved past a source whose data is gone. The
-        # progress is kept and the skips reported; no empty batch is pushed, because what a subscriber
-        # receives is the shipped stream payload and an empty one says nothing to a client.
-        {:ok, {[], next_positions, skips}} ->
-          SkipReporter.report(skip_reporter, subscriber.topic, subscriber.group, skips)
-          %{subscriber | positions: next_positions}
-
-        {:ok, {records, next_positions, skips}} ->
-          send(subscriber.pid, {:log_records, subscriber.topic, records, next_positions})
-          SkipReporter.report(skip_reporter, subscriber.topic, subscriber.group, skips)
-          %{subscriber | positions: next_positions, in_flight: subscriber.in_flight + length(records)}
+        Enum.each(waiters, fn {_ref, waiter} ->
+          Process.cancel_timer(waiter.timer)
+          GenServer.reply(waiter.from, {:ok, waiter.position, view, state.skip_reporter})
+        end)
       end
+
+      %{state | consume: consume}
+    end)
+  end
+
+  defp arm(state, token, seen_end) do
+    case ConsumeIndex.fetch_consumer(state.consume, token) do
+      {:ok, consumer} ->
+        wake_ranges(%{state | consume: ConsumeIndex.arm(state.consume, token, seen_end)}, [consumer.range_id])
+
+      :error ->
+        state
     end
   end
 
-  # Removes `pid`'s subscription to `topic` (and stops monitoring it).
-  defp drop_subscriber(state, topic, pid) do
-    subs = Map.get(state.subscribers, topic, [])
-    {removed, kept} = Enum.split_with(subs, &(&1.pid == pid))
-    Enum.each(removed, &Process.demonitor(&1.ref, [:flush]))
-    %{state | subscribers: Map.put(state.subscribers, topic, kept)}
-  end
+  defp fetch_reply(state, waiter),
+    do: {:ok, waiter.position, Broker.consume_view(state.broker, waiter.range_id), state.skip_reporter}
 
   # Control-plane authority, most specific first, returning `{broker_opts, metadata_refresh, bootstrap}`
   # where `metadata_refresh` re-seeds the local cache from the ra clusters (`nil` for in-memory) and
@@ -1884,6 +2158,9 @@ defmodule Malachi.BrokerServer do
 
   defp with_metadata_authority(opts, cluster_name, nodes, _no_vnodes, _orchestrator?, read_timeout) do
     {:ok, server_id} = MetadataServer.start(cluster_name, nodes)
+    # Consumer-group coordination follows this group's leader, so members connected to any node reach one
+    # coordinator rather than each node's own.
+    CoordinatorRouter.put_leader(server_id)
     # Left at ra's default on purpose, unlike every read the reconcile makes. This one is matched on
     # `{:ok, _}`, so bounding it would turn a control plane that is merely slow to elect at boot into a
     # broker that refuses to start. The single cluster is also all or nothing: there is no partial view
@@ -1904,7 +2181,9 @@ defmodule Malachi.BrokerServer do
   # and the role fails over with leadership.
   defp build_replicated(vnodes) do
     Enum.reduce(vnodes, ReplicatedDSRSM.new(), fn {vnode_id, token, nodes}, replicated ->
-      {:ok, replicated} = ReplicatedDSRSM.route_vnode(replicated, vnode_id, token, {vnode_id, hd(nodes)})
+      {:ok, replicated} =
+        ReplicatedDSRSM.route_vnode(replicated, vnode_id, token, RingTopology.location(vnode_id, nodes))
+
       replicated
     end)
   end
@@ -1947,7 +2226,7 @@ defmodule Malachi.BrokerServer do
   Rebuilds a sharded broker's metadata routing for a new ring `topology` (a vnode split adopted via
   gossip): the local read cache takes the new ring: existing vnodes keep their cached `Metadata`, a
   newly-added vnode starts **empty** until the next refresh from `ra`, and the write path is re-routed
-  over the topology's `%{vnode_id => nodes}` placements (server id = `{vnode_id, a_member}`). Pure: the
+  over the topology's `%{vnode_id => nodes}` placements (`Malachi.Cluster.RingTopology.location/3`). Pure: the
   metadata catch-up for a new/changed vnode is the separate refresh side effect. Returns the new broker.
   """
   @spec adopt_topology(Broker.t(), RingTopology.t()) :: Broker.t()

@@ -51,13 +51,25 @@ defmodule Malachi.Cluster.RingTopology do
   end
 
   @doc """
-  The `%{vnode_id => server_id}` routing map derived from the placements: each vnode's server id is
-  `{vnode_id, a_member}` (any member of its placement: ra resolves the live leader). A vnode with an
-  empty placement is skipped (it has no cluster to route to). Used to point routing at the topology.
+  The `%{vnode_id => location}` routing map derived from the placements, each vnode's members as
+  `location/3` orders them, for `this_node`. A vnode with an empty placement is skipped (it has no cluster
+  to route to). Used to point routing at the topology.
   """
-  @spec servers(t()) :: %{term() => {term(), node()}}
-  def servers(%__MODULE__{placements: placements}) do
-    for {vnode_id, [member | _]} <- placements, into: %{}, do: {vnode_id, {vnode_id, member}}
+  @spec servers(t(), node()) :: %{term() => [{term(), node()}, ...]}
+  def servers(%__MODULE__{placements: placements}, this_node \\ node()) do
+    for {vnode_id, [_ | _] = members} <- placements, into: %{}, do: {vnode_id, location(vnode_id, members, this_node)}
+  end
+
+  @doc """
+  How `this_node` reaches `vnode_id`: every member of its placement, its own first when it hosts one, since
+  it answers whenever this node does, and the others in placement order. Any member resolves the live
+  leader, but only while it is up itself: a vnode addressed through one member would answer nothing, to
+  any node, once that member is gone, with the other two serving (`t:Malachi.Cluster.RaCluster.location/0`).
+  """
+  @spec location(term(), [node(), ...], node()) :: [{term(), node()}, ...]
+  def location(vnode_id, [_ | _] = members, this_node \\ node()) do
+    {own, others} = Enum.split_with(members, &(&1 == this_node))
+    Enum.map(own ++ others, &{vnode_id, &1})
   end
 
   @doc """

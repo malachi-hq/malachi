@@ -7,6 +7,7 @@ defmodule Malachi.BrokerServerRaTest do
   import Malachi.Test.TeardownHelper
 
   alias Malachi.Broker
+  alias Malachi.Broker.ReadView
   alias Malachi.BrokerServer
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
@@ -14,11 +15,14 @@ defmodule Malachi.BrokerServerRaTest do
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RingTopology
+  alias Malachi.Consumer.CoordinatorRouter
+  alias Malachi.ConsumeStreams
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
   alias Malachi.Test.AliveMembersStub
   alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.ReadBack
   alias Malachi.Test.SilentRaMember
   alias Malachi.Test.TmpDir
   alias Malachi.Test.UnknownMessages
@@ -36,6 +40,8 @@ defmodule Malachi.BrokerServerRaTest do
   test "metadata mutations are committed to the Raft cluster, and the cache matches it" do
     cluster = :"bs_meta_#{System.unique_integer([:positive])}"
     on_exit(fn -> MetadataServer.delete(cluster) end)
+    router_topology = :persistent_term.get({CoordinatorRouter, :topology}, nil)
+    on_exit(fn -> :persistent_term.put({CoordinatorRouter, :topology}, router_topology) end)
 
     brokers = for _ <- 1..3, do: start_replication()
 
@@ -67,6 +73,9 @@ defmodule Malachi.BrokerServerRaTest do
       assert abs(cached.segments[id].opened_at - segment.opened_at) < 5_000
     end
 
+    # and consumer-group coordination routes to the leader of the group the broker joined
+    assert CoordinatorRouter.topology() == %{leader_of: {cluster, node()}}
+
     :ok = BrokerServer.stop(control)
   end
 
@@ -88,9 +97,8 @@ defmodule Malachi.BrokerServerRaTest do
     {:ok, records} = BrokerServer.read(second, root, 0, 100)
     assert Enum.map(records, & &1.value) == for(i <- 1..5, do: "v#{i}")
 
-    # The consume/fetch path (what the chaos verify uses) works too.
-    {consumed, _next, _skips} = BrokerServer.consume(second, "events", %{}, 100, 0)
-    assert length(consumed) == 5
+    # The fetch_range path (what the chaos verify uses) works too.
+    assert length(ReadBack.values(second, "events")) == 5
 
     # And producing continues cleanly after the restart (recovered offsets + segment seq floor).
     {:ok, _} = BrokerServer.produce(second, "events", [Record.new("v6", key: "k6")])
@@ -133,18 +141,22 @@ defmodule Malachi.BrokerServerRaTest do
       %{broker: broker, start_repl: start_repl}
     end
 
-    test "refuses the consume instead of answering an empty page", %{broker: broker} do
-      assert BrokerServer.consume(broker, "events", %{}, 100, 0) == {:error, :metadata_unavailable}
-      # A long poll is refused too, rather than parked on a horizon it can never pass.
-      assert BrokerServer.consume(broker, "events", %{}, 100, 200) == {:error, :metadata_unavailable}
+    test "refuses the fetch instead of answering an empty page", %{broker: broker} do
+      assert ReadBack.values(broker, "events") == {:error, :metadata_unavailable}
+      # A long poll is refused too, and at once, rather than held on an end it can never pass.
+      started = System.monotonic_time(:millisecond)
+      {:ok, position, view, reporter} = BrokerServer.fetch_range(broker, {"events", 0}, :earliest, 5_000)
+      assert System.monotonic_time(:millisecond) - started < 1_000, "the long poll was held"
+
+      assert ConsumeStreams.read_page(view, {"events", 0}, position, 100, 1_048_576, reporter) ==
+               {:error, :metadata_unavailable}
     end
 
     test "serves every durable record once a reconcile learns the end", %{broker: broker, start_repl: start_repl} do
       start_repl.()
       :ok = BrokerServer.reconcile_now(broker)
 
-      {consumed, _next, _skips} = BrokerServer.consume(broker, "events", %{}, 100, 0)
-      assert Enum.map(consumed, & &1.value) |> Enum.sort() == Enum.sort(for(i <- 1..5, do: "v#{i}"))
+      assert broker |> ReadBack.values("events") |> Enum.sort() == Enum.sort(for(i <- 1..5, do: "v#{i}"))
     end
 
     # The answer ends the wait even when it is exactly what the frontend planned: a range whose counter
@@ -175,8 +187,7 @@ defmodule Malachi.BrokerServerRaTest do
       # Before any reconcile: the produce lands, and the end its primary assigns is the range's end.
       assert {:ok, _} = BrokerServer.produce(broker, "events", [Record.new("v6", key: "k6")])
 
-      {consumed, _next, _skips} = BrokerServer.consume(broker, "events", %{}, 100, 0)
-      assert Enum.map(consumed, & &1.value) |> Enum.sort() == Enum.sort(for(i <- 1..6, do: "v#{i}"))
+      assert broker |> ReadBack.values("events") |> Enum.sort() == Enum.sort(for(i <- 1..6, do: "v#{i}"))
     end
   end
 
@@ -210,11 +221,313 @@ defmodule Malachi.BrokerServerRaTest do
     assert {:ok, records} = BrokerServer.read(second, root, 0, 100)
     assert Enum.map(records, & &1.value) == for(i <- 1..5, do: "v#{i}")
 
-    {consumed, _next, _skips} = BrokerServer.consume(second, "events", %{}, 100, 0)
-    assert length(consumed) == 5, "a cold replication server must not report durable records as drained"
+    assert length(ReadBack.values(second, "events")) == 5,
+           "a cold replication server must not report durable records as drained"
 
     :ok = BrokerServer.stop(second)
     :ok = GenServer.stop(cold_repl)
+  end
+
+  test "a restarted broker reads its active segment up to what a quorum holds, before any new produce" do
+    # The read horizon of the consume streams (`Malachi.Broker.durable_end/2`) lived only in the memory of
+    # the frontend that answered the produces, so after a restart an active segment read nothing until the
+    # next produce: empty, successful pages over acknowledged records (the chaos drill's verify after a
+    # rolling restart). Recovery now seeds it from what a quorum of the segment's replicas holds.
+    cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+
+    names =
+      for i <- 1..3 do
+        directory = TmpDir.path("malachi_horizon_#{i}")
+        on_exit(fn -> File.rm_rf!(directory) end)
+        name = :"horizon_repl_#{i}_#{System.unique_integer([:positive])}"
+        {:ok, _repl} = ReplicationServer.start_link(directory: directory, name: name)
+        {name, directory}
+      end
+
+    brokers = for {name, _directory} <- names, do: {name, node()}
+    {:ok, first} = BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+    {:ok, root} = BrokerServer.create_topic(first, "events", 4)
+    {:ok, _} = BrokerServer.produce(first, "events", for(i <- 1..5, do: Record.new("v#{i}", key: "k#{i}")))
+    assert Broker.durable_end(:sys.get_state(first).broker, root) == 5
+    [segment] = Metadata.segments_of_range(BrokerServer.metadata(first), root)
+    :ok = BrokerServer.stop(first)
+
+    # one follower down: the primary and the other follower are a quorum of three
+    [_primary, {down, _node} | _] = segment.replica_set
+    :ok = GenServer.stop(down)
+
+    {:ok, second} =
+      BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+
+    assert Broker.durable_end(:sys.get_state(second).broker, root) == 5
+    :ok = BrokerServer.stop(second)
+
+    # the other follower down too: one answer is not a quorum, and nothing is seeded
+    [_primary, _down, {also_down, _node}] = segment.replica_set
+    :ok = GenServer.stop(also_down)
+    {:ok, third} = BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+    assert Broker.durable_end(:sys.get_state(third).broker, root) == 0
+    :ok = BrokerServer.stop(third)
+  end
+
+  # Three registered replication servers (refs survive a broker restart), each `{name, directory}`.
+  defp named_replicas(prefix, opts \\ []) do
+    for i <- 1..3 do
+      directory = TmpDir.path("#{prefix}_#{i}")
+      on_exit(fn -> File.rm_rf!(directory) end)
+      name = :"#{prefix}_#{i}_#{System.unique_integer([:positive])}"
+      {:ok, _repl} = ReplicationServer.start_link([directory: directory, name: name] ++ opts)
+      {name, directory}
+    end
+  end
+
+  test "a restarted broker whose horizon probe gets no quorum refuses consumes, rather than serve none" do
+    # The end is learned (the primary answers) but the horizon is not (one answer of three is no quorum):
+    # the records of the active segment are on disk and acknowledged, and a page that stopped short of them
+    # came back empty and successful, as the single-node drill caught after a recreate.
+    cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+    replicas = named_replicas("malachi_pending_horizon")
+    brokers = for {name, _directory} <- replicas, do: {name, node()}
+
+    {:ok, first} = BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+    {:ok, root} = BrokerServer.create_topic(first, "events", 4)
+    {:ok, _} = BrokerServer.produce(first, "events", for(i <- 1..5, do: Record.new("v#{i}", key: "k#{i}")))
+    [%{replica_set: [_primary | followers]}] = Metadata.segments_of_range(BrokerServer.metadata(first), root)
+    :ok = BrokerServer.stop(first)
+    for {name, _node} <- followers, do: :ok = GenServer.stop(name)
+
+    {:ok, second} =
+      BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+
+    assert ReadBack.values(second, "events") == {:error, :metadata_unavailable}
+    # a long poll is answered at once, for its read to refuse, rather than held on a horizon nothing raises
+    started = System.monotonic_time(:millisecond)
+    {:ok, position, view, reporter} = BrokerServer.fetch_range(second, root, :earliest, 5_000)
+    assert System.monotonic_time(:millisecond) - started < 1_000, "the long poll was held"
+    assert ConsumeStreams.read_page(view, root, position, 100, 1_048_576, reporter) == {:error, :metadata_unavailable}
+
+    # the followers come back: the next pass learns the horizon, and every record is served
+    for {name, _node} <- followers do
+      {^name, directory} = List.keyfind(replicas, name, 0)
+      {:ok, _repl} = ReplicationServer.start_link(directory: directory, name: name)
+    end
+
+    :ok = BrokerServer.reconcile_now(second)
+    assert second |> ReadBack.values("events") |> Enum.sort() == Enum.sort(for(i <- 1..5, do: "v#{i}"))
+    :ok = BrokerServer.stop(second)
+  end
+
+  test "the horizon a restart learns is the end a quorum reached, not the furthest, and is not asked again" do
+    cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+    brokers = for {name, _directory} <- named_replicas("malachi_quorum_end"), do: {name, node()}
+
+    {:ok, first} = BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+    {:ok, root} = BrokerServer.create_topic(first, "events", 4)
+    {:ok, _} = BrokerServer.produce(first, "events", for(i <- 1..3, do: Record.new("v#{i}", key: "k#{i}")))
+    [segment] = Metadata.segments_of_range(BrokerServer.metadata(first), root)
+    :ok = BrokerServer.stop(first)
+
+    # the primary alone holds two more: its copy ends at 5, the followers' at 3
+    [primary | followers] = segment.replica_set
+    extra = for i <- 4..5, do: Record.new("v#{i}", key: "k#{i}")
+    {:ok, 4} = ReplicationServer.replicate(primary, segment.id, [primary], segment.start_offset, extra)
+
+    {:ok, second} =
+      BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+
+    assert Broker.durable_end(:sys.get_state(second).broker, root) == 3, "the end a quorum of two reached"
+
+    # the followers catch up; the horizon is known, so a later pass does not ask again
+    for follower <- followers,
+        do: {:ok, 4} = ReplicationServer.replicate(follower, segment.id, [follower], segment.start_offset, extra)
+
+    :ok = BrokerServer.reconcile_now(second)
+    assert Broker.durable_end(:sys.get_state(second).broker, root) == 3
+    :ok = BrokerServer.stop(second)
+  end
+
+  test "a horizon a quorum answered while the range's end was not learned yet is asked again once it is" do
+    # The primary misses the end probe the recovery makes (a slow open), while the followers answer the
+    # horizon's: the range is unrecovered when the quorum's horizon arrives. Recorded then, clamped to the
+    # end nobody knew, it read as a known horizon of zero, and the range served nothing until a produce.
+    cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+    brokers = for {name, _directory} <- named_replicas("malachi_unrecovered_horizon"), do: {name, node()}
+
+    {:ok, first} = BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+    {:ok, root} = BrokerServer.create_topic(first, "events", 4)
+    {:ok, _} = BrokerServer.produce(first, "events", for(i <- 1..5, do: Record.new("v#{i}", key: "k#{i}")))
+    [%{replica_set: [{primary, _node} | _]}] = Metadata.segments_of_range(BrokerServer.metadata(first), root)
+    :ok = BrokerServer.stop(first)
+
+    gate = refuse_end_probes(primary)
+
+    {:ok, second} =
+      BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+
+    assert Broker.unrecovered?(:sys.get_state(second).broker, root)
+
+    # the primary answers again: the next pass learns the end, and the horizon with it
+    send(gate, :answer)
+    :ok = BrokerServer.reconcile_now(second)
+    assert Broker.durable_end(:sys.get_state(second).broker, root) == 5
+    :ok = BrokerServer.stop(second)
+  end
+
+  # Puts a proxy under `name`, in front of the server registered there: it answers the recovery's end probe
+  # (`durable_end`) as a failed copy until it is sent `:answer`, and forwards everything else, so the horizon's
+  # probe (`durable_stats`) reaches the server.
+  defp refuse_end_probes(name) do
+    server = Process.whereis(name)
+    Process.unregister(name)
+
+    proxy =
+      spawn(fn ->
+        Process.register(self(), name)
+        end_probe_proxy(server, true)
+      end)
+
+    on_exit(fn -> Process.exit(proxy, :kill) end)
+    wait_until!(fn -> Process.whereis(name) == proxy end)
+    proxy
+  end
+
+  defp end_probe_proxy(server, refusing?) do
+    receive do
+      :answer ->
+        end_probe_proxy(server, false)
+
+      {:"$gen_call", from, {:durable_end, _segment_id, _base}} when refusing? ->
+        GenServer.reply(from, {:error, {:storage, :failed}})
+        end_probe_proxy(server, refusing?)
+
+      message ->
+        send(server, message)
+        end_probe_proxy(server, refusing?)
+    end
+  end
+
+  test "replicas that never answer the horizon probes do not hold the broker's loop" do
+    # Each probe may wait its whole bound, and a range short of a quorum is asked on every pass. Asked
+    # one replica at a time, eight ranges with two silent replicas cost the boot seconds, and on the loop
+    # every reconcile too, with every client of the node waiting behind them.
+    cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+    brokers = for {name, _directory} <- named_replicas("malachi_silent_probe"), do: {name, node()}
+
+    {:ok, first} = BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+
+    for i <- 1..8 do
+      {:ok, _root} = BrokerServer.create_topic(first, "events_#{i}", 4)
+      {:ok, _} = BrokerServer.produce(first, "events_#{i}", [Record.new("v", key: "k")])
+    end
+
+    :ok = BrokerServer.stop(first)
+
+    # two replicas stay registered and answer only the end probe the recovery already made before the
+    # horizon (at once, as a failed copy): the horizon's probes they never answer
+    for {name, _node} <- tl(brokers) do
+      :ok = GenServer.stop(name)
+      start_mute_to_horizon(name)
+    end
+
+    {elapsed_us, second} =
+      :timer.tc(fn ->
+        {:ok, second} =
+          BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+
+        _ = BrokerServer.metadata(second)
+        second
+      end)
+
+    # one bound for every probe at once (about 250 ms), not one per range (about 2 s) nor one per probe in turn
+    # (about 4 s)
+    assert elapsed_us < 1_500_000, "boot took #{div(elapsed_us, 1000)} ms"
+
+    # every later pass asks again (no quorum answers), off the loop: while a pass waits on its probes, the
+    # node answers, and the same pass is still the one in flight once it has
+    wait_until!(fn -> match?(%{reconcile_task: %{ref: _}}, :sys.get_state(second)) end)
+    %{reconcile_task: %{ref: probing}} = :sys.get_state(second)
+    _metadata = BrokerServer.metadata(second)
+    assert %{reconcile_task: %{ref: ^probing}} = :sys.get_state(second)
+
+    :ok = BrokerServer.stop(second)
+  end
+
+  defp start_mute_to_horizon(name) do
+    pid =
+      spawn(fn ->
+        Process.register(self(), name)
+        mute_to_horizon()
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    wait_until!(fn -> Process.whereis(name) == pid end)
+  end
+
+  defp mute_to_horizon do
+    receive do
+      {:"$gen_call", from, {:durable_end, _segment_id, _base}} -> GenServer.reply(from, {:error, {:storage, :failed}})
+      _ignored -> :ok
+    end
+
+    mute_to_horizon()
+  end
+
+  test "under replication group commit, the ends a restart counts are flushed first" do
+    # A replica's log counts the records it buffered and has not fsynced. A horizon seeded from those would
+    # let a consumer read a record that a crash of the buffering replicas takes back.
+    cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+    replicas = named_replicas("malachi_gc_horizon", group_commit: true, group_commit_interval_ms: 600_000)
+    brokers = for {name, _directory} <- replicas, do: {name, node()}
+    flush_all = fn -> for {name, _directory} <- replicas, do: send(name, :gc_flush) end
+
+    {:ok, first} = BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+    {:ok, root} = BrokerServer.create_topic(first, "events", 4)
+
+    produce =
+      Task.async(fn -> BrokerServer.produce(first, "events", for(i <- 1..3, do: Record.new("v#{i}", key: "k#{i}"))) end)
+
+    wait_until!(fn -> flush_all.() && Task.yield(produce, 50) != nil end)
+    [segment] = Metadata.segments_of_range(BrokerServer.metadata(first), root)
+    :ok = BrokerServer.stop(first)
+
+    # two more buffered on every copy, fsynced on none
+    [primary, {follower, _node} | _] = segment.replica_set
+    extra = for i <- 4..5, do: Record.new("v#{i}", key: "k#{i}")
+
+    :ok =
+      ReplicationServer.replicate_async(
+        primary,
+        segment.id,
+        segment.replica_set,
+        segment.start_offset,
+        extra,
+        self(),
+        :extra
+      )
+
+    wait_until!(fn ->
+      ReplicationServer.durable_end({follower, node()}, segment.id, segment.start_offset, 1_000) == 5
+    end)
+
+    {:ok, second} =
+      BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+
+    assert Broker.durable_end(:sys.get_state(second).broker, root) == 5
+
+    # the follower's process dies, and with it whatever it had only buffered: what the horizon counted stays
+    {^follower, directory} = List.keyfind(replicas, follower, 0)
+    Process.flag(:trap_exit, true)
+    Process.exit(Process.whereis(follower), :kill)
+    wait_until!(fn -> Process.whereis(follower) == nil end)
+    {:ok, _back} = ReplicationServer.start_link(directory: directory, name: follower)
+    assert ReplicationServer.durable_end({follower, node()}, segment.id, segment.start_offset, 1_000) == 5
+    :ok = BrokerServer.stop(second)
   end
 
   test "a restarted broker whose active segment's primary copy failed in storage still starts" do
@@ -253,17 +566,15 @@ defmodule Malachi.BrokerServerRaTest do
     end)
   end
 
-  test "a subscriber is pushed records produced through a different frontend" do
-    # A streaming subscriber used to be pushed only on subscribe, on its own ack, and on a produce
-    # through the broker it subscribed to. A produce through another frontend woke that frontend's
-    # subscribers and not this one's, so a topic written on one node and streamed from another
-    # delivered nothing, with no error anywhere and both nodes healthy. An ack cannot recover it,
-    # having no records to acknowledge.
-    cluster = :"bs_sub_#{System.unique_integer([:positive])}"
+  test "a consume stream is woken by records produced through a different frontend" do
+    # A consume stream armed on one frontend must be woken when its range grows through another, or a topic
+    # written on one node and streamed from another delivers nothing, with no error anywhere and both nodes
+    # healthy.
+    cluster = :"bs_consume_#{System.unique_integer([:positive])}"
     on_exit(fn -> MetadataServer.delete(cluster) end)
 
-    name = :"sub_repl_#{System.unique_integer([:positive])}"
-    directory = TmpDir.path("malachi_sub")
+    name = :"consume_repl_#{System.unique_integer([:positive])}"
+    directory = TmpDir.path("malachi_consume")
     on_exit(fn -> File.rm_rf!(directory) end)
     {:ok, repl} = ReplicationServer.start_link(directory: directory, name: name)
     on_exit(fn -> stop_quietly(repl) end)
@@ -271,18 +582,21 @@ defmodule Malachi.BrokerServerRaTest do
     opts = [brokers: [{name, node()}], metadata_cluster: cluster, brokers_refresh_interval: 100]
     {:ok, writer} = BrokerServer.start_link("unused", opts)
     {:ok, streamer} = BrokerServer.start_link("unused", opts)
+    on_exit(fn -> stop_quietly(writer) end)
+    on_exit(fn -> stop_quietly(streamer) end)
 
-    {:ok, _root} = BrokerServer.create_topic(writer, "events", 4)
-    :ok = BrokerServer.subscribe(streamer, "events", "g", 100, 10)
+    {:ok, root} = BrokerServer.create_topic(writer, "events", 4)
+    # the streamer learns of the topic on its next refresh
+    {:ok, token, _position, _server} = open_consume_once_known(streamer, root)
 
-    # Produced through the OTHER broker, so nothing on this path wakes the subscription.
+    assert_receive {:consume_wake, ^token, _view, _reporter}, 3_000
+    :ok = BrokerServer.arm_consume(streamer, token, 0)
+
+    # produced through the OTHER broker, so nothing on the streamer's own path wakes the stream
     {:ok, _} = BrokerServer.produce(writer, "events", [Record.new("v1", key: "k1")])
 
-    assert_receive {:log_records, "events", records, _positions}, 3_000
-    assert Enum.map(records, & &1.value) == ["v1"]
-
-    :ok = BrokerServer.stop(writer)
-    :ok = BrokerServer.stop(streamer)
+    assert_receive {:consume_wake, ^token, view, _reporter}, 3_000
+    assert ReadView.fetch_end(view, root) == {:ok, 1}
   end
 
   test "a broker that loses the control plane stays ready, and keeps serving what it already knew" do
@@ -310,7 +624,7 @@ defmodule Malachi.BrokerServerRaTest do
     assert BrokerServer.metadata_ready?(server), "a node serving from its retained view is ready"
     assert {:ok, [record]} = BrokerServer.read(server, root, 0, 100)
     assert record.value == "v1"
-    assert {[_], _positions, []} = BrokerServer.consume(server, "events", %{}, 100, 0)
+    assert [_] = ReadBack.values(server, "events")
 
     :ok = BrokerServer.stop(server)
   end
@@ -349,6 +663,25 @@ defmodule Malachi.BrokerServerRaTest do
     :ok = BrokerServer.stop(server)
   end
 
+  test "a vnode whose first placement node is gone still takes this broker's commands" do
+    # The broker booted addressing each vnode through the first node of its placement: with that node
+    # down, every command and read of the vnode failed from every frontend, its members serving or not.
+    vnode = :"bs_first_gone_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(vnode) end)
+    {:ok, _server_id} = MetadataServer.start(vnode, [node()])
+
+    {:ok, server} =
+      BrokerServer.start_link("unused",
+        brokers: [start_replication()],
+        metadata_vnodes: [{vnode, 0, [:"nonexistent@127.0.0.1", node()]}],
+        bootstrap_orchestrator: fn -> false end,
+        brokers_refresh_interval: 50
+      )
+
+    assert {:ok, _root} = BrokerServer.create_topic(server, "events", 4)
+    :ok = BrokerServer.stop(server)
+  end
+
   test "a topic whose metadata vnode never answered is refused, not reported as drained" do
     # Two vnodes: one on this node, one routed at a node that does not exist, so its ra cluster can
     # never be read. That is the shape of a broker whose control plane is partly unreachable, which is
@@ -369,10 +702,10 @@ defmodule Malachi.BrokerServerRaTest do
 
     # Names divide between the two vnodes by hash. A name on the reachable vnode reads normally; a name
     # on the ghost must NOT read as an empty topic, because this broker cannot know whether it is empty.
-    results = for i <- 0..19, do: BrokerServer.consume(control, "gate_t#{i}", %{}, 100, 0)
+    results = for i <- 0..19, do: ReadBack.values(control, "gate_t#{i}")
 
     refused = Enum.filter(results, &match?({:error, :metadata_unavailable}, &1))
-    answered = Enum.filter(results, &match?({[], _positions, []}, &1))
+    answered = Enum.filter(results, &match?([], &1))
 
     assert refused != [], "expected topics routed to the unreachable vnode to be refused"
     assert answered != [], "expected topics routed to the reachable vnode to still be served"
@@ -573,7 +906,7 @@ defmodule Malachi.BrokerServerRaTest do
     # the first one started.
     Process.sleep(200)
 
-    task = Task.async(fn -> for i <- 0..19, do: BrokerServer.consume(control, "stall_t#{i}", %{}, 100, 0) end)
+    task = Task.async(fn -> for i <- 0..19, do: ReadBack.values(control, "stall_t#{i}") end)
     results = Task.await(task, 1_000)
 
     # Half the names route to the silent vnode and must still be refused rather than reported drained:
@@ -581,7 +914,7 @@ defmodule Malachi.BrokerServerRaTest do
     assert Enum.any?(results, &match?({:error, :metadata_unavailable}, &1)),
            "topics on the silent vnode must still be refused"
 
-    assert Enum.any?(results, &match?({[], _positions, []}, &1)),
+    assert Enum.any?(results, &match?([], &1)),
            "topics on the live vnode must still be served"
   end
 
@@ -619,8 +952,8 @@ defmodule Malachi.BrokerServerRaTest do
            "boot took #{div(elapsed_us, 1000)}ms; the two boot reads are waiting out the control plane"
 
     # And the live vnode was read, so its topics are servable at once rather than after the first tick.
-    served = for i <- 0..19, do: BrokerServer.consume(control, "boot_t#{i}", %{}, 100, 0)
-    assert Enum.any?(served, &match?({[], _positions, []}, &1))
+    served = for i <- 0..19, do: ReadBack.values(control, "boot_t#{i}")
+    assert Enum.any?(served, &match?([], &1))
   end
 
   test "a reconcile that overruns its deadline is killed, counted and logged" do
@@ -755,10 +1088,10 @@ defmodule Malachi.BrokerServerRaTest do
   end
 
   test "a committed group position is not rolled back by the reconcile result" do
-    # The same replacement, on the metadata a consumer group depends on. `committed_offsets/3` reads
-    # the cache, and a position that goes backwards is redelivery: at ten million messages a day a
-    # window as long as one read is thousands of messages consumed twice, and a position that comes
-    # back empty is the whole range consumed again.
+    # The same replacement, on the metadata a consumer group depends on. The checkpoint a member starts
+    # from (`fetch_range` from `{:committed, group}`) is read from the cache, and a position that goes
+    # backwards is redelivery: at ten million messages a day a window as long as one read is thousands of
+    # messages consumed twice, and a position that comes back empty is the whole range consumed again.
     {live, silent, opts} = live_and_silent_vnodes(2_000, silent_at_boot: false, brokers_refresh_interval: 50)
 
     {:ok, control} = BrokerServer.start_link("unused", opts)
@@ -769,18 +1102,18 @@ defmodule Malachi.BrokerServerRaTest do
     {:ok, root} = BrokerServer.create_topic(control, topic, 4)
     group = "billing"
 
-    :ok = BrokerServer.commit_offset(control, group, topic, %{root => 100})
+    :ok = BrokerServer.commit_offset(control, group, topic, %{root => {0, 100}}, 1)
     start_silent(silent)
 
     # Commit inside the window of one identified task, then read the position back once that task's
     # result has landed. Without the replay this reads 100, the position the task saw before the commit.
     ref = task_ref!(control)
-    :ok = BrokerServer.commit_offset(control, group, topic, %{root => 900})
-    assert Map.get(BrokerServer.committed_offsets(control, group, topic), root) == 900
+    :ok = BrokerServer.commit_offset(control, group, topic, %{root => {0, 900}}, 1)
+    assert committed_start(control, group, root) == {0, 900}
 
     await_task_result!(control, ref)
 
-    assert Map.get(BrokerServer.committed_offsets(control, group, topic), root) == 900,
+    assert committed_start(control, group, root) == {0, 900},
            "the reconcile result rolled a committed group position backwards"
   end
 
@@ -930,7 +1263,7 @@ defmodule Malachi.BrokerServerRaTest do
 
         # And it is still serving: this is the node keeping its retained view while the control plane
         # work fails beside it, which is the whole point of taking that work off this loop.
-        assert {[], _positions, []} = BrokerServer.consume(control, "crash_t", %{}, 100, 0)
+        assert [] = ReadBack.values(control, "crash_t")
       end)
 
     assert log =~ "control plane reconcile crashed"
@@ -1088,8 +1421,7 @@ defmodule Malachi.BrokerServerRaTest do
     assert length(segment.replica_set) == 3
 
     # committed (quorum-durable) records read back through the broker's primary
-    {read, _cursor, _skips} = BrokerServer.consume(control, "events", %{}, 100, 0)
-    assert read |> Enum.map(& &1.value) |> Enum.sort() == Enum.map(records, & &1.value) |> Enum.sort()
+    assert control |> ReadBack.values("events") |> Enum.sort() == Enum.map(records, & &1.value) |> Enum.sort()
 
     :ok = BrokerServer.stop(control)
   end
@@ -1302,4 +1634,30 @@ defmodule Malachi.BrokerServerRaTest do
       metadata
       | segments: Map.new(metadata.segments, fn {id, segment} -> {id, Map.delete(segment, :opened_at)} end)
     }
+
+  # The checkpoint of `group` on `range_id` in the broker's cache of the metadata: what a member opening
+  # from `{:committed, group}` starts at.
+  defp committed_start(broker, group, {topic, _seq} = range_id) do
+    broker
+    |> BrokerServer.metadata()
+    |> Map.fetch!(:committed_offsets)
+    |> Map.get({group, topic}, %{})
+    |> Map.get(range_id)
+  end
+
+  # A consume stream on `range_id` from the start, opened once `broker` knows the range: a frontend learns
+  # of a topic another one created on its next refresh.
+  defp open_consume_once_known(broker, range_id, attempts \\ 50) do
+    case BrokerServer.open_consume(broker, range_id, :earliest) do
+      {:ok, _token, _position, _server} = opened ->
+        opened
+
+      _not_yet when attempts > 1 ->
+        Process.sleep(100)
+        open_consume_once_known(broker, range_id, attempts - 1)
+
+      other ->
+        flunk("the stream never opened: #{inspect(other)}")
+    end
+  end
 end
