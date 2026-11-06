@@ -104,6 +104,7 @@ defmodule OciDailyRunScriptTest do
 
   defp run(ctx, env \\ []) do
     work = Path.join(ctx.dir, "work")
+
     base = [
       {"PATH", Enum.join([ctx.stubs, @gnubin, System.get_env("PATH")], ":")},
       {"FAKE_LOG", ctx.log},

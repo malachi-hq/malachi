@@ -157,7 +157,11 @@ defmodule CheckNoPipeToShellTest do
     end
 
     test "rejects a download piped into a shell inside a cloud-init template", %{root: root} do
-      write_tree(root, "deploy/terraform/x/node.cloud-init.yaml.tftpl", "runcmd:\n  - curl -fsSL https://example.com/i | sh\n")
+      write_tree(
+        root,
+        "deploy/terraform/x/node.cloud-init.yaml.tftpl",
+        "runcmd:\n  - curl -fsSL https://example.com/i | sh\n"
+      )
 
       assert {output, 1} = guard_in(root)
       assert output =~ "node.cloud-init.yaml.tftpl"
@@ -171,7 +175,11 @@ defmodule CheckNoPipeToShellTest do
     end
 
     test "accepts a download saved to a file and checked, the form the daily run uses", %{root: root} do
-      write_tree(root, "deploy/terraform/x/files/run.sh", "#!/bin/bash\ncurl -fsSL -o src.tgz https://example.com/i\necho \"$SHA  src.tgz\" | sha256sum -c\n")
+      write_tree(
+        root,
+        "deploy/terraform/x/files/run.sh",
+        "#!/bin/bash\ncurl -fsSL -o src.tgz https://example.com/i\necho \"$SHA  src.tgz\" | sha256sum -c\n"
+      )
 
       assert {_output, 0} = guard_in(root)
     end
