@@ -2181,7 +2181,9 @@ defmodule Malachi.BrokerServer do
   # and the role fails over with leadership.
   defp build_replicated(vnodes) do
     Enum.reduce(vnodes, ReplicatedDSRSM.new(), fn {vnode_id, token, nodes}, replicated ->
-      {:ok, replicated} = ReplicatedDSRSM.route_vnode(replicated, vnode_id, token, {vnode_id, hd(nodes)})
+      {:ok, replicated} =
+        ReplicatedDSRSM.route_vnode(replicated, vnode_id, token, RingTopology.location(vnode_id, nodes))
+
       replicated
     end)
   end
@@ -2224,7 +2226,7 @@ defmodule Malachi.BrokerServer do
   Rebuilds a sharded broker's metadata routing for a new ring `topology` (a vnode split adopted via
   gossip): the local read cache takes the new ring: existing vnodes keep their cached `Metadata`, a
   newly-added vnode starts **empty** until the next refresh from `ra`, and the write path is re-routed
-  over the topology's `%{vnode_id => nodes}` placements (server id = `{vnode_id, a_member}`). Pure: the
+  over the topology's `%{vnode_id => nodes}` placements (`Malachi.Cluster.RingTopology.location/3`). Pure: the
   metadata catch-up for a new/changed vnode is the separate refresh side effect. Returns the new broker.
   """
   @spec adopt_topology(Broker.t(), RingTopology.t()) :: Broker.t()

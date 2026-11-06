@@ -663,6 +663,25 @@ defmodule Malachi.BrokerServerRaTest do
     :ok = BrokerServer.stop(server)
   end
 
+  test "a vnode whose first placement node is gone still takes this broker's commands" do
+    # The broker booted addressing each vnode through the first node of its placement: with that node
+    # down, every command and read of the vnode failed from every frontend, its members serving or not.
+    vnode = :"bs_first_gone_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(vnode) end)
+    {:ok, _server_id} = MetadataServer.start(vnode, [node()])
+
+    {:ok, server} =
+      BrokerServer.start_link("unused",
+        brokers: [start_replication()],
+        metadata_vnodes: [{vnode, 0, [:"nonexistent@127.0.0.1", node()]}],
+        bootstrap_orchestrator: fn -> false end,
+        brokers_refresh_interval: 50
+      )
+
+    assert {:ok, _root} = BrokerServer.create_topic(server, "events", 4)
+    :ok = BrokerServer.stop(server)
+  end
+
   test "a topic whose metadata vnode never answered is refused, not reported as drained" do
     # Two vnodes: one on this node, one routed at a node that does not exist, so its ra cluster can
     # never be read. That is the shape of a broker whose control plane is partly unreachable, which is

@@ -24,8 +24,20 @@ defmodule Malachi.Cluster.RaCluster do
   # see what it is bounding and the arity without a timeout keeps behaving exactly as before.
   @default_timeout 5_000
 
+  # What a member answers when it could not take a request: the next member of a location is asked. A timeout
+  # is not among them, unlike ra's own list of servers: the command may have committed, and sent again it
+  # would apply twice.
+  @unreached [:noproc, :nodedown, :shutdown, :system_not_started]
+
   @type cluster_name :: atom()
   @type server_id :: {cluster_name(), node()}
+
+  @typedoc """
+  How a cluster is reached: one member, or its members in the order to try them. A member that is gone
+  answers nothing for the others, however healthy they are, so a caller that does not need one member in
+  particular holds them all (`Malachi.Cluster.RingTopology.location/3`).
+  """
+  @type location :: server_id() | [server_id(), ...]
 
   @doc """
   Starts `cluster_name` running `machine` across `nodes`, returning a `server_id` for a **real
@@ -98,13 +110,28 @@ defmodule Malachi.Cluster.RaCluster do
 
   `timeout` bounds the wait for the commit (ra's own default is 5 s). A caller running inside a loop
   that serves clients passes a shorter one. A timeout is ambiguous: the command may still commit.
+
+  Over a `t:location/0`, a member that is gone passes the command to the next, and the last one's answer is
+  the answer. A timeout ends it there, for the reason above.
   """
-  @spec command(server_id(), term(), timeout()) :: {:ok, term()} | {:error, term()}
-  def command(server_id, command, timeout \\ @default_timeout) do
-    case :ra.process_command(server_id, command, timeout) do
-      {:ok, reply, _leader} -> {:ok, reply}
-      {:error, reason} -> {:error, reason}
-      {:timeout, _server} -> {:error, :timeout}
+  @spec command(location(), term(), timeout()) :: {:ok, term()} | {:error, term()}
+  def command(location, command, timeout \\ @default_timeout) do
+    in_order(location, fn server_id ->
+      case :ra.process_command(server_id, command, timeout) do
+        {:ok, reply, _leader} -> {:ok, reply}
+        {:error, reason} -> {:error, reason}
+        {:timeout, _server} -> {:error, :timeout}
+      end
+    end)
+  end
+
+  defp in_order({_cluster_name, _node} = server_id, call), do: call.(server_id)
+  defp in_order([server_id], call), do: call.(server_id)
+
+  defp in_order([server_id | others], call) do
+    case call.(server_id) do
+      {:error, reason} when reason in @unreached -> in_order(others, call)
+      answered -> answered
     end
   end
 
@@ -120,8 +147,8 @@ defmodule Malachi.Cluster.RaCluster do
   that runs inside a loop serving clients: such a caller passes a short one and reads the timeout as
   "this cluster did not answer" (see `Malachi.Cluster.ReplicatedDSRSM.snapshot/2`).
   """
-  @spec query(server_id(), timeout()) :: {:ok, term()} | {:error, term()}
-  def query(server_id, timeout \\ @default_timeout), do: project(server_id, {Function, :identity, []}, timeout)
+  @spec query(location(), timeout()) :: {:ok, term()} | {:error, term()}
+  def query(location, timeout \\ @default_timeout), do: project(location, {Function, :identity, []}, timeout)
 
   @doc """
   A linearizable read that returns `apply(m, f, a ++ [state])` computed **inside the leader**.
@@ -134,14 +161,16 @@ defmodule Malachi.Cluster.RaCluster do
   whatever Malachi version it runs, such as `{:maps, :with, [keys]}`. Anything that has to run Malachi
   code belongs in the caller, over what this returns.
   """
-  @spec project(server_id(), {module(), atom(), [term()]}, timeout()) :: {:ok, term()} | {:error, term()}
-  def project(server_id, {module, function, args} = mfa, timeout \\ @default_timeout)
+  @spec project(location(), {module(), atom(), [term()]}, timeout()) :: {:ok, term()} | {:error, term()}
+  def project(location, {module, function, args} = mfa, timeout \\ @default_timeout)
       when is_atom(module) and is_atom(function) and is_list(args) do
-    case :ra.consistent_query(server_id, mfa, timeout) do
-      {:ok, state, _leader} -> {:ok, state}
-      {:error, reason} -> {:error, reason}
-      {:timeout, _server} -> {:error, :timeout}
-    end
+    in_order(location, fn server_id ->
+      case :ra.consistent_query(server_id, mfa, timeout) do
+        {:ok, state, _leader} -> {:ok, state}
+        {:error, reason} -> {:error, reason}
+        {:timeout, _server} -> {:error, :timeout}
+      end
+    end)
   end
 
   @doc """
@@ -164,9 +193,9 @@ defmodule Malachi.Cluster.RaCluster do
   An unreachable member costs the whole `timeout`, so a caller on a latency-sensitive path passes a
   short one rather than ra's 5s default.
   """
-  @spec ready?(server_id(), timeout()) :: boolean()
-  def ready?(server_id, timeout \\ @default_timeout),
-    do: match?({:ok, _members, _leader}, :ra.members(server_id, timeout))
+  @spec ready?(location(), timeout()) :: boolean()
+  def ready?(location, timeout \\ @default_timeout),
+    do: match?({:ok, _members, _leader}, :ra.members(location, timeout))
 
   @doc """
   Whether `server_id` is currently its cluster's **leader**. Pass the local server id
@@ -222,9 +251,11 @@ defmodule Malachi.Cluster.RaCluster do
   member, so a cluster placed on a subset of nodes is deleted through a node that hosts it: `ra`
   finds the leader from there and propagates the deletion. A bare `cluster_name` means the local node.
   """
-  @spec delete(server_id() | cluster_name()) :: :ok | {:error, term()}
-  def delete({_cluster_name, _node} = server_id) do
-    case :ra.delete_cluster([server_id]) do
+  @spec delete(location() | cluster_name()) :: :ok | {:error, term()}
+  def delete({_cluster_name, _node} = server_id), do: delete([server_id])
+
+  def delete([_ | _] = server_ids) do
+    case :ra.delete_cluster(server_ids) do
       {:ok, _leader} -> :ok
       {:error, reason} -> {:error, reason}
     end

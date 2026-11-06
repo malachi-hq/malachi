@@ -858,7 +858,7 @@ defmodule Malachi.BrokerServerTest do
       # the refresh source (bootstrap.replicated, which the rebuilt metadata_refresh snapshots) targets the
       # new ring, so the periodic reconcile re-seeds against it instead of reverting to the boot ring
       assert adopted.bootstrap.replicated.ring == ring1
-      assert adopted.bootstrap.replicated.vnodes == %{v0: {:v0, node()}, v1: {:v1, node()}}
+      assert adopted.bootstrap.replicated.vnodes == %{v0: [{:v0, node()}], v1: [{:v1, node()}]}
       assert is_function(adopted.metadata_refresh, 0)
 
       # And the generation moved, which is what makes a reconcile started against ring0 arrive stale
@@ -900,7 +900,7 @@ defmodule Malachi.BrokerServerTest do
       {:noreply, adopted} = BrokerServer.handle_cast({:adopt_topology, topology}, state)
 
       assert adopted.bootstrap.vnodes == [{:v0, 0, [node()]}]
-      assert adopted.bootstrap.replicated.vnodes == %{v0: {:v0, node()}}
+      assert adopted.bootstrap.replicated.vnodes == %{v0: [{:v0, node()}]}
     end
 
     test "handle_cast adopt_topology leaves a broker without a sharded bootstrap without one" do

@@ -201,7 +201,7 @@ defmodule Malachi.Routing do
   single control-plane `cluster` otherwise, or the broker's in-memory metadata when there is no cluster.
   """
   @spec metadata_source(Metadata.topic_name(), map() | nil, atom() | nil) ::
-          {:ok, RaCluster.server_id()} | :in_memory | {:error, :unavailable}
+          {:ok, RaCluster.location()} | :in_memory | {:error, :unavailable}
   def metadata_source(topic, %{ring: ring, servers: servers}, _cluster) do
     with {:ok, vnode_id} <- HashRing.route(ring, topic),
          {:ok, server_id} <- Map.fetch(servers, vnode_id) do

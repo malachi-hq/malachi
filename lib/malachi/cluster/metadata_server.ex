@@ -46,7 +46,7 @@ defmodule Malachi.Cluster.MetadataServer do
   end
 
   @doc "Submits a `Malachi.Metadata` command through the Raft log; returns the machine reply."
-  @spec command(server_id(), Metadata.command(), timeout()) :: {:ok, term()} | {:error, term()}
+  @spec command(RaCluster.location(), Metadata.command(), timeout()) :: {:ok, term()} | {:error, term()}
   def command(server_id, command, timeout \\ @default_timeout), do: RaCluster.command(server_id, command, timeout)
 
   @doc """
@@ -72,7 +72,7 @@ defmodule Malachi.Cluster.MetadataServer do
   lacks fields this one reads: `query_fun` sees it with every field (`Malachi.Metadata.normalize/1`), so
   a vnode split or a cache refresh against an older leader reads them as empty.
   """
-  @spec query(server_id(), (Metadata.t() -> result), timeout()) :: {:ok, result} | {:error, term()}
+  @spec query(RaCluster.location(), (Metadata.t() -> result), timeout()) :: {:ok, result} | {:error, term()}
         when result: term()
   def query(server_id, query_fun, timeout \\ @default_timeout) do
     with {:ok, metadata} <- RaCluster.query(server_id, timeout), do: {:ok, query_fun.(Metadata.normalize(metadata))}
@@ -86,7 +86,7 @@ defmodule Malachi.Cluster.MetadataServer do
   Malachi function must never be the one the leader applies. What a caller does with the map it gets
   back (`Malachi.Retention.Orphans.known_among/2`) runs in the caller.
   """
-  @spec segments(server_id(), timeout()) :: {:ok, %{Metadata.segment_id() => term()}} | {:error, term()}
+  @spec segments(RaCluster.location(), timeout()) :: {:ok, %{Metadata.segment_id() => term()}} | {:error, term()}
   def segments(server_id, timeout \\ @default_timeout) do
     case RaCluster.project(server_id, {:maps, :with, [[:segments]]}, timeout) do
       {:ok, %{segments: segments}} when is_map(segments) -> {:ok, segments}
@@ -103,7 +103,7 @@ defmodule Malachi.Cluster.MetadataServer do
   Malachi function must never be the one the leader applies. Which of them are bound to a policy is
   decided in the caller (`Malachi.Cluster.ReplicatedDSRSM.topics_bound_to/3`).
   """
-  @spec topics(server_id(), timeout()) :: {:ok, %{Metadata.topic_name() => term()}} | {:error, term()}
+  @spec topics(RaCluster.location(), timeout()) :: {:ok, %{Metadata.topic_name() => term()}} | {:error, term()}
   def topics(server_id, timeout \\ @default_timeout) do
     case RaCluster.project(server_id, {:maps, :with, [[:topics]]}, timeout) do
       {:ok, %{topics: topics}} when is_map(topics) -> {:ok, topics}
@@ -118,7 +118,7 @@ defmodule Malachi.Cluster.MetadataServer do
   within `timeout`. Used by the reconcile to decide if a vnode still needs bootstrapping, which is why
   it takes a bound: an unreachable placement node costs the whole timeout.
   """
-  @spec ready?(server_id(), timeout()) :: boolean()
+  @spec ready?(RaCluster.location(), timeout()) :: boolean()
   def ready?(server_id, timeout \\ @default_timeout), do: RaCluster.ready?(server_id, timeout)
 
   @doc """
@@ -143,6 +143,6 @@ defmodule Malachi.Cluster.MetadataServer do
   `{cluster_name, node()}` for the single-node case (tests, local setups). Returns `{:error, reason}` when
   the deletion cannot be committed, instead of reporting `:ok` regardless.
   """
-  @spec delete(server_id() | cluster_name()) :: :ok | {:error, term()}
+  @spec delete(RaCluster.location() | cluster_name()) :: :ok | {:error, term()}
   def delete(target), do: RaCluster.delete(target)
 end

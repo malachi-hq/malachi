@@ -133,15 +133,18 @@ defmodule Malachi.Consumer.CoordinatorRouter do
   # ra server ids are `{name, node}`; the node leading the vnode's Raft cluster coordinates its topics. A
   # cluster this node is a member of has its leader in ra's local table, read with no round trip; another
   # (a vnode placed elsewhere) is asked, briefly.
-  defp leader_node({name, _node} = server_id) do
+  defp leader_node([{_name, _node} = server_id | _others] = location), do: leader_node(server_id, location)
+  defp leader_node({_name, _node} = server_id), do: leader_node(server_id, server_id)
+
+  defp leader_node({name, _node}, location) do
     case :ra_leaderboard.lookup_leader(name) do
       {_name, owner_node} -> owner_node
-      :undefined -> ask_leader(server_id)
+      :undefined -> ask_leader(location)
     end
   end
 
-  defp ask_leader(server_id) do
-    case :ra.members(server_id, @leader_ask_timeout_ms) do
+  defp ask_leader(location) do
+    case :ra.members(location, @leader_ask_timeout_ms) do
       {:ok, _members, {_name, owner_node}} -> owner_node
       _not_ready -> nil
     end
