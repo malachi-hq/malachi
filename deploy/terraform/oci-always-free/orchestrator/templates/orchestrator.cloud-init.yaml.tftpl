@@ -40,7 +40,8 @@ write_files:
       Environment=PATH=/opt/malachi-oci/bin:/usr/local/bin:/usr/bin:/bin
       ExecStart=/opt/malachi/daily-run.sh
       # Worst case: three apply jobs of up to APPLY_WAIT_LIMIT each (3 h), two 30-minute capacity waits, the
-      # ready and smoke waits, and a destroy job of up to 1.5 h. A SIGTERM at this limit runs the teardown trap.
+      # ready and smoke waits, and a destroy job of up to 1.5 h. A SIGTERM during an apply ends the run as apply-stuck;
+      # during a destroy, the destroy completes. systemd's SIGKILL after its stop timeout still cuts either short.
       TimeoutStartSec=14h
   - path: /etc/systemd/system/malachi-daily.timer
     permissions: "0644"

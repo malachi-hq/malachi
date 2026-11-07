@@ -13,7 +13,8 @@
 # SIGTERM, SIGINT and SIGHUP exit through the same trap. SIGKILL and a reboot cannot run a trap: the next day's
 # sweep finds the leftovers and destroys them before it applies anything. Before any destroy, the configuration
 # that the last successful apply used is put back on the stack, so a broken new commit cannot block the teardown.
-# A destroy is never started while an apply job may still be running. Nothing here is piped into a shell, and no
+# A destroy is never started while an apply job may still be running: a stop during the apply wait ends the run as
+# apply-stuck, with no destroy. Once a destroy has started, a stop does not interrupt it. Nothing here is piped into a shell, and no
 # secret is passed on a command line.
 set -euo pipefail
 
@@ -29,6 +30,7 @@ APPLY_WAIT_LIMIT="${APPLY_WAIT_LIMIT:-10800}"   # seconds to wait for one apply 
 RESULT="unknown"
 DESTROYED="no"
 RUN_COMMIT="unknown"
+APPLY_IN_FLIGHT="no"
 
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$REPORT" >&2; }
 
@@ -114,13 +116,23 @@ PY
 # uses whatever is on the stack.
 restore_applied_config() {
   if [ ! -f "$WORK/applied.zip" ]; then
+    # No apply has ever succeeded here, so the stack's own configuration is the only one that can destroy what the
+    # failed apply created. Refusing to destroy would leave those resources up for good.
     log "no applied configuration on record: destroying with the configuration on the stack"
     return 0
   fi
   if [ -f "$WORK/cluster.zip" ] && cmp -s "$WORK/cluster.zip" "$WORK/applied.zip"; then return 0; fi
-  "${OCI[@]}" resource-manager stack update --stack-id "$STACK_ID" \
-    --config-source "$WORK/applied.zip" --variables "$(stack_variables)" --force >/dev/null
-  log "stack configuration restored to the one of the last successful apply, before destroy"
+  local attempt
+  for attempt in 1 2 3; do
+    if "${OCI[@]}" resource-manager stack update --stack-id "$STACK_ID" \
+        --config-source "$WORK/applied.zip" --variables "$(stack_variables)" --force >/dev/null; then
+      log "stack configuration restored to the one of the last successful apply, before destroy"
+      return 0
+    fi
+    log "stack restore attempt $attempt failed"
+    sleep 30
+  done
+  return 1
 }
 
 # Polls one job until it reaches a final state, and leaves that state in JOB_STATE. Returns 3 with JOB_STATE=TIMEOUT
@@ -148,7 +160,11 @@ apply_once() {
   local job
   job=$("${OCI[@]}" resource-manager job create-apply-job --stack-id "$STACK_ID" \
     --execution-plan-strategy AUTO_APPROVED --query 'data.id' --raw-output) || return 1
-  wait_for_job "$job" || return 3
+  APPLY_IN_FLIGHT="yes"
+  local wait_rc=0
+  wait_for_job "$job" || wait_rc=$?
+  APPLY_IN_FLIGHT="no"
+  [ "$wait_rc" -eq 0 ] || return 3
   [ "$JOB_STATE" = "SUCCEEDED" ] && return 0
   "${OCI[@]}" resource-manager job get-job-logs --job-id "$job" >"$WORK/apply.log" 2>/dev/null || true
   if grep -qi "out of host capacity" "$WORK/apply.log" 2>/dev/null; then return 2; fi
@@ -289,19 +305,31 @@ destroy_cluster() {
   log "destroy job finished"
 }
 
+on_signal() {
+  if [ "$APPLY_IN_FLIGHT" = "yes" ]; then RESULT="apply-stuck"; fi
+  exit 143
+}
+
 on_exit() {
   local rc=$? sweep_rc=0
+  # Once the teardown has started it runs to its end: a stop does not cut the destroy or the report short.
+  trap '' TERM INT HUP
   if [ "$RESULT" = "config-missing" ] || [ "$RESULT" = "apply-stuck" ]; then
     : # no destroy: nothing was configured, or an apply may still be running
   elif [ "$DESTROYED" != "yes" ]; then
-    restore_applied_config || log "could not restore the applied configuration before destroy"
-    destroy_cluster || { log "DESTROY FAILED: the cluster may still exist; see the stack in Resource Manager"; RESULT="destroy-failed"; }
+    if ! restore_applied_config; then
+      RESULT="restore-failed"
+      log "RESTORE FAILED: no destroy against an unrestored configuration; the next run retries the restore"
+    elif ! destroy_cluster; then
+      log "DESTROY FAILED: the cluster may still exist; see the stack in Resource Manager"
+      RESULT="destroy-failed"
+    fi
   fi
   if [ "$RESULT" != "config-missing" ]; then
     sweep "after destroy" || sweep_rc=$?
     if [ "$sweep_rc" -eq 1 ]; then
       log "LEAK: resources remain after destroy"
-      [ "$RESULT" = "destroy-failed" ] || RESULT="leak"
+      case "$RESULT" in apply-stuck|destroy-failed|restore-failed) ;; *) RESULT="leak" ;; esac
     elif [ "$sweep_rc" -eq 2 ]; then
       log "the cluster compartment could not be counted: check it by hand"
       [ "$RESULT" = "pass" ] && RESULT="sweep-failed"
@@ -319,7 +347,7 @@ on_exit() {
 main() {
   mkdir -p "$WORK"; : >"$REPORT"
   trap on_exit EXIT
-  trap 'exit 143' TERM INT HUP
+  trap on_signal TERM INT HUP
   if ! check_config; then RESULT="config-missing"; exit 1; fi
   RUN_START=$(date -u +%FT%TZ)
   local rc_sweep=0
