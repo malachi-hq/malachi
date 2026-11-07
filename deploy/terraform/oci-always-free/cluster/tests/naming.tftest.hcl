@@ -54,14 +54,14 @@ run "no_default_password_or_example_cookie_is_written_anywhere_in_the_instance_d
   }
 }
 
-# A literal password of any value, not only the known defaults: every seed password and the cookie must come from
+# A literal password of any name or value: every *_pass or *_password and the cookie must come from
 # a generated resource, never from a quoted string in the node definition.
 run "no_password_or_cookie_is_a_literal_in_the_node_definition" {
   command = plan
 
   assert {
     condition = var.image_tag != "" && (
-      !can(regex("(admin|producer|consumer|app)_pass\\s*=\\s*\"", file("compute.tf"))) &&
+      !can(regex("[A-Za-z_]*(pass|password)\\s*=\\s*\"", file("compute.tf"))) &&
       !can(regex("cookie\\s*=\\s*\"", file("compute.tf")))
     )
     error_message = "A password or the cookie is a literal string in compute.tf instead of a generated value."

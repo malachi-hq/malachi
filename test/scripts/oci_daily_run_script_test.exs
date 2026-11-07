@@ -79,7 +79,9 @@ defmodule OciDailyRunScriptTest do
       *"resource-manager job create-destroy-job"*)
         if [ "${FAKE_DESTROY:-ok}" = "ok" ]; then echo SUCCEEDED; else echo FAILED; fi
         exit 0 ;;
-      *"resource-manager stack update"*) exit 0 ;;
+      *"resource-manager stack update"*)
+        if [ "${FAKE_RESTORE:-ok}" = "fail" ] && [[ "$*" == *applied.zip* ]]; then exit 1; fi
+        exit 0 ;;
       *"resource-manager stack get-stack-tf-state"*)
         out=""; while [ $# -gt 0 ]; do [ "$1" = "--file" ] && out="$2"; shift; done
         printf '%s' "{\"outputs\":{\"client_endpoint\":{\"value\":\"203.0.113.9:4040\"},\"ca_cert_pem\":{\"value\":\"CA-PEM\"},\"probe_password\":{\"value\":\"__SECRET__\"}}}" > "$out"
@@ -206,6 +208,14 @@ defmodule OciDailyRunScriptTest do
   end
 
   @tag :tmp_dir
+  test "each required configuration value is checked by name", ctx do
+    for var <- ~w(STACK_ID CLUSTER_COMPARTMENT_ID TOPIC_ID IMAGE_TAG REGION AVAILABILITY_DOMAIN) do
+      r = run(ctx, [{String.to_atom(var), ""}])
+      assert report(r) =~ "missing configuration: #{var}", "#{var} is not checked"
+    end
+  end
+
+  @tag :tmp_dir
   test "a missing configuration value stops the run before any OCI call, and says which value", ctx do
     r = run(ctx, STACK_ID: "")
     assert r.status != 0
@@ -217,7 +227,7 @@ defmodule OciDailyRunScriptTest do
   end
 
   @tag :tmp_dir
-  test "a SIGTERM during a long apply still runs the teardown, sweep and report", ctx do
+  test "a SIGTERM during a long apply ends the run as apply-stuck, with no destroy", ctx do
     port =
       Port.open({:spawn_executable, System.find_executable("bash")}, [
         :binary,
@@ -243,9 +253,9 @@ defmodule OciDailyRunScriptTest do
     assert_receive_exit(port)
 
     calls = ctx.log |> File.read!() |> String.split("\n", trim: true)
-    assert Enum.any?(calls, &String.contains?(&1, "create-destroy-job")), "SIGTERM skipped the destroy"
-    assert Enum.any?(calls, &String.contains?(&1, "structured-search")), "SIGTERM skipped the final sweep"
-    assert File.read!(Path.join([ctx.dir, "work", "report.txt"])) =~ "result: failed"
+    refute Enum.any?(calls, &String.contains?(&1, "create-destroy-job")), "a stop during an apply started a destroy"
+    assert Enum.any?(calls, &String.contains?(&1, "structured-search")), "the final sweep must still report"
+    assert File.read!(Path.join([ctx.dir, "work", "report.txt"])) =~ "result: apply-stuck"
   end
 
   defp wait_until(fun, tries \\ 600) do
@@ -323,6 +333,26 @@ defmodule OciDailyRunScriptTest do
   end
 
   @tag :tmp_dir
+  test "a restore that keeps failing is retried, then ends the run as restore-failed with no destroy", ctx do
+    work = Path.join(ctx.dir, "work")
+    File.mkdir_p!(work)
+    File.write!(Path.join(work, "applied.zip"), "the configuration of the last good apply")
+
+    r = run(ctx, FAKE_APPLY: "other", FAKE_RESTORE: "fail")
+    assert r.status != 0
+    assert count(r.calls, "applied.zip") == 3, "the restore must be attempted three times"
+    refute Enum.any?(r.calls, &String.contains?(&1, "create-destroy-job")), "a destroy ran against an unrestored config"
+    assert report(r) =~ "result: restore-failed"
+  end
+
+  @tag :tmp_dir
+  test "a successful apply records its configuration, so a later restore has something to put back", ctx do
+    r = run(ctx)
+    assert r.status == 0, r.out
+    assert File.exists?(Path.join(r.work, "applied.zip")), "the applied configuration was not recorded"
+  end
+
+  @tag :tmp_dir
   test "a failing TLS smoke fails the verdict even though the teardown still runs", ctx do
     r = run(ctx, FAKE_SMOKE: "fail")
     assert r.status != 0
@@ -332,10 +362,10 @@ defmodule OciDailyRunScriptTest do
   end
 
   @tag :tmp_dir
-  test "a smoke with no records written fails, even when the probe exits zero" do
-    # The produce check lives in the probe expression: a run that wrote nothing or errored must exit non-zero.
+  test "the TLS smoke expression exits zero only when records were written and nothing failed" do
+    # The exact expression, so inverting or dropping either side changes the text and fails here.
     script = File.read!(@script)
-    assert script =~ "r.records > 0 and r.errors == 0"
+    assert script =~ "if r.records > 0 and r.errors == 0, do: System.halt(0), else: System.halt(3)"
   end
 
   @tag :tmp_dir

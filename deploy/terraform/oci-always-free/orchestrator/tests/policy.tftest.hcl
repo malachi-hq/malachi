@@ -99,6 +99,16 @@ run "the_daily_timer_is_rendered_from_the_configured_hour_not_a_fixed_one" {
   }
 }
 
+run "the_orchestrator_installs_git_for_the_clone" {
+  command = plan
+
+  # The daily run clones main with git, so the template must install it.
+  assert {
+    condition     = var.image_tag != "" && can(regex("\\n  - git\\n", file("templates/orchestrator.cloud-init.yaml.tftpl")))
+    error_message = "The orchestrator must install git, or the daily clone of main fails on every run."
+  }
+}
+
 run "the_run_hour_must_be_a_valid_hour" {
   command = plan
 
