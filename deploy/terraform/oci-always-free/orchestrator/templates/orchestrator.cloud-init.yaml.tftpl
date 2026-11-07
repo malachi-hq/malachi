@@ -8,6 +8,7 @@ packages:
   - python3-venv
   - curl
   - coreutils
+  - git
 
 write_files:
   - path: /etc/malachi-orchestrator.env
@@ -17,8 +18,6 @@ write_files:
       STACK_ID=${stack_id}
       CLUSTER_COMPARTMENT_ID=${cluster_compartment_id}
       TOPIC_ID=${topic_id}
-      CONFIG_COMMIT_SHA=${config_commit_sha}
-      CONFIG_TARBALL_SHA256=${config_tarball_sha256}
       IMAGE_TAG=${image_tag}
       REGION=${region}
       AVAILABILITY_DOMAIN=${availability_domain}

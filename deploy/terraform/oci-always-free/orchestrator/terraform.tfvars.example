@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars (gitignored) and fill in your values. Nothing secret belongs here: the daily run
+# authenticates as this instance (instance principal), and the probe's password lives in the stack state.
+region                      = "sa-saopaulo-1"
+tenancy_ocid                = "ocid1.tenancy.oc1..replace-me"
+orchestrator_compartment_id = "ocid1.compartment.oc1..replace-me-orchestrator"
+cluster_compartment_id      = "ocid1.compartment.oc1..replace-me-cluster"
+availability_domain         = "tXID:SA-SAOPAULO-1-AD-1"
+notify_email                = "replace-me@example.com"
+image_tag                   = "0.22.7"
+stack_id                    = "ocid1.ormstack.oc1..replace-me"

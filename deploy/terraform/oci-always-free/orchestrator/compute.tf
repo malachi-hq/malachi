@@ -31,8 +31,6 @@ resource "oci_core_instance" "orchestrator" {
       stack_id               = var.stack_id
       cluster_compartment_id = var.cluster_compartment_id
       topic_id               = oci_ons_notification_topic.report.id
-      config_commit_sha      = var.config_commit_sha
-      config_tarball_sha256  = var.config_tarball_sha256
       image_tag              = var.image_tag
       region                 = var.region
       availability_domain    = var.availability_domain

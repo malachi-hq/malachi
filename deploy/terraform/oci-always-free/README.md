@@ -24,7 +24,8 @@ The daily run is the systemd timer `malachi-daily.timer` on the orchestrator ins
    names it.
 2. Lists what is left in the cluster compartment, excluding terminated resources. Anything left stops the run before
    the apply. If the count cannot be made, the run stops as `sweep-failed`: a tooling failure is not reported as a leak.
-3. Fetches the configuration of one pinned commit, checks its SHA-256, and updates the Resource Manager stack.
+3. Clones the newest commit of `main`, takes its cluster root, and updates the Resource Manager stack. The commit is
+   written to the report, so each result names the code it ran.
 4. Applies the stack. The apply job is polled until it reaches a final state, for up to three hours. If it is still
    running at that limit, the run stops as `apply-stuck` and no destroy is started against it. An "Out of host
    capacity" failure is retried twice, thirty minutes apart, and then reported as `no-capacity`.
@@ -115,13 +116,9 @@ These steps need your OCI credentials. Nothing in this repository holds them, an
    terraform apply
    ```
 
-   The `config_commit_sha` and `config_tarball_sha256` are the commit the daily run will apply and the SHA-256 of
-   its GitHub tarball. Take the hash by saving the tarball first, then hashing the saved file:
-
-   ```bash
-   curl -fsSL -o malachi-src.tar.gz "https://codeload.github.com/malachi-hq/malachi/tar.gz/<sha>"
-   shasum -a 256 malachi-src.tar.gz
-   ```
+   You do not choose a commit: each daily run clones the newest commit of `main`. For that to be safe, `main` must
+   be protected on GitHub, so that every change reaches it through a reviewed pull request (one approval). The
+   protection is configured in the repository settings, and the run depends on it.
 
 4. **Confirm the e-mail subscription** that OCI Notifications sends after the apply.
 
@@ -137,6 +134,7 @@ These steps need your OCI credentials. Nothing in this repository holds them, an
 The first run is also the first test of several assumptions. The plan lists each one; the run answers them:
 
 - The orchestrator's instance principal can create and wait for apply and destroy jobs in the cluster compartment.
+- `git clone` of `main` works from the orchestrator (the instance needs outbound access to GitHub).
 - The load balancer and the instances come up without a NAT gateway, through the internet gateway alone.
 - `bin/malachi eval` with `Malachi.Loadtest.run/1` starts TLS and reports records written with no errors, which is
   what the smoke checks. The smoke does not read the records back: a produce-then-consume check is not built yet, and
@@ -168,10 +166,12 @@ state read or the destroy job shows up in the run's log with the command's own e
   inside OCI. The run also copies that state to `state.json` in its run directory on the orchestrator's disk, where
   it stays after the run, together with `cacert.pem` and `probe.env`. Restricting stacks and jobs in IAM does not
   protect that copy: restrict who can log in to the orchestrator as well, and treat its boot volume as a secret store.
-- **Pinned by version and by hash.** Provider versions and the lock files, the OCI CLI (`oci-cli==3.96.0`), the
-  commit SHA and the tarball hash. The node image is the newest Ubuntu 24.04 image at the moment of each apply: its
+- **Pinned by version, and the code follows `main`.** Provider versions and the lock files, the OCI CLI
+  (`oci-cli==3.96.0`). Each run applies the newest commit of `main`, and writes that commit into its report. Whatever
+  `main` holds runs in your account the next day, so `main` must be protected: a pull request with one approval.
+  The node image is the newest Ubuntu 24.04 image at the moment of each apply: its
   date is not pinned. The orchestrator's apt packages are not pinned by version. The Docker image is pinned by its
-  tag, not by its digest. Nothing is `latest`, and nothing is piped into a shell.
+  tag, not by its digest. Nothing is `latest` in the image, and nothing is piped into a shell.
 
 ## Known limits
 

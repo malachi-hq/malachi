@@ -9,8 +9,6 @@ variables {
   cluster_compartment_id      = "ocid1.compartment.oc1..testcluster"
   availability_domain         = "replace-me-ad"
   notify_email                = "maintainer@example.com"
-  config_commit_sha           = "0123456789abcdef0123456789abcdef01234567"
-  config_tarball_sha256       = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   image_tag                   = "0.22.7"
   stack_id                    = "ocid1.ormstack.oc1..teststack"
 }
@@ -79,26 +77,6 @@ run "a_stack_ocid_that_is_not_a_resource_manager_stack_is_refused" {
   }
 
   expect_failures = [var.stack_id]
-}
-
-run "a_short_commit_sha_is_refused" {
-  command = plan
-
-  variables {
-    config_commit_sha = "main"
-  }
-
-  expect_failures = [var.config_commit_sha]
-}
-
-run "a_tarball_hash_that_is_not_sha_256_is_refused" {
-  command = plan
-
-  variables {
-    config_tarball_sha256 = "not-a-hash"
-  }
-
-  expect_failures = [var.config_tarball_sha256]
 }
 
 run "latest_is_never_a_deployable_image_tag" {

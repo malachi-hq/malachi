@@ -1,9 +1,13 @@
 #!/bin/bash
 # Daily ephemeral cluster run, executed as a systemd oneshot on the orchestrator micro under instance principal.
 #
-# Order: check the configuration, sweep the cluster compartment, fetch the pinned config, apply it, wait for the
+# Order: check the configuration, sweep the cluster compartment, clone the newest commit of main, apply its cluster root, wait for the
 # load balancer to report both A1 nodes healthy, run the probes through the public TLS endpoint, restart one node
 # under load, read the micro's memory, destroy, sweep again, report.
+#
+# Every run takes the newest commit of main, clones it, and applies the cluster root of that commit. The commit is
+# written to the report, so every result names the code it ran. Trust in that code rests on GitHub's transport and on
+# the review that main requires (a pull request with one approval): the run applies whatever main holds.
 #
 # The destroy and the final sweep run from an EXIT trap, so a failure in any step still tears the cluster down.
 # SIGTERM, SIGINT and SIGHUP exit through the same trap. SIGKILL and a reboot cannot run a trap: the next day's
@@ -14,6 +18,7 @@
 set -euo pipefail
 
 WORK="${WORK:-/var/lib/malachi-orchestrator/run}"
+REPO_URL="${REPO_URL:-https://github.com/malachi-hq/malachi.git}"
 REPORT="$WORK/report.txt"
 OCI=(oci --auth instance_principal --region "${REGION:-}")
 DOCKER="${DOCKER:-docker}"
@@ -23,6 +28,7 @@ APPLY_WAIT_LIMIT="${APPLY_WAIT_LIMIT:-10800}"   # seconds to wait for one apply 
 
 RESULT="unknown"
 DESTROYED="no"
+RUN_COMMIT="unknown"
 
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$REPORT" >&2; }
 
@@ -37,7 +43,7 @@ publish_report() {
 # Every value the run needs. A missing one stops the run before any OCI call, and the report says which.
 check_config() {
   local v missing=""
-  for v in STACK_ID CLUSTER_COMPARTMENT_ID TOPIC_ID CONFIG_COMMIT_SHA CONFIG_TARBALL_SHA256 IMAGE_TAG REGION AVAILABILITY_DOMAIN; do
+  for v in STACK_ID CLUSTER_COMPARTMENT_ID TOPIC_ID IMAGE_TAG REGION AVAILABILITY_DOMAIN; do
     [ -n "${!v:-}" ] || missing="$missing $v"
   done
   if [ -n "$missing" ]; then log "missing configuration:$missing"; return 1; fi
@@ -77,16 +83,13 @@ stack_variables() {
 }
 
 fetch_config() {
-  local tarball="$WORK/src.tar.gz"
-  curl -fsSL -o "$tarball" "https://codeload.github.com/malachi-hq/malachi/tar.gz/$CONFIG_COMMIT_SHA"
-  echo "$CONFIG_TARBALL_SHA256  $tarball" | sha256sum -c --quiet \
-    || { log "config tarball does not match its pinned SHA-256: refusing to apply"; return 1; }
-  rm -rf "$WORK/src" && mkdir -p "$WORK/src"
-  # Extract the whole archive, then take the cluster root. A GitHub tarball has one top directory
-  # (malachi-<sha>/), and selecting members by path would depend on how each tar treats that prefix.
-  tar -xzf "$tarball" -C "$WORK/src" --strip-components=1
+  # A shallow clone of main: the newest commit at the moment of the clone. Its HEAD is the commit this run applies.
+  rm -rf "$WORK/src"
+  git clone --quiet --depth 1 --branch main "$REPO_URL" "$WORK/src" \
+    || { log "could not clone $REPO_URL (branch main)"; return 1; }
+  RUN_COMMIT=$(git -C "$WORK/src" rev-parse HEAD)
   [ -d "$WORK/src/deploy/terraform/oci-always-free/cluster" ] \
-    || { log "the pinned commit has no cluster root at deploy/terraform/oci-always-free/cluster"; return 1; }
+    || { log "main at $RUN_COMMIT has no cluster root at deploy/terraform/oci-always-free/cluster"; return 1; }
   # --config-source takes a .zip of the configuration (oci resource-manager stack update reference), so the
   # archive is built here and passed as a file. Only the cluster root's own files go in.
   python3 - "$WORK/src/deploy/terraform/oci-always-free/cluster" "$WORK/cluster.zip" <<'PY'
@@ -103,7 +106,7 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
 PY
   "${OCI[@]}" resource-manager stack update --stack-id "$STACK_ID" \
     --config-source "$WORK/cluster.zip" --variables "$(stack_variables)" --force >/dev/null
-  log "stack config updated to commit $CONFIG_COMMIT_SHA"
+  log "stack config updated to main at commit $RUN_COMMIT"
 }
 
 # Puts back the configuration of the last successful apply, so the destroy runs against the config that created
@@ -306,6 +309,7 @@ on_exit() {
   fi
   if [ "$RESULT" = "unknown" ]; then RESULT=$([ "$rc" -eq 0 ] && echo "pass" || echo "failed"); fi
   if [ "$RESULT" != "pass" ] && [ "$rc" -eq 0 ]; then rc=1; fi
+  log "commit: $RUN_COMMIT"
   log "result: $RESULT | smoke: ${SMOKE:-not-run} | plaintext: ${PLAIN:-not-run} | chaos: ${CHAOS:-not-run} | micro memory: ${MEMORY_STATUS:-not-measured}"
   log "informative only, not a benchmark: this rig measures correctness under load and failure, never throughput"
   publish_report

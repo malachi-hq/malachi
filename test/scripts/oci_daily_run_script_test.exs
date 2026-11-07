@@ -1,5 +1,5 @@
 defmodule OciDailyRunScriptTest do
-  # The daily run is a shell script that drives the OCI CLI, Docker and curl. These tests run the real script
+  # The daily run is a shell script that drives the OCI CLI, Docker and git. These tests run the real script
   # with stand-ins for those commands on PATH. Each stand-in writes its argv to a log, so the tests check what the
   # script did and in what order. The FAKE_* variables pick the scenario. The real GNU coreutils come from
   # Homebrew's gnubin when present (sha256sum and date -d are GNU), so the same script runs here and on the Linux CI.
@@ -17,28 +17,38 @@ defmodule OciDailyRunScriptTest do
     log = Path.join(dir, "calls.log")
     File.write!(log, "")
 
-    tarball = build_tarball(dir)
+    repo = build_repo(dir)
     write_stub(stubs, "oci", oci_stub())
     write_stub(stubs, "docker", docker_stub())
-    write_stub(stubs, "curl", curl_stub())
     # Short real sleeps keep the polling loops fast while still letting a signal arrive between them.
     write_stub(stubs, "sleep", "#!/bin/bash\necho \"sleep $*\" >> \"$FAKE_LOG\"\n/bin/sleep 0.05\n")
 
-    %{dir: dir, stubs: stubs, log: log, tarball: tarball}
+    %{dir: dir, stubs: stubs, log: log, repo: repo}
   end
 
-  # A tarball shaped like the repository's: the cluster root at the path the script extracts.
-  defp build_tarball(dir) do
-    src = Path.join(dir, "src/malachi-abc/deploy/terraform/oci-always-free/cluster")
-    File.mkdir_p!(src)
-    File.write!(Path.join(src, "main.tf"), "# cluster root\n")
-    tgz = Path.join(dir, "source.tar.gz")
-    {_, 0} = System.cmd("tar", ["-czf", tgz, "-C", Path.join(dir, "src"), "malachi-abc"])
-    tgz
+  # A git repository on branch main, with the cluster root committed: what the daily run clones.
+  defp build_repo(dir) do
+    repo = Path.join(dir, "repo")
+    File.mkdir_p!(Path.join(repo, "deploy/terraform/oci-always-free/cluster"))
+    File.write!(Path.join(repo, "deploy/terraform/oci-always-free/cluster/main.tf"), "# cluster root\n")
+    git!(repo, ["init", "-q", "-b", "main"])
+    git!(repo, ["add", "-A"])
+    commit!(repo, "init")
+    repo
   end
 
-  defp sha256_hex(path) do
-    path |> File.read!() |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
+  defp git!(dir, args) do
+    {_, 0} = System.cmd("git", args, cd: dir, stderr_to_stdout: true)
+    :ok
+  end
+
+  defp commit!(dir, message) do
+    git!(dir, ["-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-q", "-m", message])
+  end
+
+  defp head_of(repo) do
+    {out, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo)
+    String.trim(out)
   end
 
   defp write_stub(dir, name, body) do
@@ -119,20 +129,10 @@ defmodule OciDailyRunScriptTest do
     """
   end
 
-  defp curl_stub do
-    ~S"""
-    #!/bin/bash
-    echo "curl $*" >> "$FAKE_LOG"
-    out=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
-    cp "$FAKE_TARBALL" "$out"
-    """
-  end
-
   @config_vars [
     {"STACK_ID", "ocid1.ormstack.oc1..fake"},
     {"CLUSTER_COMPARTMENT_ID", "ocid1.compartment.oc1..cluster"},
     {"TOPIC_ID", "ocid1.onstopic.oc1..fake"},
-    {"CONFIG_COMMIT_SHA", String.duplicate("a", 40)},
     {"IMAGE_TAG", "0.22.7"},
     {"REGION", "replace-me-region"},
     {"AVAILABILITY_DOMAIN", "replace-me-ad"}
@@ -145,8 +145,7 @@ defmodule OciDailyRunScriptTest do
       [
         {"PATH", Enum.join([ctx.stubs, @gnubin, System.get_env("PATH")], ":")},
         {"FAKE_LOG", ctx.log},
-        {"FAKE_TARBALL", ctx.tarball},
-        {"CONFIG_TARBALL_SHA256", sha256_hex(ctx.tarball)},
+        {"REPO_URL", "file://" <> ctx.repo},
         {"WORK", work},
         {"DOCKER", "docker"}
       ] ++ @config_vars
@@ -229,9 +228,8 @@ defmodule OciDailyRunScriptTest do
             [
               {"PATH", Enum.join([ctx.stubs, @gnubin, System.get_env("PATH")], ":")},
               {"FAKE_LOG", ctx.log},
-              {"FAKE_TARBALL", ctx.tarball},
+              {"REPO_URL", "file://" <> ctx.repo},
               {"FAKE_APPLY", "hang"},
-              {"CONFIG_TARBALL_SHA256", sha256_hex(ctx.tarball)},
               {"WORK", Path.join(ctx.dir, "work")},
               {"DOCKER", "docker"}
             ] ++ @config_vars,
@@ -389,13 +387,30 @@ defmodule OciDailyRunScriptTest do
   end
 
   @tag :tmp_dir
-  test "a config tarball that does not match its pinned SHA-256 is never applied", ctx do
-    r = run(ctx, CONFIG_TARBALL_SHA256: String.duplicate("0", 64))
+  test "a repository that cannot be cloned stops the run before any apply, and the destroy still runs", ctx do
+    r = run(ctx, REPO_URL: "file://" <> Path.join(ctx.dir, "no-such-repo"))
     assert r.status != 0
-    assert r.out =~ "does not match its pinned SHA-256"
-    refute Enum.any?(r.calls, &String.contains?(&1, "resource-manager stack update"))
+    assert report(r) =~ "could not clone"
     refute Enum.any?(r.calls, &String.contains?(&1, "create-apply-job"))
     assert Enum.any?(r.calls, &String.contains?(&1, "create-destroy-job"))
+  end
+
+  @tag :tmp_dir
+  test "a main without the cluster root stops the run before any apply", ctx do
+    git!(ctx.repo, ["rm", "-rq", "deploy"])
+    commit!(ctx.repo, "remove the cluster root")
+    r = run(ctx)
+    assert r.status != 0
+    assert report(r) =~ "has no cluster root"
+    refute Enum.any?(r.calls, &String.contains?(&1, "create-apply-job"))
+  end
+
+  @tag :tmp_dir
+  test "the report names the commit main had when the run cloned it", ctx do
+    r = run(ctx)
+    assert r.status == 0, r.out
+    assert report(r) =~ "commit: #{head_of(ctx.repo)}"
+    assert report(r) =~ "stack config updated to main at commit #{head_of(ctx.repo)}"
   end
 
   @tag :tmp_dir

@@ -38,26 +38,6 @@ variable "notify_email" {
   type        = string
 }
 
-variable "config_commit_sha" {
-  description = "Commit of this repository whose cluster/ root the daily run applies. Pinned, never a branch."
-  type        = string
-
-  validation {
-    condition     = can(regex("^[0-9a-f]{40}$", var.config_commit_sha))
-    error_message = "config_commit_sha must be a full 40-character commit SHA."
-  }
-}
-
-variable "config_tarball_sha256" {
-  description = "SHA-256 of the GitHub tarball for config_commit_sha. The daily run refuses any archive that does not match."
-  type        = string
-
-  validation {
-    condition     = can(regex("^[0-9a-f]{64}$", var.config_tarball_sha256))
-    error_message = "config_tarball_sha256 must be a 64-character hex SHA-256."
-  }
-}
-
 variable "image_tag" {
   description = "Pinned Malachi image tag the probe runs. Never latest."
   type        = string
