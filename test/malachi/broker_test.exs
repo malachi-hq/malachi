@@ -1432,6 +1432,23 @@ defmodule Malachi.BrokerTest do
       assert refreshed.offsets[root_id] == 1
     end
 
+    test "drop_stale_active_segments/1 takes the replica set the refreshed metadata holds for an active segment",
+         %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce_only(broker, store, "events", [record("v0", "k0")])
+      %{replica_set: [cached_primary | _] = cached, bytes: bytes} = broker.segments[root_id]
+      assert {:active, {^root_id, 0}, ^cached_primary} = Broker.stream_target(broker, root_id)
+
+      # A healing pass on another node replaced the primary: the metadata names a new set while this
+      # frontend still caches the one it registered, and would send its streams to a primary nobody names.
+      replaced = [:replaced_primary | cached]
+      {dsrsm, :ok} = DSRSM.command(broker.dsrsm, "events", {:set_segment_replicas, {root_id, 0}, replaced})
+      refreshed = Broker.drop_stale_active_segments(%{broker | dsrsm: dsrsm})
+
+      assert %{id: {^root_id, 0}, replica_set: ^replaced, bytes: ^bytes} = refreshed.segments[root_id]
+      assert Broker.stream_target(refreshed, root_id) == {:active, {root_id, 0}, :replaced_primary}
+    end
+
     test "a zero-length seal is stepped over rather than answered with :eof", %{store: store} do
       # Reachable on both seal paths now (a split or a failover on a segment registered and never
       # written). The zero-length segment shares its successor's start offset, so a read at that offset

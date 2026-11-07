@@ -1167,6 +1167,13 @@ defmodule Malachi.Broker do
   when the store refused a batch. This makes the convergence level-triggered on every node instead,
   bounded by the reconcile interval.
 
+  A cached segment the control plane still calls active takes the replica set the control plane holds for
+  it. Only the node that applied a replica change (`apply_heal/2`, or a command answered on this loop)
+  updated its own cache, so a healing pass that replaced a replica on another node left this frontend
+  with the old set: a primary the control plane no longer names, which this node's streams were then
+  told to follow (`stream_target/2`) while the routes sent them back here, for as long as the segment
+  stayed open.
+
   An owed roll whose segment is not cached here (an age roll the sweep asked for, `request_rolls/2`) is
   dropped too once the control plane has moved past it: the segment is sealed, or the range's head is
   now a LATER segment (a higher sequence). The sequence grows for as long as the range keeps a segment
@@ -1187,7 +1194,10 @@ defmodule Malachi.Broker do
           %{state: :sealed, start_offset: start_offset, length: length} when is_integer(length) ->
             forget_sealed(acc, range_id, active.id, start_offset + length)
 
-          _still_active_or_unknown ->
+          %{state: :active, replica_set: [_ | _] = replica_set} ->
+            acc |> update_active_replica_set(active.id, replica_set) |> drop_if_range_retired(range_id)
+
+          _unknown ->
             drop_if_range_retired(acc, range_id)
         end
       end)
