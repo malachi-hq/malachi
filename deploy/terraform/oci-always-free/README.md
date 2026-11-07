@@ -2,9 +2,10 @@
 
 This example builds a three-node Malachi cluster on Oracle Cloud's Always Free tier, runs a fixed set of checks
 against it, prints a report, and destroys it. It runs every day on a timer, so the cluster exists for the length
-of one run. A normal finish, a failed step and a SIGTERM all reach the teardown. Only a SIGKILL or a reboot of the
-orchestrator can skip it, and then the next day's run finds the leftovers, destroys them, and reports the leak
-before it applies anything.
+of one run. A normal finish and a failed step both reach the teardown, and a stop during the destroy lets the destroy
+and the report finish. A stop during an apply ends the run as `apply-stuck` with no destroy, because a destroy must not
+race an apply that may still be running. A SIGKILL or a reboot can skip the teardown; then the next day's run finds the
+leftovers, destroys them, and reports before it applies anything.
 
 It is a reference, not a managed product. Its purpose is to show what Malachi does on real machines, on a
 schedule anyone can read in the run's log, at no cost.
@@ -37,8 +38,11 @@ The daily run is the systemd timer `malachi-daily.timer` on the orchestrator ins
 7. Restarts one node while a load runs. The node rotates each day, so all three are restarted over three days.
 8. Reads the peak memory of the micro instance from the built-in `oci_computeagent` namespace.
 9. Destroys the stack. Before the destroy, the configuration of the last successful apply is put back on the stack,
-   so a broken new commit cannot block the teardown. It then lists what is left again and publishes the report to
-   the topic the maintainer subscribed to.
+   so a broken new commit cannot block the teardown. The restore is tried three times; if it still fails, the run ends
+   as `restore-failed` with no destroy, and the next run tries again. On an orchestrator where no apply has ever
+   succeeded there is nothing to restore, so the destroy uses the stack's configuration, which is the only one that
+   can remove what a failed first apply created. It then lists what is left again and publishes the report to the
+   topic the maintainer subscribed to.
 
 The report ends with a line that says the numbers are informative only. The exit code agrees with the verdict.
 
@@ -48,11 +52,12 @@ The report ends with a line that says the numbers are informative only. The exit
 | --- | --- |
 | `pass` | Every check passed: TLS smoke, plaintext refused, the restarted node recovered, and the cluster was torn down. |
 | `failed` | A check failed, or the run was stopped by a signal. The report says which check. The teardown still ran. |
-| `config-missing` | A configuration value is not set. Nothing ran against OCI. The report names the value. |
+| `config-missing` | A configuration value is not set. No cluster operation ran, and the report still goes to the topic, naming the value. |
+| `restore-failed` | The last applied configuration could not be put back on the stack after three tries. **No destroy was started**, and the next run retries. |
 | `sweep-failed` | The cluster compartment could not be counted, before the apply or after the destroy. Check it by hand. |
 | `no-capacity` | Oracle had no A1 capacity in the availability domain after three attempts. Retry on another day or another domain. |
 | `apply-failed` | The apply failed for a reason other than capacity. Read the job logs in Resource Manager. |
-| `apply-stuck` | The apply job was still running at the three-hour limit. **No destroy was started.** Check the job and the stack. |
+| `apply-stuck` | The apply job was still running at the three-hour limit, or the run was stopped during the apply wait. **No destroy was started.** Check the job and the stack. |
 | `not-ready` | The nodes never reported healthy at the load balancer. |
 | `leftovers` | The cluster compartment was not empty before the apply. Nothing was applied; the destroy then ran. |
 | `destroy-failed` | The destroy job did not succeed. **The cluster may still exist.** Check the stack in Resource Manager. |
