@@ -262,6 +262,14 @@ defmodule StorageChaosTest do
       refute output =~ "FAIL"
     end
 
+    test "waits for a follower that holds a copy of the segment, rather than damage one it does not", ctx do
+      assert {output, 0} = run_drill(ctx, [{"STUB_COPY_AFTER", "2"}])
+      assert output =~ "target: /data/malachi_log/chaos_acked-r0-s2 on malachi@malachi2 (primary malachi@malachi1)"
+      assert output =~ "torn write injected and node restarted"
+      refute output =~ "FAIL"
+      assert File.read!(ctx.log <> ".topology") |> String.trim() |> String.to_integer() >= 3
+    end
+
     test "fails after a minute with no active segment, and shows what the topology held", ctx do
       # 12 looks per active event: e, e2 and f all find nothing.
       assert {output, 1} = run_drill(ctx, [{"STUB_ACTIVE_AFTER", "1000"}])
@@ -375,6 +383,8 @@ defmodule StorageChaosTest do
   #   STUB_REPAIR        never: the repair never converges
   #   STUB_ACTIVE_AFTER  how many topology calls list no active segment before one appears
   #   STUB_TOPOLOGY      unreadable: every topology call fails
+  #   STUB_COPY_AFTER    how many looks at a follower find no log file of the segment before one appears; a
+  #                      damage run before it appears fails, as it does when its file is missing
   defp docker_stub do
     ~S"""
     #!/usr/bin/env bash
@@ -407,6 +417,10 @@ defmodule StorageChaosTest do
       info) echo "docker kernel 6.8.0-stub, 4 cpus, Stub OS" ;;
       exec)
         case "$*" in
+          *"ls /data/malachi_log/"*".log"*)
+            looks=$(( $(cat "$STUB_LOG.copy" 2>/dev/null || echo 0) + 1 ))
+            echo "$looks" > "$STUB_LOG.copy"
+            [ "$looks" -gt "${STUB_COPY_AFTER:-0}" ] || exit 1 ;;
           *md5sum*)
             if [ "${STUB_IDX:-}" = swapped ]; then
               case "$*" in
@@ -493,6 +507,11 @@ defmodule StorageChaosTest do
             [ "$content" = ok ] ;;
           *"chaos_checker.exs control-plane"*) echo "CONTROL-PLANE OK groups=9 projection=all" ;;
           *--scenario*) echo '{"errors":0,"dropped":0,"records_per_s":100}' ;;
+          *"dir=/data/malachi_log/"*)
+            if [ "$(cat "$STUB_LOG.copy" 2>/dev/null || echo 0)" -le "${STUB_COPY_AFTER:-0}" ]; then
+              echo "ls: /data/malachi_log/chaos_acked-r0-s2/*.log: No such file or directory"
+              exit 1
+            fi ;;
           *) : ;;
         esac ;;
       *) : ;;

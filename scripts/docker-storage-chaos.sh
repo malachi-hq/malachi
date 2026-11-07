@@ -102,16 +102,24 @@ follower_of() {
 
 seg_dir() { echo "$DATA_DIR/${CHAOS_TOPIC}-r$(seg_field "$1" range)-s$(seg_field "$1" seq)"; }
 
-# Prints the first SEGMENT line in state $1, waiting up to a minute for one. A single look is not enough: right
-# after a follower restarts, the chaos topic's only range can sit between the fence of its last segment and the
-# creation of the next, with nothing active at that instant (seen once on CI, for #172). The raw answer of the
-# last try stays in $WORK/topology.txt, so a failure can say whether the topology had no such segment or could
-# not be read at all.
+# Whether the follower of the SEGMENT line $1 holds a log file of it. A follower creates its copy with the
+# first record it is sent, so a segment opened a moment ago has none there yet, and a damage aimed at it
+# finds nothing to damage: the event then fails over a copy that was never there to break.
+follower_holds_copy() {
+  docker exec "$(container_of "$(follower_of "$1")")" sh -c "test -n \"\$(ls $(seg_dir "$1")/*.log 2>/dev/null)\"" >/dev/null 2>&1
+}
+
+# Prints the first SEGMENT line in state $1 whose follower holds a copy to damage, waiting up to a minute for
+# one. A single look is not enough: right after a follower restarts, the chaos topic's only range can sit
+# between the fence of its last segment and the creation of the next, with nothing active at that instant
+# (seen once on CI, for #172), and the next can be open before its follower holds any of it. The raw answer
+# of the last try stays in $WORK/topology.txt, so a failure can say whether the topology had no such segment
+# or could not be read at all.
 pick_segment() {
   for _ in $(seq 1 12); do
     checker_run "topology $CHAOS_HOSTS $CHAOS_TOPIC" >"$WORK/topology.txt" 2>&1
     found=$(grep '^SEGMENT' "$WORK/topology.txt" | grep "state=$1" | head -1)
-    if [ -n "$found" ]; then
+    if [ -n "$found" ] && follower_holds_copy "$found"; then
       echo "$found"
       return 0
     fi
