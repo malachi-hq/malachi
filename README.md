@@ -126,6 +126,10 @@ For a full multi-node deploy, [`deploy/kubernetes/`](deploy/kubernetes/README.md
 CP cluster as a StatefulSet with stable Raft identities, zone-aware placement (`min_domains`), and the
 health/readiness probes wired up.
 
+For a cluster that costs nothing and is torn down after every run, [`deploy/terraform/oci-always-free/`](deploy/terraform/oci-always-free/README.md)
+builds three nodes on Oracle Cloud's Always Free tier, runs the TLS smoke and a node restart under load, prints a report,
+and destroys the cluster. It measures correctness, not throughput: nothing from that rig is a benchmark.
+
 ## 🚀 Quick Start with Docker
 
 **Multi-Architecture Support**: Works on AMD64 (Intel/AMD) and ARM64 (Apple Silicon, AWS Graviton)

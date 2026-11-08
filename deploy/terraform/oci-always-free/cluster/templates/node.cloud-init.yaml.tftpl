@@ -1,0 +1,79 @@
+#cloud-config
+# Rendered per node by compute.tf. Secrets land on the instance only, in root-owned files, and the instance
+# metadata is readable only by that instance. Nothing here is piped into a shell.
+write_files:
+  - path: /etc/malachi/malachi.env
+    permissions: "0600"
+    owner: root:root
+    content: |
+      RELEASE_DISTRIBUTION=name
+      RELEASE_NODE=malachi@${node_fqdn}
+      RELEASE_COOKIE=${cookie}
+      ERL_AFLAGS=-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100
+      MALACHI_DIST_TLS=true
+      MALACHI_DIST_TLS_OPTFILE=/etc/malachi/dist/dist_tls.conf
+      MALACHI_TLS_CERTFILE=/etc/malachi/client/cert.pem
+      MALACHI_TLS_KEYFILE=/etc/malachi/client/key.pem
+      MALACHI_REQUIRE_TLS=true
+      MALACHI_CLUSTER_STRATEGY=epmd
+      MALACHI_LOG_CLUSTER=malachi_log
+      MALACHI_LOG_NODES=${log_nodes}
+      MALACHI_LOG_REPLICATION_FACTOR=3
+      MALACHI_RA_DATA_DIR=/var/lib/malachi/ra
+      MALACHI_LOG_DATA_DIR=/var/lib/malachi/log
+      MALACHI_TCP_PORT=4040
+      MALACHI_DASHBOARD_PORT=4041
+      MALACHI_ADMIN_PASS=${admin_pass}
+      MALACHI_PRODUCER_PASS=${producer_pass}
+      MALACHI_CONSUMER_PASS=${consumer_pass}
+      MALACHI_APP_PASS=${app_pass}
+  - path: /etc/malachi/dist/node.key
+    permissions: "0600"
+    encoding: b64
+    content: ${node_key_b64}
+  - path: /etc/malachi/dist/node.crt
+    permissions: "0644"
+    encoding: b64
+    content: ${node_cert_b64}
+  - path: /etc/malachi/dist/ca.crt
+    permissions: "0644"
+    encoding: b64
+    content: ${ca_cert_b64}
+  - path: /etc/malachi/dist/dist_tls.conf
+    permissions: "0644"
+    content: |
+      [
+        {server, [
+          {certfile, "/etc/malachi/dist/node.crt"},
+          {keyfile, "/etc/malachi/dist/node.key"},
+          {cacertfile, "/etc/malachi/dist/ca.crt"},
+          {verify, verify_peer},
+          {fail_if_no_peer_cert, true}
+        ]},
+        {client, [
+          {certfile, "/etc/malachi/dist/node.crt"},
+          {keyfile, "/etc/malachi/dist/node.key"},
+          {cacertfile, "/etc/malachi/dist/ca.crt"},
+          {verify, verify_peer}
+        ]}
+      ].
+  - path: /etc/malachi/client/key.pem
+    permissions: "0600"
+    encoding: b64
+    content: ${client_key_b64}
+  - path: /etc/malachi/client/cert.pem
+    permissions: "0644"
+    encoding: b64
+    content: ${client_cert_b64}
+
+# Docker from the distribution's own package, never a download piped into a shell.
+package_update: true
+packages:
+  - docker.io
+
+runcmd:
+  # The node must resolve its own FQDN before it starts: that name is its Erlang identity. Fail loudly if not.
+  - ["sh", "-c", "for i in $(seq 1 60); do getent hosts ${node_fqdn} && exit 0; sleep 5; done; echo ${node_fqdn} did not resolve >&2; exit 1"]
+  - ["sh", "-c", "mkdir -p /var/lib/malachi/ra /var/lib/malachi/log && chown -R 1000:1000 /var/lib/malachi /etc/malachi/dist /etc/malachi/client"]
+  - ["systemctl", "enable", "--now", "docker"]
+  - ["sh", "-c", "docker run -d --name malachi --restart unless-stopped --network host --env-file /etc/malachi/malachi.env -v /etc/malachi/dist:/etc/malachi/dist:ro -v /etc/malachi/client:/etc/malachi/client:ro -v /var/lib/malachi:/var/lib/malachi hectorcardoso/malachi:${image_tag}"]
