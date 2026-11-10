@@ -1052,12 +1052,19 @@ defmodule Malachi.Broker do
     end
   end
 
-  @doc "Whether every record's key falls inside `range_id`'s slice of its topic's keyspace."
+  @doc """
+  Whether every record's key falls inside `range_id`'s slice of its topic's keyspace. A range that holds
+  the whole keyspace (every topic's first one) holds every key, so its records are not hashed, as the
+  produce plan does not hash them for a topic with that one range.
+  """
   @spec keys_in_range?(t(), Metadata.range_id(), [Record.t()]) :: boolean()
   def keys_in_range?(%__MODULE__{} = broker, range_id, records) do
     topic = topic_of_range(range_id)
 
     case {DSRSM.get_topic(broker.dsrsm, topic), DSRSM.get_range(broker.dsrsm, topic, range_id)} do
+      {%{keyspace_size: size}, %{key_start: 0, key_end: size}} ->
+        true
+
       {%{keyspace_size: size}, %{key_start: key_start, key_end: key_end}} ->
         Enum.all?(records, fn record ->
           position = Keyspace.position_of(record.key, size)

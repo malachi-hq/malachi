@@ -254,6 +254,21 @@ defmodule Malachi.BrokerTest do
     end
   end
 
+  describe "keys_in_range?/3 (whether a producer stream's append belongs to its range)" do
+    test "a range holding the whole keyspace holds every key; a child only the keys of its slice" do
+      {broker, root} = broker_with_topic()
+      records = for index <- 0..29, do: record("v#{index}", "k#{index}")
+      assert Broker.keys_in_range?(broker, root, records)
+
+      {broker, {:ok, left, right}} = Broker.split_range(broker, root)
+      refute Broker.keys_in_range?(broker, left, records)
+      {in_left, in_right} = Enum.split_with(records, &(Keyspace.position_of(&1.key, 16) < 8))
+      assert Broker.keys_in_range?(broker, left, in_left)
+      assert Broker.keys_in_range?(broker, right, in_right)
+      refute Broker.keys_in_range?(broker, {"events", 99}, in_left)
+    end
+  end
+
   describe "min_domains hard policy (failure-domain hardening)" do
     # three brokers over only two racks (a, b)
     @racks %{a1: %{"rack" => "a"}, a2: %{"rack" => "a"}, b1: %{"rack" => "b"}}
