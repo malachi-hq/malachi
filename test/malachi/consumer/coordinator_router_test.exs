@@ -80,6 +80,20 @@ defmodule Malachi.Consumer.CoordinatorRouterTest do
       assert %{ring: ^ring, servers: %{v1: {:meta_v1, _}}} = Router.topology()
     end
 
+    test "a vnode published as the members of its placement resolves to the leader ra knows of" do
+      # The shape a sharded node publishes (`RingTopology.servers/2`): a list of members, not one server id.
+      restore_topology_on_exit()
+      vnode = :"router_list_#{System.unique_integer([:positive])}"
+      members = [{vnode, :first@nowhere}, {vnode, :second@nowhere}]
+      :ok = :ra_leaderboard.record(vnode, {vnode, :second@nowhere}, members)
+      on_exit(fn -> :ra_leaderboard.clear(vnode) end)
+      {:ok, ring} = HashRing.add_vnode(HashRing.new(), vnode, 0)
+      :ok = Router.put_topology(ring, %{vnode => members})
+
+      assert Router.resolve(@name, "t") == {Router.coordinator_name(@name, vnode), :second@nowhere}
+      refute Router.owns?("t")
+    end
+
     test "a leader that has to be asked of another node is asked briefly, and unanswered means local" do
       restore_topology_on_exit()
       # a member that never answers: this node hosts no member of the cluster, so its leader is not in ra's

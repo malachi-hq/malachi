@@ -11,6 +11,7 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.Rebalance
+  alias Malachi.Cluster.RingTopology
   alias Malachi.Consumer.CoordinatorRouter
   alias Malachi.Consumer.CoordinatorRouterMultinodeFixtures, as: Fixtures
   alias Malachi.Consumer.GroupCoordinator
@@ -140,6 +141,45 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
     assert :erpc.call(new_leader, CoordinatorRouter, :owns?, ["t"]) == true
     # resolve on the new leader now returns the bare per-vnode name (local), members reconverge here
     assert :erpc.call(new_leader, CoordinatorRouter, :resolve, [@coord, "t"]) == coord_name
+  end
+
+  test "a node outside the vnode routes through its placement's members, the first one dead included" do
+    {_pa, node_a} = start_peer()
+    {_pb, node_b} = start_peer()
+    {_pc, node_c} = start_peer()
+    vnode = :"vn_#{System.unique_integer([:positive])}"
+
+    {:ok, _} = :erpc.call(node_a, MetadataServer, :start, [vnode, [node_a]])
+    assert Rebalance.ra_add_member(vnode, node_b, [node_a]) == :ok
+    assert Rebalance.ra_add_member(vnode, node_c, [node_a, node_b]) == :ok
+    {:ok, leader} = leader_via(vnode, node_a)
+    followers = [node_a, node_b, node_c] -- [leader]
+
+    # what a node hosting no member of the vnode publishes (`RingTopology.servers/2`): every member, here
+    # with the leader first, so the leader's death leaves the first member of the location dead. This test
+    # node is that node: ra's local table has no leader for the vnode, so the location is asked.
+    key = {CoordinatorRouter, :topology}
+    previous = :persistent_term.get(key, nil)
+    on_exit(fn -> if previous, do: :persistent_term.put(key, previous), else: :persistent_term.erase(key) end)
+    {:ok, ring} = HashRing.add_vnode(HashRing.new(), vnode, 0)
+    :ok = CoordinatorRouter.put_topology(ring, %{vnode => RingTopology.location(vnode, [leader | followers])})
+    coord_name = CoordinatorRouter.coordinator_name(@coord, vnode)
+
+    assert CoordinatorRouter.resolve(@coord, "t") == {coord_name, leader}
+    refute CoordinatorRouter.owns?("t")
+
+    :ok = :erpc.call(leader, :ra, :stop_server, [:default, {vnode, leader}])
+
+    # the dead first member passes the question on to the next, which names the newly elected leader
+    assert {:ok, {^coord_name, new_leader}} =
+             retry(fn ->
+               case CoordinatorRouter.resolve(@coord, "t") do
+                 {^coord_name, owner} when owner != leader -> {:ok, {coord_name, owner}}
+                 other -> other
+               end
+             end)
+
+    assert new_leader in followers
   end
 
   test "a cluster whose metadata is one Raft group coordinates every group on its leader, under one name" do
