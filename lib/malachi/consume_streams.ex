@@ -9,8 +9,11 @@ defmodule Malachi.ConsumeStreams do
   The broker never reads for it: it hands the connection a view of the range (`Malachi.Broker.ReadView`)
   when the stream opens and each time the range's durable records grow past what the stream read, and the
   connection reads through it and pushes `records` pages, each carrying the position of every record and of
-  the page's end. A view reaches only as far as a replication quorum acknowledged
-  (`Malachi.Broker.durable_end/2`), so a consumer never reads a record its producer was not told is stored.
+  the page's end. A view reaches only as far as the range's durable end (`Malachi.Broker.durable_end/2`):
+  every record whose produce was acknowledged is below it, and nothing a seal could later cut off is, so no
+  offset a consumer read is ever reused. It can include records whose produce was answered with an error
+  (one that timed out but landed, or a tail a failover's seal kept), which a producer that sends them again
+  delivers twice: delivery is at least once.
   A page holds at most `max` records and about `max_bytes` bytes, and always one record however large, so
   the byte limit is a soft one; both are capped by the server. One page is read per message, so each goes
   out before the next is read.

@@ -157,11 +157,14 @@ defmodule Malachi.Broker do
             # Where each range's records are known to be durable: the offset after the last record of a
             # produce this frontend answered as stored (`mark_durable/2`, once every dispatch of it was
             # acknowledged by a replication quorum, or a group commit flushed it), and set to a sealed
-            # segment's end when this frontend learns of the seal. Nothing else moves it: a primary's local
-            # end counts records no quorum holds yet. `offsets` runs ahead of it by every batch planned and
-            # not yet answered. Consume streams read only up to it (`durable_end/2`), so a consumer never
-            # sees a record its producer was not told is stored, and a failover that seals below an
-            # unacknowledged tail cannot hand a consumer an offset that is later reused.
+            # segment's end when this frontend learns of the seal, or to the end a quorum of replicas
+            # reports holding when a recovery probes it (`seed_durable/3`). A primary's local end alone
+            # never moves it: it counts records no quorum holds yet. `offsets` runs ahead of it by every
+            # batch planned and not yet answered. Consume streams read only up to it (`durable_end/2`), so
+            # every acknowledged record is readable and a failover that seals below an unacknowledged tail
+            # cannot hand a consumer an offset that is later reused. It does not keep out a record whose
+            # produce was answered with an error: one that timed out but landed is covered by the next
+            # acknowledged produce on the range, and a seal or a probe counts what replicas hold.
             durable: %{},
             # Ranges a recovery learned the end of but not yet the horizon: their active segment, led here,
             # holds records past `durable_end/2` that no produce this frontend answered and no replica probe
