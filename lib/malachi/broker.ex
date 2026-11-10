@@ -167,7 +167,7 @@ defmodule Malachi.Broker do
             # holds records past `durable_end/2` that no produce this frontend answered and no replica probe
             # vouched for yet (a restart forgets the horizon). Until a probe, a produce or a seal raises it,
             # a consume of one refuses rather than serve a page that stops short of those records: empty and
-            # successful, which a consumer cannot tell from having caught up. See `await_horizon/2`.
+            # successful, which a consumer cannot tell from having caught up. See `await_horizon/3`.
             horizon_pending: %{}
 
   @doc """
@@ -421,21 +421,24 @@ defmodule Malachi.Broker do
   defp raise_durable(durable, range_id, offset), do: Map.update(durable, range_id, offset, &max(&1, offset))
 
   @doc """
-  Marks `range_id`, whose end a recovery just learned (`seed_range_state/4`) and whose active segment this
-  frontend leads, as waiting for its horizon: when the end is past `durable_end/2` and no horizon is known,
-  the records in between are on disk but unreadable here until a replica probe (`seed_durable/3`), a
-  produce (`mark_durable/2`) or a seal raises the horizon, and a consume of the range refuses with
-  `:metadata_unavailable` meanwhile (`horizon_pending?/2`). A range with nothing past its horizon, a new one
-  among them, is left readable: an empty page there is the truth, and a reader waits on it as on any.
+  Marks `range_id`, whose end a recovery just learned (`recovered_end`, as `seed_range_state/4` seeds it)
+  and whose active segment this frontend leads, as waiting for its horizon: when that end is past
+  `durable_end/2` and no horizon is known, the records in between are on disk but unreadable here until a
+  replica probe (`seed_durable/3`), a produce (`mark_durable/2`) or a seal raises the horizon, and a consume
+  of the range refuses with `:metadata_unavailable` meanwhile (`horizon_pending?/2`). A range with nothing
+  past its horizon, a new one among them, is left readable: an empty page there is the truth, and a reader
+  waits on it as on any. The end compared is the one the recovery found, not the range's next offset, which
+  also counts the offsets of produces still in flight: those were not found on any disk, and one that
+  fails would otherwise leave the range refusing until a later probe.
   """
-  @spec await_horizon(t(), Metadata.range_id()) :: t()
-  def await_horizon(%__MODULE__{} = broker, range_id) do
-    if not Map.has_key?(broker.durable, range_id) and next_offset(broker, range_id) > durable_end(broker, range_id),
+  @spec await_horizon(t(), Metadata.range_id(), non_neg_integer()) :: t()
+  def await_horizon(%__MODULE__{} = broker, range_id, recovered_end) do
+    if not Map.has_key?(broker.durable, range_id) and recovered_end > durable_end(broker, range_id),
       do: %{broker | horizon_pending: Map.put(broker.horizon_pending, range_id, true)},
       else: broker
   end
 
-  @doc "Whether `range_id` waits for a horizon over records a recovery found (see `await_horizon/2`)."
+  @doc "Whether `range_id` waits for a horizon over records a recovery found (see `await_horizon/3`)."
   @spec horizon_pending?(t(), Metadata.range_id()) :: boolean()
   def horizon_pending?(%__MODULE__{} = broker, range_id), do: Map.has_key?(broker.horizon_pending, range_id)
 

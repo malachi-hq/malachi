@@ -516,7 +516,7 @@ defmodule Malachi.BrokerTest do
 
     test "records past the horizon refuse a consume until a probe vouches for them", %{store: store} do
       {restarted, root_id} = restarted_with_records(store)
-      waiting = Broker.await_horizon(restarted, root_id)
+      waiting = Broker.await_horizon(restarted, root_id, 2)
 
       assert Broker.horizon_pending?(waiting, root_id)
       # not an empty page, which a reader cannot tell from having caught up
@@ -532,7 +532,7 @@ defmodule Malachi.BrokerTest do
 
     test "a produce answered or a seal ends the wait as a probe does", %{store: store} do
       {restarted, root_id} = restarted_with_records(store)
-      waiting = Broker.await_horizon(restarted, root_id)
+      waiting = Broker.await_horizon(restarted, root_id, 2)
 
       refute waiting |> Broker.mark_durable(%{root_id => {2, 2}}) |> Broker.horizon_pending?(root_id)
 
@@ -542,15 +542,30 @@ defmodule Malachi.BrokerTest do
 
     test "a range with nothing past its horizon, a new one among them, is left readable", %{store: store} do
       {broker, root_id} = broker_with_topic()
-      empty = broker |> Broker.seed_range_state(root_id, 0, 1) |> Broker.await_horizon(root_id)
+      empty = broker |> Broker.seed_range_state(root_id, 0, 1) |> Broker.await_horizon(root_id, 0)
       refute Broker.horizon_pending?(empty, root_id)
       assert {:ok, [], _cursor, []} = Broker.read_consume(empty, root_id, :start, 100, read_fun(store))
 
       # nor one whose horizon is known, even below its end: a quorum held 1 of the 2, and only that one is read
       {restarted, root_id} = restarted_with_records(store)
-      known = restarted |> Broker.seed_durable(root_id, 1) |> Broker.await_horizon(root_id)
+      known = restarted |> Broker.seed_durable(root_id, 1) |> Broker.await_horizon(root_id, 2)
       refute Broker.horizon_pending?(known, root_id)
       assert Broker.durable_end(known, root_id) == 1
+    end
+
+    test "offsets a produce in flight reserved are not records a recovery found" do
+      # A range opened since boot: its first produce is planned (offsets 0 and 1 reserved) and not answered
+      # when a recovery pass learns the end the primary holds, nothing yet. Compared with the reserved end,
+      # the range refused its reads, and a produce that then failed left it refusing until a later probe.
+      {broker, root_id} = broker_with_topic()
+
+      {in_flight, {:ok, _placements, _dispatches}} =
+        Broker.produce_plan(broker, "events", [record("a", "k1"), record("b", "k2")])
+
+      assert Broker.range_end(in_flight, root_id) == 2
+
+      recovered = in_flight |> Broker.seed_range_state(root_id, 0, 1) |> Broker.await_horizon(root_id, 0)
+      refute Broker.horizon_pending?(recovered, root_id)
     end
   end
 
