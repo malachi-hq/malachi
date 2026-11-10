@@ -11,6 +11,7 @@ defmodule Malachi.BrokerServerStreamsTest do
   alias Malachi.Log.Record
   alias Malachi.Test.PollingHelper
   alias Malachi.Test.ReadBack
+  alias Malachi.Test.UnfenceablePrimary
 
   @moduletag :tmp_dir
 
@@ -331,6 +332,60 @@ defmodule Malachi.BrokerServerStreamsTest do
 
       refute_received {:held, {:replicate_async, _seg, _set, _base, _records, _tag, _ctx}}
       assert :sys.get_state(server).range_inflight == %{}
+      assert_receive {:stream_moved, ^token, _reason, _targets}
+      assert {:moved, :elsewhere, [{^root, {_successor, ^remote}}]} = BrokerServer.open_stream(server, root)
+    end
+
+    test "with group commit, an append held behind its roll's fence is not written into a successor led elsewhere",
+         %{tmp_dir: dir} do
+      # The group commit counterpart of the test above: the append is held before it is tried, and released
+      # once the fence answers, by which time the successor is placed on another node. Written there, it
+      # would be acknowledged by this frontend while the successor's primary, which serves the range's
+      # reads, never learned it was durable.
+      primary =
+        start_supervised!(
+          {UnfenceablePrimary, [directory: Path.join(dir, "primary"), fence: :hold]},
+          id: :held_fence_primary
+        )
+
+      remote = {Malachi.LogReplication, :remote@nowhere}
+      {:ok, live} = Agent.start_link(fn -> [primary] end)
+      one_record = Record.encoded_size(Record.new("v0", key: "k"))
+
+      {server, root} =
+        with_topic(dir,
+          brokers: [primary],
+          live_brokers: fn -> Agent.get(live, & &1) end,
+          brokers_refresh_interval: 20,
+          segment_max_bytes: one_record,
+          group_commit: true,
+          group_commit_interval_ms: 5
+        )
+
+      {:ok, token, _segment, _broker} = BrokerServer.open_stream(server, root)
+
+      # the first append fills the segment, and its roll's fence is applied and its answer held
+      assert {{:ok, _}, _scale} = append(server, root, [Record.new("v0", key: "k")])
+
+      held =
+        BrokerServer.send_stream_produce(
+          server,
+          root,
+          [Record.new("a", key: "k")],
+          :held,
+          :gen_server.reqids_new(),
+          :otel_ctx.get_current()
+        )
+
+      :ok = PollingHelper.wait_until!(fn -> Map.has_key?(:sys.get_state(server).fence_parked, root) end)
+
+      # from now on new segments are placed on another node, and then the fence answers
+      Agent.update(live, fn _ -> [remote] end)
+      :ok = PollingHelper.wait_until!(fn -> :sys.get_state(server).broker.brokers == [remote] end)
+      :ok = UnfenceablePrimary.release_fences(primary)
+
+      assert {{:reply, {{:error, :not_primary}, _scale}}, :held, _} = :gen_server.receive_response(held, 5_000, true)
+      assert :sys.get_state(server).fence_parked == %{}
       assert_receive {:stream_moved, ^token, _reason, _targets}
       assert {:moved, :elsewhere, [{^root, {_successor, ^remote}}]} = BrokerServer.open_stream(server, root)
     end

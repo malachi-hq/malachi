@@ -1419,13 +1419,21 @@ defmodule Malachi.BrokerServer do
     end
   end
 
+  # A producer stream's held call was checked against the segment it would land in before it was held
+  # (`lead_append/3`), and the roll it waited on may have placed the successor on another node: it is
+  # checked again here, as a replanned dispatch is (`lead_replan/3`), and refused with `:not_primary` when
+  # the successor is led elsewhere, its producer told by the sweep where the range went.
   defp release_parked_entry(state, {:grouped, from, topic, records}, _mode) do
-    case grouped_append(from, topic, records, state) do
-      {:reply, reply, state} ->
-        reply_produce(from, reply, state)
+    with {:ok, state} <- lead_replan(state, %{from: from, topic: topic}, records),
+         {:reply, reply, state} <- grouped_append(from, topic, records, state) do
+      reply_produce(from, reply, state)
+      state
+    else
+      {:noreply, state} ->
         state
 
-      {:noreply, state} ->
+      {:error, reason, state} ->
+        reply_produce(from, {:error, reason}, state)
         state
     end
   end
