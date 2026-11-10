@@ -45,6 +45,16 @@ defmodule Malachi.ProducerStreamsTest do
       assert segment == resp.segment
     end
 
+    test "a stream opened on a segment the routes already named is told those routes' version", ctx do
+      assert {:ok, first} = open(ctx.socket, ctx.topic)
+      %{version: version} = routes(ctx.socket, ctx.topic)
+      assert first.routes_version == version
+
+      assert {:ok, second} = open(ctx.socket, ctx.topic, routes_version: version)
+      assert second.segment == first.segment
+      assert second.routes_version == version
+    end
+
     test "routes that differ from the vnode's are stale_routes", ctx do
       assert open(ctx.socket, ctx.topic, routes_version: 12_345) == {:error, "stale_routes"}
     end

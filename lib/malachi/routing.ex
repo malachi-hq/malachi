@@ -36,8 +36,9 @@ defmodule Malachi.Routing do
   # What a route read projects out of a vnode's state inside the leader: every topic, range and segment the
   # vnode holds and the indexes over them (the whole metadata when the control plane is unsharded), not the
   # offsets and policies beside them. The topic is picked out here, in the caller, because the leader may
-  # only apply a standard library function (`Malachi.Cluster.RaCluster.project/3`); what that copy costs
-  # per request is measured with the routing clients that ask for it (#275).
+  # only apply a standard library function (`Malachi.Cluster.RaCluster.project/3`). The copy grows with
+  # every topic the vnode holds; it is read once per stream open (twice when the open places a segment),
+  # per consume open and per `fetch_range`, never per append, and what it costs has not been measured.
   @route_keys [:topics, :ranges, :segments, :topic_ranges, :range_segments]
 
   @typedoc "A member as the membership view holds it."

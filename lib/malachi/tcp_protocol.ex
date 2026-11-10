@@ -329,13 +329,11 @@ defmodule Malachi.TCPProtocol do
     req = Wire.decode_open_stream_req(payload)
 
     with :ok <- open_allowed(session, req.topic),
-         {:ok, %{version: version}} <- Routing.read_topic_routes(req.topic),
+         {:ok, %{version: version} = routes} <- Routing.read_topic_routes(req.topic),
          :ok <- current_routes(version, req.routes_version),
          {:ok, token, segment_id, broker_pid} <-
            BrokerServer.open_stream(broker_for(req.topic), {req.topic, req.range}, self()),
-         # opening can place the range's first segment, which changes the routes: the client is told the
-         # version that names it
-         {:ok, %{version: version}} <- Routing.read_topic_routes(req.topic) do
+         {:ok, %{version: version}} <- routes_after_open(routes, req.range, segment_id) do
       {:opened, :producer, correlation_id,
        %{
          broker: broker_for(req.topic),
@@ -358,6 +356,17 @@ defmodule Malachi.TCPProtocol do
       {:moved, _reason, _targets} -> Wire.encode_error(correlation_id, :moved)
       {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
     end
+  end
+
+  # Opening can place the range's first segment, or its successor, which changes the routes: the client is
+  # then told the version that names it, read again. Routes that already named the segment the stream opened
+  # on are the ones it was checked against, and are answered as they are.
+  defp routes_after_open(%{topic: topic, ranges: ranges} = routes, range, segment_id) do
+    seq = Metadata.segment_seq(segment_id)
+
+    if Enum.any?(ranges, &match?(%{range: ^range, segment: %{segment: ^seq}}, &1)),
+      do: {:ok, routes},
+      else: Routing.read_topic_routes(topic)
   end
 
   defp open_allowed(session, topic) do
