@@ -162,8 +162,10 @@ defmodule Malachi.Broker do
             # reports holding when a recovery probes it (`seed_durable/3`). A primary's local end alone
             # never moves it: it counts records no quorum holds yet. `offsets` runs ahead of it by every
             # batch planned and not yet answered. Consume streams read only up to it (`durable_end/2`), so
-            # every acknowledged record is readable and a failover that seals below an unacknowledged tail
-            # cannot hand a consumer an offset that is later reused. It does not keep out a record whose
+            # every record this frontend acknowledged is readable (one another node's frontend acknowledged
+            # through `Malachi.BrokerServer.produce/3` becomes readable as `durable_end/2` says) and a
+            # failover that seals below an unacknowledged tail cannot hand a consumer an offset that is
+            # later reused. It does not keep out a record whose
             # produce was answered with an error: one that timed out but landed is covered by the next
             # acknowledged produce on the range, and a seal or a probe counts what replicas hold.
             durable: %{},

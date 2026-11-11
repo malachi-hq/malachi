@@ -10,8 +10,10 @@ defmodule Malachi.ConsumeStreams do
   when the stream opens and each time the range's durable records grow past what the stream read, and the
   connection reads through it and pushes `records` pages, each carrying the position of every record and of
   the page's end. The connection keeps the view, so a wake that changed nothing in it but the range's end
-  carries only that end (`Malachi.Broker.view_epoch/1`). A view reaches only as far as the range's durable end (`Malachi.Broker.durable_end/2`):
-  every record whose produce was acknowledged is below it, and nothing a seal could later cut off is, so no
+  carries only that end (`Malachi.Broker.view_epoch/1`). A view reaches only as far as the range's durable
+  end (`Malachi.Broker.durable_end/2`): every record whose produce the serving frontend acknowledged is below
+  it (one acknowledged through another node's in-process `Malachi.BrokerServer.produce/3` follows once its
+  segment seals or a later produce is answered here), and nothing a seal could later cut off is, so no
   offset a consumer read is ever reused. It can include records whose produce was answered with an error
   (one that timed out but landed, or a tail a failover's seal kept), which a producer that sends them again
   delivers twice: delivery is at least once.

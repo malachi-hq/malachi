@@ -37,8 +37,9 @@ raw, for `consume_ack`, and as an opaque token, to resume from or commit. When t
 stream's credit reaches zero the broker stops pushing on it and does no further work for it. Backpressure
 here is the absence of sends, not a queue building up somewhere.
 
-A stream pushes only records below the range's durable end: every record whose produce was acknowledged,
-and nothing a later seal could cut off, so an offset a consumer read is never reused. A record whose produce
+A stream pushes only records below the range's durable end: every record whose produce the node serving
+the range acknowledged (a producer stream's appends always are, since a stream appends only where its range
+is led), and nothing a later seal could cut off, so an offset a consumer read is never reused. A record whose produce
 was answered with an error can still be pushed (it timed out but landed, or a failover's seal kept it), and
 a producer that sends it again makes the consumer see it twice: delivery is at least once.
 
