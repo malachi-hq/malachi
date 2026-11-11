@@ -38,12 +38,12 @@ jobs:
 
     steps:
       - name: 🛡️ Harden the runner
-        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
       # The full history and its tags: OLD is a release tag, resolved and exported by git.
       - name: 📥 Checkout code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -95,7 +95,7 @@ jobs:
 
     steps:
       - name: 🛡️ Harden the runner
-        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
       - name: 🔑 Mint a token of the release App
@@ -109,7 +109,7 @@ jobs:
 
       # The full history, because publishing decides between two results by which commit is newer.
       - name: 📥 Checkout code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
@@ -118,7 +118,7 @@ jobs:
       # a named one that does not exist would fail this job as well, a second red job saying nothing new.
       # Every other early end of the drill writes its result, as failed, and is published like any other.
       - name: 📥 Download result
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: chaos-upgrade
           path: ${{ runner.temp }}/artifacts
