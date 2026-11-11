@@ -402,8 +402,15 @@ defmodule DependencyUpdatesSkillTest do
       Enum.any?(step.matrix, fn entry -> Enum.all?(step.conditions, &runs?(&1, entry)) end)
   end
 
+  # The one condition that is not a matrix key: results.yml skips a push by the release App, whose commits are
+  # the version bump and the published results. Such a push is never the run a gate is proven by (that is a
+  # pull request's run, or a push of a merge), so for the proof the step runs.
+  @skips_only_the_release_app "github.event_name != 'push' || github.actor != 'malachi-release[bot]'"
+
   # Only the forms the workflows use are read; any other condition on a mapped step fails the test
   # rather than being guessed at.
+  defp runs?(@skips_only_the_release_app, _entry), do: true
+
   defp runs?(condition, entry) do
     case Regex.run(~r/^(?:\$\{\{\s*)?(!?)\s*matrix\.([a-z_-]+)\s*(?:\}\})?$/, String.trim(to_string(condition))) do
       [_, "", key] -> entry[key] == true
