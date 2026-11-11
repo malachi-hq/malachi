@@ -1176,7 +1176,8 @@ defmodule Malachi.BrokerTest do
   defp apply_view_op(broker, store, {:produce_only, keys}, _snapshots),
     do: broker |> produce_only(store, "events", records_for(keys)) |> elem(0)
 
-  defp apply_view_op(broker, store, {:seal, index}, _snapshots), do: view_seal_active(broker, store, pick(broker, index))
+  defp apply_view_op(broker, store, {:seal, index}, _snapshots),
+    do: view_seal_active(broker, store, pick(broker, index))
 
   defp apply_view_op(broker, store, {:split, index}, _snapshots) do
     range_id = pick(broker, index)
