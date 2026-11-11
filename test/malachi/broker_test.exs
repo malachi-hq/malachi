@@ -1099,7 +1099,7 @@ defmodule Malachi.BrokerTest do
     # The oracle: whenever an operation leaves the epoch where it was, every view of every range of the
     # topic, all but the range's own end (which each wake sets), is what it was before. A change the
     # epoch missed fails here instead of leaving a consume stream on a stale view.
-    property "an unmoved epoch means an unchanged view of every range", %{store: store} do
+    property "an unmoved epoch means an unchanged view of every range" do
       index = StreamData.integer(0..5)
       offset = StreamData.integer(0..40)
       keys = StreamData.list_of(StreamData.integer(0..63), min_length: 1, max_length: 6)
@@ -1117,17 +1117,20 @@ defmodule Malachi.BrokerTest do
           StreamData.tuple({StreamData.constant(:await_horizon), index, offset}),
           StreamData.tuple({StreamData.constant(:seed_durable), index, offset}),
           StreamData.tuple({StreamData.constant(:adopt), index, offset}),
-          StreamData.tuple({StreamData.constant(:recache), StreamData.integer(0..8)}),
+          StreamData.tuple({StreamData.constant(:remote), StreamData.member_of([:seal, :split, :delete]), index}),
+          StreamData.tuple({StreamData.constant(:fence), index}),
           StreamData.constant(:open_group)
         ])
 
       one_record = Record.encoded_size(record("v0", "k0"))
 
       check all(ops <- StreamData.list_of(op, min_length: 1, max_length: 25), max_runs: 200) do
+        # a store per run: segment ids repeat from run to run, and a seal one run left would change the next
+        {:ok, store} = FakeSegmentStore.start_link()
         {broker, _root_id} = broker_with_topic("events", 2, segment_max_bytes: 3 * one_record)
 
-        Enum.reduce(ops, {broker, [broker.dsrsm]}, fn op, {before, snapshots} ->
-          after_op = apply_view_op(before, store, op, snapshots)
+        Enum.reduce(ops, broker, fn op, before ->
+          after_op = apply_view_op(before, store, op)
 
           if Broker.view_epoch(after_op) == Broker.view_epoch(before) do
             for range_id <- topic_range_ids(before) ++ topic_range_ids(after_op) do
@@ -1136,9 +1139,25 @@ defmodule Malachi.BrokerTest do
             end
           end
 
-          {after_op, [after_op.dsrsm | snapshots]}
+          after_op
         end)
+
+        Agent.stop(store)
       end
+    end
+
+    test "a produce that lifts a range's recovery mark moves the epoch", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+      %{id: segment_id} = broker.segments[root_id]
+
+      # after a restart a range waits for a recovery, and the first produce's answer is what lifts it
+      marked = %{broker | unrecovered: Map.put(broker.unrecovered, root_id, true)}
+      assert ReadView.unrecovered?(ReadView.new(marked, [root_id]), root_id)
+
+      adopted = Broker.adopt_offsets(marked, root_id, segment_id, 0)
+      refute ReadView.unrecovered?(ReadView.new(adopted, [root_id]), root_id)
+      assert Broker.view_epoch(adopted) > Broker.view_epoch(marked)
     end
 
     test "a produce on a range nobody recovers leaves the epoch where it was", %{store: store} do
@@ -1168,18 +1187,18 @@ defmodule Malachi.BrokerTest do
 
   defp records_for(keys), do: Enum.map(keys, &record("v#{&1}", "k#{&1}"))
 
-  defp apply_view_op(broker, store, {:produce, keys}, _snapshots) do
+  defp apply_view_op(broker, store, {:produce, keys}) do
     broker = broker |> produce_only(store, "events", records_for(keys)) |> elem(0)
     Enum.reduce(Broker.due_rolls(broker), broker, &view_seal(&2, store, &1))
   end
 
-  defp apply_view_op(broker, store, {:produce_only, keys}, _snapshots),
+  defp apply_view_op(broker, store, {:produce_only, keys}),
     do: broker |> produce_only(store, "events", records_for(keys)) |> elem(0)
 
-  defp apply_view_op(broker, store, {:seal, index}, _snapshots),
+  defp apply_view_op(broker, store, {:seal, index}),
     do: view_seal_active(broker, store, pick(broker, index))
 
-  defp apply_view_op(broker, store, {:split, index}, _snapshots) do
+  defp apply_view_op(broker, store, {:split, index}) do
     range_id = pick(broker, index)
     broker = view_seal_active(broker, store, range_id)
 
@@ -1189,7 +1208,7 @@ defmodule Malachi.BrokerTest do
     end
   end
 
-  defp apply_view_op(broker, store, {:merge, index}, _snapshots) do
+  defp apply_view_op(broker, store, {:merge, index}) do
     case broker.dsrsm |> DSRSM.active_ranges_of_topic("events") |> Enum.map(& &1.id) |> Enum.sort() do
       [_, _ | _] = ids ->
         first = rem(index, length(ids) - 1)
@@ -1206,26 +1225,26 @@ defmodule Malachi.BrokerTest do
     end
   end
 
-  defp apply_view_op(broker, _store, {:delete, index}, _snapshots) do
+  defp apply_view_op(broker, _store, {:delete, index}) do
     case Enum.filter(segments(broker, pick(broker, index)), &(&1.state == :sealed)) do
       [oldest | _] -> broker |> Broker.delete_segment(oldest.id) |> elem(0)
       [] -> broker
     end
   end
 
-  defp apply_view_op(broker, _store, {:seed, index, next, seq}, _snapshots),
+  defp apply_view_op(broker, _store, {:seed, index, next, seq}),
     do: Broker.seed_range_state(broker, pick(broker, index), next, seq)
 
-  defp apply_view_op(broker, _store, {:unreachable, index, seq}, _snapshots),
+  defp apply_view_op(broker, _store, {:unreachable, index, seq}),
     do: Broker.seed_unrecovered_range(broker, pick(broker, index), seq)
 
-  defp apply_view_op(broker, _store, {:await_horizon, index, recovered_end}, _snapshots),
+  defp apply_view_op(broker, _store, {:await_horizon, index, recovered_end}),
     do: Broker.await_horizon(broker, pick(broker, index), recovered_end)
 
-  defp apply_view_op(broker, _store, {:seed_durable, index, offset}, _snapshots),
+  defp apply_view_op(broker, _store, {:seed_durable, index, offset}),
     do: Broker.seed_durable(broker, pick(broker, index), offset)
 
-  defp apply_view_op(broker, _store, {:adopt, index, last}, _snapshots) do
+  defp apply_view_op(broker, _store, {:adopt, index, last}) do
     range_id = pick(broker, index)
 
     case Map.get(broker.segments, range_id) do
@@ -1234,13 +1253,77 @@ defmodule Malachi.BrokerTest do
     end
   end
 
-  defp apply_view_op(broker, _store, {:recache, back}, snapshots),
-    do: Broker.put_cache(broker, Enum.at(snapshots, rem(back, length(snapshots))))
+  # Another node fences the range's active segment in the store and this broker has not learned its seal
+  # yet: its next produce there is refused with where the segment ends (`Malachi.Broker.forget_sealed/4`).
+  defp apply_view_op(broker, store, {:fence, index}) do
+    case Enum.find(segments(broker, pick(broker, index)), &(&1.state == :active)) do
+      nil ->
+        broker
 
-  defp apply_view_op(broker, _store, :open_group, _snapshots), do: broker |> Broker.open_group("g", "events") |> elem(0)
+      active ->
+        [primary | _] = active.replica_set
+        _ = FakeSegmentStore.seal(store, primary, active.id, active.start_offset)
+        broker
+    end
+  end
 
-  # `seal_active/3` and its fence, taking a refusal as the broker left: a `:recache` can install metadata
-  # older than the seal it would record.
+  # Another node changes the metadata, from what this broker holds, and this broker learns it the way a
+  # reconcile does: the read installed, the journal replayed, the segments it no longer leads dropped.
+  defp apply_view_op(broker, store, {:remote, change, index}) do
+    case remote_change(broker, store, change, pick(broker, index)) do
+      nil -> broker
+      dsrsm -> refresh(broker, dsrsm)
+    end
+  end
+
+  defp apply_view_op(broker, _store, :open_group), do: broker |> Broker.open_group("g", "events") |> elem(0)
+
+  # A failover's seal of the range's active segment: the store is fenced where it holds the records.
+  defp remote_change(broker, store, :seal, range_id) do
+    case Enum.find(segments(broker, range_id), &(&1.state == :active)) do
+      nil ->
+        nil
+
+      active ->
+        [primary | _] = active.replica_set
+
+        case FakeSegmentStore.seal(store, primary, active.id, active.start_offset) do
+          {:ok, end_offset, bytes} ->
+            command = Metadata.seal_command(active, end_offset, bytes, 1_000)
+            broker.dsrsm |> DSRSM.command("events", command) |> elem(0)
+
+          {:error, _reason} ->
+            nil
+        end
+    end
+  end
+
+  defp remote_change(broker, _store, :split, range_id) do
+    case Broker.split_range(broker, range_id) do
+      {split, {:ok, _left, _right}} -> split.dsrsm
+      {_broker, {:error, _reason}} -> nil
+    end
+  end
+
+  defp remote_change(broker, _store, :delete, range_id) do
+    case Enum.filter(segments(broker, range_id), &(&1.state == :sealed)) do
+      [oldest | _] -> broker |> Broker.delete_segment(oldest.id) |> elem(0) |> Map.fetch!(:dsrsm)
+      [] -> nil
+    end
+  end
+
+  # What `Malachi.BrokerServer` does with a metadata read on a reconcile.
+  defp refresh(broker, dsrsm) do
+    {journaled, broker} = Broker.take_journal(broker)
+
+    broker
+    |> Broker.put_cache(dsrsm)
+    |> Broker.replay_journal(journaled)
+    |> Broker.drop_stale_active_segments()
+  end
+
+  # `seal_active/3` and its fence, taking a refusal as the broker left: another node may have fenced the
+  # segment first, and its seal is then the one the metadata records.
   defp view_seal_active(broker, store, range_id) do
     case Broker.active_roll(broker, range_id) do
       :none -> broker
