@@ -194,7 +194,9 @@ defmodule Malachi.BrokerServer do
 
   The broker reads nothing for the stream: it hands the connection a `Malachi.Broker.ReadView` of the
   range in `{:consume_wake, token, view, skip_reporter}`, at once and then each time the range grows past
-  the end the connection said it had read to (`arm_consume/3`), and the connection reads and pushes. When
+  the end the connection said it had read to (`arm_consume/3`), and the connection reads and pushes. A
+  wake whose view would differ from the last one handed only in the range's end carries
+  `{:unchanged, durable_end}` in its place (`Malachi.Broker.view_epoch/1`). When
   the range moves on it is sent `{:stream_moved, token, reason, targets}`, as a producer stream is.
   """
   @spec open_consume(GenServer.server(), Metadata.range_id(), term(), pid()) ::
@@ -211,7 +213,7 @@ defmodule Malachi.BrokerServer do
   @spec arm_consume(GenServer.server(), reference(), non_neg_integer()) :: :ok
   def arm_consume(server, token, seen_end), do: GenServer.cast(server, {:arm_consume, token, seen_end})
 
-  @doc "Hands the consume stream `token` a fresh view of its range at once (after a read that failed)."
+  @doc "Hands the consume stream `token` the broker's view of its range at once, in place of the one it held (after a read that failed)."
   @spec refresh_consume(GenServer.server(), reference()) :: :ok
   def refresh_consume(server, token), do: GenServer.cast(server, {:refresh_consume, token})
 
@@ -577,6 +579,10 @@ defmodule Malachi.BrokerServer do
       streams: %{},
       # Open consume streams and waiting `fetch_range` calls, by range (`ConsumeIndex`).
       consume: ConsumeIndex.new(),
+      # The view of each range whose readers were woken, built once per view epoch
+      # (`Malachi.Broker.view_epoch/1`) with where its last sealed segment ends, so a produce wakes them
+      # without walking the range's segments again. Emptied when the epoch moves (`wake_view/2`).
+      wake_views: %{epoch: nil, views: %{}},
       # In-flight async produces (the non-group-commit path): ref => the parked caller, its computed
       # placements, how many replication dispatches are still owed, the records of the dispatches that went
       # out behind this frontend's own fence (`parts`, so they can be planned again), and the safety timer.
@@ -838,7 +844,15 @@ defmodule Malachi.BrokerServer do
   def handle_cast({:arm_consume, token, seen_end}, state), do: {:noreply, arm(state, token, seen_end)}
 
   # -1: any durable end wakes it, so it is handed a fresh view now
-  def handle_cast({:refresh_consume, token}, state), do: {:noreply, arm(state, token, -1)}
+  def handle_cast({:refresh_consume, token}, state) do
+    # the stream dropped the view it held, so the wake carries one whatever the epoch
+    consume =
+      if ConsumeIndex.consumer?(state.consume, token),
+        do: ConsumeIndex.viewed(state.consume, token, nil),
+        else: state.consume
+
+    {:noreply, arm(%{state | consume: consume}, token, -1)}
+  end
 
   # Adopt a ring change (a vnode split) gossiped in via the membership hook: rebuild the metadata routing
   # (cache ring + write router), the refresh source and the bootstrap pass, so the periodic reconcile
@@ -2101,26 +2115,52 @@ defmodule Malachi.BrokerServer do
     range_ids
     |> Enum.filter(&ConsumeIndex.readers?(state.consume, &1))
     |> Enum.reduce(state, fn range_id, state ->
-      durable_end = Broker.durable_end(state.broker, range_id)
+      {%{view: view, sealed_end: sealed}, state} = wake_view(state, range_id)
+      durable_end = Broker.durable_end(state.broker, range_id, sealed)
       own = Broker.own_source(state.broker, range_id)
       ready? = &(own != nil and Broker.ready_at?(&1.position, own, durable_end))
       {consumers, waiters, consume} = ConsumeIndex.take_ready(state.consume, range_id, durable_end, ready?)
+      view = ReadView.put_end(view, range_id, durable_end)
+      epoch = Broker.view_epoch(state.broker)
 
-      if consumers != [] or waiters != [] do
-        view = Broker.consume_view(state.broker, range_id)
+      consume =
+        Enum.reduce(consumers, consume, fn
+          {token, %{view_epoch: ^epoch} = consumer}, consume ->
+            send(consumer.pid, {:consume_wake, token, {:unchanged, durable_end}, state.skip_reporter})
+            consume
 
-        Enum.each(consumers, fn {token, consumer} ->
-          send(consumer.pid, {:consume_wake, token, view, state.skip_reporter})
+          {token, consumer}, consume ->
+            send(consumer.pid, {:consume_wake, token, view, state.skip_reporter})
+            ConsumeIndex.viewed(consume, token, epoch)
         end)
 
-        Enum.each(waiters, fn {_ref, waiter} ->
-          Process.cancel_timer(waiter.timer)
-          GenServer.reply(waiter.from, {:ok, waiter.position, view, state.skip_reporter})
-        end)
-      end
+      Enum.each(waiters, fn {_ref, waiter} ->
+        Process.cancel_timer(waiter.timer)
+        GenServer.reply(waiter.from, {:ok, waiter.position, view, state.skip_reporter})
+      end)
 
       %{state | consume: consume}
     end)
+  end
+
+  # The view of `range_id` the readers woken on it read through, without its own end (each wake sets it),
+  # and where its last sealed segment ends: built once per view epoch and kept until the epoch moves, which
+  # drops every view built before it. A consume stream already handed the view of this epoch is sent only
+  # the range's new end (`{:unchanged, durable_end}`), so a produce costs neither a walk of the range's
+  # segments nor a copy of them per reader.
+  defp wake_view(state, range_id) do
+    epoch = Broker.view_epoch(state.broker)
+    views = if state.wake_views.epoch == epoch, do: state.wake_views.views, else: %{}
+
+    case Map.fetch(views, range_id) do
+      {:ok, entry} ->
+        {entry, state}
+
+      :error ->
+        view = ReadView.new(state.broker, [range_id])
+        entry = %{view: view, sealed_end: ReadView.sealed_end(view, range_id)}
+        {entry, %{state | wake_views: %{epoch: epoch, views: Map.put(views, range_id, entry)}}}
+    end
   end
 
   defp arm(state, token, seen_end) do

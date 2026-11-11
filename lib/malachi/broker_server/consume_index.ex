@@ -3,8 +3,9 @@ defmodule Malachi.BrokerServer.ConsumeIndex do
   The consume streams and `fetch_range` calls a `Malachi.BrokerServer` serves, indexed by range, so a
   write to a range costs a look at that range's readers and nobody else's.
 
-  A consume stream is held by the monitor ref of the connection that opened it: its range, and the end of
-  the range's durable records it read up to while it waits for more (`armed`), nil while it reads. A
+  A consume stream is held by the monitor ref of the connection that opened it: its range, the end of the
+  range's durable records it read up to while it waits for more (`armed`), nil while it reads, and the view
+  epoch of the last view it was handed (`view_epoch`, `Malachi.Broker.view_epoch/1`), nil before any. A
   `fetch_range` call that found nothing past its position waits here, by ref, until its range's durable
   records pass that position or its time runs out.
 
@@ -15,7 +16,12 @@ defmodule Malachi.BrokerServer.ConsumeIndex do
 
   defstruct consumers: %{}, waiters: %{}, consumer_ranges: %{}, waiter_ranges: %{}
 
-  @type consumer :: %{pid: pid(), range_id: Metadata.range_id(), armed: integer() | nil}
+  @type consumer :: %{
+          pid: pid(),
+          range_id: Metadata.range_id(),
+          armed: integer() | nil,
+          view_epoch: non_neg_integer() | nil
+        }
   @type waiter :: %{from: GenServer.from(), range_id: Metadata.range_id(), position: term(), timer: reference()}
 
   @type t :: %__MODULE__{
@@ -34,7 +40,7 @@ defmodule Malachi.BrokerServer.ConsumeIndex do
   def put_consumer(%__MODULE__{} = index, token, pid, range_id) do
     %{
       index
-      | consumers: Map.put(index.consumers, token, %{pid: pid, range_id: range_id, armed: -1}),
+      | consumers: Map.put(index.consumers, token, %{pid: pid, range_id: range_id, armed: -1, view_epoch: nil}),
         consumer_ranges: add(index.consumer_ranges, range_id, token)
     }
   end
@@ -63,6 +69,11 @@ defmodule Malachi.BrokerServer.ConsumeIndex do
   @spec arm(t(), reference(), integer()) :: t()
   def arm(%__MODULE__{} = index, token, seen_end),
     do: %{index | consumers: Map.update!(index.consumers, token, &%{&1 | armed: seen_end})}
+
+  @doc "The consume stream `token`, which it holds, was handed the view of `epoch` (nil: holds none now)."
+  @spec viewed(t(), reference(), non_neg_integer() | nil) :: t()
+  def viewed(%__MODULE__{} = index, token, epoch),
+    do: %{index | consumers: Map.update!(index.consumers, token, &%{&1 | view_epoch: epoch})}
 
   @doc "Whether any consume stream or waiter is on `range_id`."
   @spec readers?(t(), Metadata.range_id()) :: boolean()

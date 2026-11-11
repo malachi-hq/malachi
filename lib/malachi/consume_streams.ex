@@ -9,7 +9,8 @@ defmodule Malachi.ConsumeStreams do
   The broker never reads for it: it hands the connection a view of the range (`Malachi.Broker.ReadView`)
   when the stream opens and each time the range's durable records grow past what the stream read, and the
   connection reads through it and pushes `records` pages, each carrying the position of every record and of
-  the page's end. A view reaches only as far as the range's durable end (`Malachi.Broker.durable_end/2`):
+  the page's end. The connection keeps the view, so a wake that changed nothing in it but the range's end
+  carries only that end (`Malachi.Broker.view_epoch/1`). A view reaches only as far as the range's durable end (`Malachi.Broker.durable_end/2`):
   every record whose produce was acknowledged is below it, and nothing a seal could later cut off is, so no
   offset a consumer read is ever reused. It can include records whose produce was answered with an error
   (one that timed out but landed, or a tail a failover's seal kept), which a producer that sends them again
@@ -80,6 +81,7 @@ defmodule Malachi.ConsumeStreams do
           in_flight: non_neg_integer(),
           pages: :queue.queue({position(), pos_integer()}),
           view: ReadView.t() | nil,
+          base: ReadView.t() | nil,
           reporter: atom() | pid() | nil,
           allowed: (-> :ok | {:error, atom()})
         }
@@ -119,7 +121,7 @@ defmodule Malachi.ConsumeStreams do
         :max_bytes,
         :allowed
       ])
-      |> Map.merge(%{in_flight: 0, pages: :queue.new(), view: nil, reporter: nil})
+      |> Map.merge(%{in_flight: 0, pages: :queue.new(), view: nil, base: nil, reporter: nil})
 
     %{
       state
@@ -166,9 +168,9 @@ defmodule Malachi.ConsumeStreams do
   down, or a read to try again. `:no` for a message that belongs to none of them.
   """
   @spec handle_message(t(), term()) :: {t(), frames()} | :no
-  def handle_message(%__MODULE__{} = state, {:consume_wake, token, view, reporter}) do
+  def handle_message(%__MODULE__{} = state, {:consume_wake, token, wake, reporter}) do
     case Map.fetch(state.by_token, token) do
-      {:ok, id} -> read(state, %{Map.fetch!(state.streams, id) | view: view, reporter: reporter})
+      {:ok, id} -> read(state, %{woken(Map.fetch!(state.streams, id), wake) | reporter: reporter})
       :error -> :no
     end
   end
@@ -214,6 +216,15 @@ defmodule Malachi.ConsumeStreams do
   end
 
   def handle_message(%__MODULE__{}, _other), do: :no
+
+  # A wake hands the stream either a view of its range, which it keeps (`base`), or only where the range's
+  # durable records now end, when the broker already handed it the view of that epoch: it reads its kept
+  # view up to that end. A stream never holds `{:unchanged, _}` without a view kept, since the broker sends
+  # a view first.
+  defp woken(stream, %ReadView{} = view), do: %{stream | view: view, base: view}
+
+  defp woken(%{base: %ReadView{} = base} = stream, {:unchanged, durable_end}),
+    do: %{stream | view: ReadView.put_end(base, stream.range_id, durable_end)}
 
   @doc "Closes a stream the client is done with. `:unknown` for one this connection does not hold."
   @spec close(t(), pos_integer()) :: {:ok, t()} | :unknown
@@ -353,6 +364,7 @@ defmodule Malachi.ConsumeStreams do
         {put(state, stream), [records_frame(stream, page)]}
 
       {:error, _reason} ->
+        # the retry is handed the broker's view again (`refresh_consume/2`), not only an end for this one
         Process.send_after(self(), {:consume_retry, stream.id}, @retry_ms)
         {put(state, %{stream | view: nil}), []}
     end

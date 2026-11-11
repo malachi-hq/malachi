@@ -70,6 +70,17 @@ defmodule Malachi.Broker.ReadView do
   @spec fetch_end(t(), Metadata.range_id()) :: {:ok, non_neg_integer()} | :error
   def fetch_end(%__MODULE__{ends: ends}, range_id), do: Map.fetch(ends, range_id)
 
+  @doc """
+  The view with `range_end` as where `range_id` ends: the horizon a reader reads `range_id` up to, which
+  the broker hands with each wake (`Malachi.Broker.durable_end/3`) for a view it built before.
+  """
+  @spec put_end(t(), Metadata.range_id(), non_neg_integer()) :: t()
+  def put_end(%__MODULE__{} = view, range_id, range_end), do: %{view | ends: Map.put(view.ends, range_id, range_end)}
+
+  @doc "Where the last sealed segment of `range_id` in the view ends, 0 when none is (`Malachi.Broker.last_sealed_end/1`)."
+  @spec sealed_end(t(), Metadata.range_id()) :: non_neg_integer()
+  def sealed_end(%__MODULE__{} = view, range_id), do: view |> segments(range_id) |> Broker.last_sealed_end()
+
   @doc "Whether `range_id` waits for a recovery that learns its end (see `Malachi.Broker.unrecovered?/2`)."
   @spec unrecovered?(t(), Metadata.range_id()) :: boolean()
   def unrecovered?(%__MODULE__{unrecovered: unrecovered}, range_id), do: MapSet.member?(unrecovered, range_id)

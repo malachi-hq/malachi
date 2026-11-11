@@ -410,6 +410,16 @@ defmodule Malachi.BrokerServerStreamsTest do
       view
     end
 
+    # Where the consume stream's next wake says `root` ends, whether it carried the view or only the end.
+    defp wake_end(token, root) do
+      assert_receive {:consume_wake, ^token, wake, _reporter}, 2_000
+
+      case wake do
+        %ReadView{} = view -> elem(ReadView.fetch_end(view, root), 1)
+        {:unchanged, durable_end} -> durable_end
+      end
+    end
+
     defp produced(server, root, values) do
       for value <- values, do: assert({{:ok, _}, _scale} = append(server, root, [Record.new(value, key: "k")]))
       :ok
@@ -439,8 +449,7 @@ defmodule Malachi.BrokerServerStreamsTest do
       refute_receive {:consume_wake, ^token, _view, _reporter}, 100
 
       produced(server, root, ["x"])
-      view = wake(token)
-      assert ReadView.fetch_end(view, root) == {:ok, 1}
+      assert wake_end(token, root) == 1
 
       # a stream not armed again is not woken again
       produced(server, root, ["y"])
@@ -448,7 +457,56 @@ defmodule Malachi.BrokerServerStreamsTest do
 
       # armed behind the range's end, it is woken at once
       :ok = BrokerServer.arm_consume(server, token, 1)
-      assert ReadView.fetch_end(wake(token), root) == {:ok, 2}
+      assert wake_end(token, root) == 2
+    end
+
+    test "a wake carries the range's view only when the view changed, and otherwise only the range's end", %{
+      tmp_dir: dir
+    } do
+      {server, root} = with_topic(dir)
+      produced(server, root, ["a"])
+      {:ok, token, _position, _server} = BrokerServer.open_consume(server, root, :earliest)
+      assert ReadView.fetch_end(wake(token), root) == {:ok, 1}
+
+      # the same view, one record further on: only the end is sent
+      :ok = BrokerServer.arm_consume(server, token, 1)
+      produced(server, root, ["b"])
+      assert_receive {:consume_wake, ^token, {:unchanged, 2}, _reporter}, 2_000
+
+      # any change to the control plane's metadata moves the view epoch, so the next wake carries the view
+      {:ok, _other} = BrokerServer.create_topic(server, "other", 2)
+      :ok = BrokerServer.arm_consume(server, token, 2)
+      produced(server, root, ["c"])
+      assert ReadView.fetch_end(wake(token), root) == {:ok, 3}
+    end
+
+    test "a view handed after the range rolled holds the segment the roll opened", %{tmp_dir: dir} do
+      one_record = Record.encoded_size(Record.new("v0", key: "k"))
+      {server, root} = with_topic(dir, segment_max_bytes: one_record)
+      produced(server, root, ["v0"])
+      all_sealed(server, root, 1, 100)
+
+      {:ok, token, _position, _server} = BrokerServer.open_consume(server, root, :earliest)
+      _first = wake(token)
+      :ok = BrokerServer.arm_consume(server, token, 1)
+
+      # the append opens the range's next segment, which the view kept since the open does not hold
+      produced(server, root, ["v1"])
+      view = wake(token)
+
+      assert {:ok, [{{0, 1}, %{value: "v1"}}], {0, 2}, []} =
+               Broker.read_consume_positioned(view, root, {0, 1}, 10, &ReplicationServer.read/4)
+    end
+
+    # Waits until the range holds `count` segments, every one sealed (a roll's fence answers asynchronously).
+    defp all_sealed(server, root, count, attempts) do
+      segments = server |> BrokerServer.metadata() |> Malachi.Metadata.segments_of_range(root)
+
+      cond do
+        length(segments) == count and Enum.all?(segments, &(&1.state == :sealed)) -> :ok
+        attempts > 0 -> Process.sleep(20) && all_sealed(server, root, count, attempts - 1)
+        true -> flunk("#{count} segments never sealed: #{inspect(segments)}")
+      end
     end
 
     test "a range whose active segment another node leads is answered where it is read", %{tmp_dir: dir} do
@@ -586,7 +644,7 @@ defmodule Malachi.BrokerServerStreamsTest do
       # the quorum acknowledges it: now it is durable, and the waiting stream is woken to read it
       send(server, {:replicate_result, tag, {:ok, 0}})
       {{:reply, {{:ok, _}, _scale}}, :p, _} = :gen_server.receive_response(pending, 5_000, true)
-      assert ReadView.fetch_end(wake(token), root) == {:ok, 1}
+      assert wake_end(token, root) == 1
     end
 
     test "the horizon moves only with produces answered as stored, and a seal sets it", %{tmp_dir: dir} do

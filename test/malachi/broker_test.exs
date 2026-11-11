@@ -3,6 +3,7 @@ defmodule Malachi.BrokerTest do
   use ExUnitProperties
 
   alias Malachi.Broker
+  alias Malachi.Broker.ReadView
   alias Malachi.Broker.Skip
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
@@ -1091,6 +1092,168 @@ defmodule Malachi.BrokerTest do
         {:ok, records, next, more} ->
           drain(broker, store, range_id, page, next, delivered ++ Enum.map(records, & &1.offset), skipped ++ more)
       end
+    end
+  end
+
+  describe "view_epoch/1 (when a reader's view of a range must be sent again)" do
+    # The oracle: whenever an operation leaves the epoch where it was, every view of every range of the
+    # topic, all but the range's own end (which each wake sets), is what it was before. A change the
+    # epoch missed fails here instead of leaving a consume stream on a stale view.
+    property "an unmoved epoch means an unchanged view of every range", %{store: store} do
+      index = StreamData.integer(0..5)
+      offset = StreamData.integer(0..40)
+      keys = StreamData.list_of(StreamData.integer(0..63), min_length: 1, max_length: 6)
+
+      op =
+        StreamData.one_of([
+          StreamData.tuple({StreamData.constant(:produce), keys}),
+          StreamData.tuple({StreamData.constant(:produce_only), keys}),
+          StreamData.tuple({StreamData.constant(:seal), index}),
+          StreamData.tuple({StreamData.constant(:split), index}),
+          StreamData.tuple({StreamData.constant(:merge), index}),
+          StreamData.tuple({StreamData.constant(:delete), index}),
+          StreamData.tuple({StreamData.constant(:seed), index, offset, StreamData.integer(0..5)}),
+          StreamData.tuple({StreamData.constant(:unreachable), index, StreamData.integer(0..5)}),
+          StreamData.tuple({StreamData.constant(:await_horizon), index, offset}),
+          StreamData.tuple({StreamData.constant(:seed_durable), index, offset}),
+          StreamData.tuple({StreamData.constant(:adopt), index, offset}),
+          StreamData.tuple({StreamData.constant(:recache), StreamData.integer(0..8)}),
+          StreamData.constant(:open_group)
+        ])
+
+      one_record = Record.encoded_size(record("v0", "k0"))
+
+      check all(ops <- StreamData.list_of(op, min_length: 1, max_length: 25), max_runs: 200) do
+        {broker, _root_id} = broker_with_topic("events", 2, segment_max_bytes: 3 * one_record)
+
+        Enum.reduce(ops, {broker, [broker.dsrsm]}, fn op, {before, snapshots} ->
+          after_op = apply_view_op(before, store, op, snapshots)
+
+          if Broker.view_epoch(after_op) == Broker.view_epoch(before) do
+            for range_id <- topic_range_ids(before) ++ topic_range_ids(after_op) do
+              assert base_view(after_op, range_id) == base_view(before, range_id),
+                     "#{inspect(op)} changed the view of #{inspect(range_id)} and left the epoch"
+            end
+          end
+
+          {after_op, [after_op.dsrsm | snapshots]}
+        end)
+      end
+    end
+
+    test "a produce on a range nobody recovers leaves the epoch where it was", %{store: store} do
+      {broker, _root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+      epoch = Broker.view_epoch(broker)
+
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v1", "k1")])
+      assert Broker.view_epoch(broker) == epoch
+    end
+  end
+
+  defp topic_range_ids(broker),
+    do: broker.dsrsm |> DSRSM.ranges_of_topic("events") |> Enum.map(& &1.id) |> Enum.sort()
+
+  defp base_view(broker, range_id) do
+    view = ReadView.new(broker, [range_id])
+    %{view | ends: Map.delete(view.ends, range_id)}
+  end
+
+  defp pick(broker, index) do
+    case topic_range_ids(broker) do
+      [] -> nil
+      ids -> Enum.at(ids, rem(index, length(ids)))
+    end
+  end
+
+  defp records_for(keys), do: Enum.map(keys, &record("v#{&1}", "k#{&1}"))
+
+  defp apply_view_op(broker, store, {:produce, keys}, _snapshots) do
+    broker = broker |> produce_only(store, "events", records_for(keys)) |> elem(0)
+    Enum.reduce(Broker.due_rolls(broker), broker, &view_seal(&2, store, &1))
+  end
+
+  defp apply_view_op(broker, store, {:produce_only, keys}, _snapshots),
+    do: broker |> produce_only(store, "events", records_for(keys)) |> elem(0)
+
+  defp apply_view_op(broker, store, {:seal, index}, _snapshots), do: view_seal_active(broker, store, pick(broker, index))
+
+  defp apply_view_op(broker, store, {:split, index}, _snapshots) do
+    range_id = pick(broker, index)
+    broker = view_seal_active(broker, store, range_id)
+
+    case Broker.split_range(broker, range_id) do
+      {broker, {:ok, _left, _right}} -> broker
+      {broker, {:error, _reason}} -> broker
+    end
+  end
+
+  defp apply_view_op(broker, store, {:merge, index}, _snapshots) do
+    case broker.dsrsm |> DSRSM.active_ranges_of_topic("events") |> Enum.map(& &1.id) |> Enum.sort() do
+      [_, _ | _] = ids ->
+        first = rem(index, length(ids) - 1)
+        [a, b] = Enum.slice(ids, first, 2)
+        broker = Enum.reduce([a, b], broker, &view_seal_active(&2, store, &1))
+
+        case Broker.merge_ranges(broker, a, b) do
+          {broker, {:ok, _child}} -> broker
+          {broker, {:error, _reason}} -> broker
+        end
+
+      _fewer ->
+        broker
+    end
+  end
+
+  defp apply_view_op(broker, _store, {:delete, index}, _snapshots) do
+    case Enum.filter(segments(broker, pick(broker, index)), &(&1.state == :sealed)) do
+      [oldest | _] -> broker |> Broker.delete_segment(oldest.id) |> elem(0)
+      [] -> broker
+    end
+  end
+
+  defp apply_view_op(broker, _store, {:seed, index, next, seq}, _snapshots),
+    do: Broker.seed_range_state(broker, pick(broker, index), next, seq)
+
+  defp apply_view_op(broker, _store, {:unreachable, index, seq}, _snapshots),
+    do: Broker.seed_unrecovered_range(broker, pick(broker, index), seq)
+
+  defp apply_view_op(broker, _store, {:await_horizon, index, recovered_end}, _snapshots),
+    do: Broker.await_horizon(broker, pick(broker, index), recovered_end)
+
+  defp apply_view_op(broker, _store, {:seed_durable, index, offset}, _snapshots),
+    do: Broker.seed_durable(broker, pick(broker, index), offset)
+
+  defp apply_view_op(broker, _store, {:adopt, index, last}, _snapshots) do
+    range_id = pick(broker, index)
+
+    case Map.get(broker.segments, range_id) do
+      %{id: segment_id} -> Broker.adopt_offsets(broker, range_id, segment_id, last)
+      nil -> broker
+    end
+  end
+
+  defp apply_view_op(broker, _store, {:recache, back}, snapshots),
+    do: Broker.put_cache(broker, Enum.at(snapshots, rem(back, length(snapshots))))
+
+  defp apply_view_op(broker, _store, :open_group, _snapshots), do: broker |> Broker.open_group("g", "events") |> elem(0)
+
+  # `seal_active/3` and its fence, taking a refusal as the broker left: a `:recache` can install metadata
+  # older than the seal it would record.
+  defp view_seal_active(broker, store, range_id) do
+    case Broker.active_roll(broker, range_id) do
+      :none -> broker
+      roll -> view_seal(broker, store, roll)
+    end
+  end
+
+  defp view_seal(broker, store, roll) do
+    with {:ok, end_offset, bytes} <- FakeSegmentStore.seal(store, roll.primary, roll.segment_id, roll.start_offset),
+         {broker, :ok} <- Broker.record_seal(broker, roll, end_offset, bytes, 1_000) do
+      broker
+    else
+      {broker, {:error, _reason}} -> broker
+      {:error, _reason} -> broker
     end
   end
 

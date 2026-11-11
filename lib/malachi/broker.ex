@@ -105,7 +105,8 @@ defmodule Malachi.Broker do
           fencing: %{Metadata.range_id() => %{segment_id: Metadata.segment_id(), sent_at: integer()}},
           unrecovered: %{Metadata.range_id() => true},
           durable: %{Metadata.range_id() => non_neg_integer()},
-          horizon_pending: %{Metadata.range_id() => true}
+          horizon_pending: %{Metadata.range_id() => true},
+          view_epoch: non_neg_integer()
         }
 
   defstruct dsrsm: nil,
@@ -171,7 +172,10 @@ defmodule Malachi.Broker do
             # vouched for yet (a restart forgets the horizon). Until a probe, a produce or a seal raises it,
             # a consume of one refuses rather than serve a page that stops short of those records: empty and
             # successful, which a consumer cannot tell from having caught up. See `await_horizon/3`.
-            horizon_pending: %{}
+            horizon_pending: %{},
+            # Moves whenever a `Malachi.Broker.ReadView` built from this broker may differ from one built
+            # before, other than in the end of the range it is built for. See `view_epoch/1`.
+            view_epoch: 0
 
   @doc """
   Opens an empty broker.
@@ -380,8 +384,8 @@ defmodule Malachi.Broker do
   """
   @spec seed_range_state(t(), Metadata.range_id(), non_neg_integer(), non_neg_integer()) :: t()
   def seed_range_state(%__MODULE__{} = broker, range_id, next_offset, min_seq) do
-    broker = seed(broker, range_id, next_offset, min_seq)
-    %{broker | unrecovered: Map.delete(broker.unrecovered, range_id)}
+    seeded = seed(broker, range_id, next_offset, min_seq)
+    views_moved(%{seeded | unrecovered: Map.delete(seeded.unrecovered, range_id)}, broker, range_id)
   end
 
   @doc """
@@ -404,9 +408,9 @@ defmodule Malachi.Broker do
   @spec seed_unrecovered_range(t(), Metadata.range_id(), non_neg_integer()) :: t()
   def seed_unrecovered_range(%__MODULE__{} = broker, range_id, min_seq) do
     known_end? = Map.has_key?(broker.offsets, range_id) and not unrecovered?(broker, range_id)
-    broker = seed(broker, range_id, 0, min_seq)
-
-    if known_end?, do: broker, else: %{broker | unrecovered: Map.put(broker.unrecovered, range_id, true)}
+    seeded = seed(broker, range_id, 0, min_seq)
+    seeded = if known_end?, do: seeded, else: %{seeded | unrecovered: Map.put(seeded.unrecovered, range_id, true)}
+    views_moved(seeded, broker, range_id)
   end
 
   @doc "Whether `range_id` is waiting for a recovery that learns its end (see `seed_unrecovered_range/3`)."
@@ -437,7 +441,7 @@ defmodule Malachi.Broker do
   @spec await_horizon(t(), Metadata.range_id(), non_neg_integer()) :: t()
   def await_horizon(%__MODULE__{} = broker, range_id, recovered_end) do
     if not Map.has_key?(broker.durable, range_id) and recovered_end > durable_end(broker, range_id),
-      do: %{broker | horizon_pending: Map.put(broker.horizon_pending, range_id, true)},
+      do: views_moved(%{broker | horizon_pending: Map.put(broker.horizon_pending, range_id, true)}, broker, range_id),
       else: broker
   end
 
@@ -445,8 +449,12 @@ defmodule Malachi.Broker do
   @spec horizon_pending?(t(), Metadata.range_id()) :: boolean()
   def horizon_pending?(%__MODULE__{} = broker, range_id), do: Map.has_key?(broker.horizon_pending, range_id)
 
-  defp horizon_known(broker, range_ids),
-    do: %{broker | horizon_pending: Map.drop(broker.horizon_pending, range_ids)}
+  # Called on every produce, so it moves the view epoch only when a range it names was pending.
+  defp horizon_known(broker, range_ids) do
+    if Enum.any?(range_ids, &is_map_key(broker.horizon_pending, &1)),
+      do: views_changed(%{broker | horizon_pending: Map.drop(broker.horizon_pending, range_ids)}),
+      else: broker
+  end
 
   @doc """
   Records the placements of a produce this frontend answered as stored as durable (`durable_end/2`): each
@@ -502,15 +510,22 @@ defmodule Malachi.Broker do
   Never past the range's end.
   """
   @spec durable_end(t(), Metadata.range_id()) :: non_neg_integer()
-  def durable_end(%__MODULE__{} = broker, range_id) do
-    sealed = sealed_end(broker, range_id)
-    broker.durable |> Map.get(range_id, 0) |> max(sealed) |> min(max(next_offset(broker, range_id), sealed))
-  end
+  def durable_end(%__MODULE__{} = broker, range_id),
+    do: durable_end(broker, range_id, range_sealed_end(broker, range_id))
 
-  # Where the range's last sealed segment ends in the control plane's metadata, 0 before any seals.
-  defp sealed_end(broker, range_id) do
-    broker.dsrsm
-    |> DSRSM.segments_of_range(topic_of_range(range_id), range_id)
+  @doc """
+  `durable_end/2` given `sealed`, where the range's last sealed segment ends (`last_sealed_end/1` of its segments,
+  as a `Malachi.Broker.ReadView` of the range holds them): for a caller that keeps a view of the range, so
+  it does not walk the range's segments again on every produce.
+  """
+  @spec durable_end(t(), Metadata.range_id(), non_neg_integer()) :: non_neg_integer()
+  def durable_end(%__MODULE__{} = broker, range_id, sealed),
+    do: broker.durable |> Map.get(range_id, 0) |> max(sealed) |> min(max(next_offset(broker, range_id), sealed))
+
+  @doc "Where the last sealed of a range's `segments` ends, 0 when none is sealed."
+  @spec last_sealed_end([Metadata.segment_meta()]) :: non_neg_integer()
+  def last_sealed_end(segments) do
+    segments
     |> Enum.flat_map(fn
       %{state: :sealed, start_offset: start, length: length} when is_integer(length) -> [start + length]
       _active -> []
@@ -518,15 +533,45 @@ defmodule Malachi.Broker do
     |> Enum.max(fn -> 0 end)
   end
 
+  # Where the range's last sealed segment ends in the control plane's metadata, 0 before any seals.
+  defp range_sealed_end(broker, range_id),
+    do: broker.dsrsm |> DSRSM.segments_of_range(topic_of_range(range_id), range_id) |> last_sealed_end()
+
+  @doc """
+  A count that moves whenever a `Malachi.Broker.ReadView` built from this broker may differ from one built
+  before, other than in the end of the range it is built for (which each wake of a reader sets, see
+  `consume_view/2`): the control plane's metadata, the recovery marks, and the ends of a range's ancestors.
+  Equal counts mean equal views, so a reader that holds the view of a count is not sent it again. Moving it
+  when nothing changed costs a view sent again; a change it missed would leave a reader on a stale view,
+  which is why the property test in `Malachi.BrokerTest` checks it against the views themselves.
+  """
+  @spec view_epoch(t()) :: non_neg_integer()
+  def view_epoch(%__MODULE__{view_epoch: epoch}), do: epoch
+
+  defp views_changed(broker), do: %{broker | view_epoch: broker.view_epoch + 1}
+
+  # Moves the view epoch when what a view holds of `range_id` (its end, as an ancestor's view reads it, and
+  # its recovery marks) differs between `before` and `broker`.
+  defp views_moved(broker, before, range_id) do
+    if view_marks(broker, range_id) == view_marks(before, range_id), do: broker, else: views_changed(broker)
+  end
+
+  defp view_marks(broker, range_id),
+    do:
+      {Map.get(broker.offsets, range_id), is_map_key(broker.unrecovered, range_id),
+       is_map_key(broker.horizon_pending, range_id)}
+
+  # Installs the control plane's metadata, moving the view epoch unless it is the one already held.
+  defp put_dsrsm(broker, dsrsm),
+    do: if(dsrsm == broker.dsrsm, do: broker, else: views_changed(%{broker | dsrsm: dsrsm}))
+
   @doc """
   A `Malachi.Broker.ReadView` of `range_id` whose horizon on the range's own records is `durable_end/2`
   rather than the range's end: what a consume stream and `fetch_range` read through.
   """
   @spec consume_view(t(), Metadata.range_id()) :: ReadView.t()
-  def consume_view(%__MODULE__{} = broker, range_id) do
-    view = ReadView.new(broker, [range_id])
-    %{view | ends: Map.put(view.ends, range_id, durable_end(broker, range_id))}
-  end
+  def consume_view(%__MODULE__{} = broker, range_id),
+    do: broker |> ReadView.new([range_id]) |> ReadView.put_end(range_id, durable_end(broker, range_id))
 
   @doc """
   Adopts the primary-assigned end offset of a dispatched batch into the local bookkeeping, when the
@@ -545,11 +590,16 @@ defmodule Malachi.Broker do
   def adopt_offsets(%__MODULE__{} = broker, range_id, segment_id, actual_last) do
     case Map.get(broker.segments, range_id) do
       %{id: ^segment_id} ->
-        %{
+        adopted = %{
           broker
           | offsets: Map.update(broker.offsets, range_id, actual_last + 1, &max(&1, actual_last + 1)),
             unrecovered: Map.delete(broker.unrecovered, range_id)
         }
+
+        # Called on every produce answer. The range's own end is not part of its views (each wake sets it),
+        # and a range whose active segment this frontend leads has no descendants whose views hold it, so
+        # only a recovery mark lifted here moves the epoch.
+        if unrecovered?(broker, range_id), do: views_changed(adopted), else: adopted
 
       _closed_or_rolled ->
         broker
@@ -1277,12 +1327,13 @@ defmodule Malachi.Broker do
   # Seats a range's next offset at a sealed edge: every record below it is durable, and none above it is
   # yet, since the next segment starts there.
   defp put_offset(broker, range_id, offset),
-    do: %{
-      broker
-      | offsets: Map.put(broker.offsets, range_id, offset),
-        durable: Map.put(broker.durable, range_id, offset),
-        horizon_pending: Map.delete(broker.horizon_pending, range_id)
-    }
+    do:
+      views_changed(%{
+        broker
+        | offsets: Map.put(broker.offsets, range_id, offset),
+          durable: Map.put(broker.durable, range_id, offset),
+          horizon_pending: Map.delete(broker.horizon_pending, range_id)
+      })
 
   @doc """
   The current metadata as one flat view: the union of the sharded vnodes (see
@@ -1432,7 +1483,7 @@ defmodule Malachi.Broker do
   """
   @spec put_cache(t(), DSRSM.t(), [DSRSM.vnode_id()]) :: t()
   def put_cache(%__MODULE__{} = broker, %DSRSM{} = dsrsm, unreachable \\ []) do
-    %{broker | dsrsm: DSRSM.retain_vnodes(dsrsm, broker.dsrsm, unreachable)}
+    put_dsrsm(broker, DSRSM.retain_vnodes(dsrsm, broker.dsrsm, unreachable))
   end
 
   @doc """
@@ -1467,7 +1518,7 @@ defmodule Malachi.Broker do
   def replay_journal(%__MODULE__{} = broker, []), do: broker
 
   def replay_journal(%__MODULE__{} = broker, commands) do
-    %{broker | dsrsm: Enum.reduce(commands, broker.dsrsm, &replay_command/2)}
+    put_dsrsm(broker, Enum.reduce(commands, broker.dsrsm, &replay_command/2))
   end
 
   defp replay_command(command, dsrsm) do
@@ -1735,7 +1786,7 @@ defmodule Malachi.Broker do
   defp own_position(broker, range_id, own, offset) do
     cond do
       unrecovered?(broker, range_id) -> {:error, :metadata_unavailable}
-      offset <= max(next_offset(broker, range_id), sealed_end(broker, range_id)) -> {:ok, {own, offset}}
+      offset <= max(next_offset(broker, range_id), range_sealed_end(broker, range_id)) -> {:ok, {own, offset}}
       true -> {:error, :invalid_position}
     end
   end
@@ -1927,11 +1978,12 @@ defmodule Malachi.Broker do
       meta ->
         active = %{id: meta.id, start_offset: meta.start_offset, bytes: 0, replica_set: meta.replica_set}
 
-        broker = %{
-          broker
-          | segments: Map.put(broker.segments, range_id, active),
-            offsets: Map.update(broker.offsets, range_id, meta.start_offset, &max(&1, meta.start_offset))
-        }
+        broker =
+          views_changed(%{
+            broker
+            | segments: Map.put(broker.segments, range_id, active),
+              offsets: Map.update(broker.offsets, range_id, meta.start_offset, &max(&1, meta.start_offset))
+          })
 
         {:ok, seq_past(broker, range_id, meta.id), active}
     end
@@ -2072,8 +2124,14 @@ defmodule Malachi.Broker do
   # apply has nothing to replay.
   defp apply_metadata(broker, command) do
     {dsrsm, reply} = broker.command_fun.(broker.dsrsm, Metadata.command_target_topic(command), command)
-    {%{broker | dsrsm: dsrsm, journal: journal_put(broker.journal, command, dsrsm, broker.dsrsm)}, reply}
+    applied = %{broker | dsrsm: dsrsm, journal: journal_put(broker.journal, command, dsrsm, broker.dsrsm)}
+    {if(dsrsm == broker.dsrsm or view_neutral?(command), do: applied, else: views_changed(applied)), reply}
   end
+
+  # The commands that change nothing a `Malachi.Broker.ReadView` holds (no range, no segment): a group's
+  # offsets and membership, and a topic's policy binding. Every other command moves the view epoch, so a
+  # new command is counted as changing views until it is listed here.
+  defp view_neutral?(command), do: elem(command, 0) in [:commit_offset, :open_group, :bind_topic_policy]
 
   defp journal_put(nil, _command, _applied, _previous), do: nil
 
