@@ -396,6 +396,8 @@ class MalachiClient {
     }
     if (this.socket) {
       this.socket.removeAllListeners();
+      // a peer that answers the FIN with an RST still emits 'error'; with no listener Node throws it uncaught
+      this.socket.on('error', () => {});
       this.socket.end();
       this.socket = null;
     }

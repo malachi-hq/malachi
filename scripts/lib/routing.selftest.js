@@ -320,6 +320,19 @@ async function selfTest() {
     assert.ok(socket.destroyed);
   });
 
+  await check('a reset that reaches a closed connection is not thrown out of the process', async () => {
+    const socket = Object.assign(new EventEmitter(), { ended: false, end() { this.ended = true; } });
+    const client = new MalachiClient({ host: 'h', port: 1, createConnection: () => socket });
+    const connected = client.connect();
+    socket.emit('connect');
+    await connected;
+    client.close();
+    assert.ok(socket.ended, 'the connection is ended');
+    // a broker that answers the FIN with an RST: with no 'error' listener left, Node throws it uncaught
+    const reset = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+    assert.doesNotThrow(() => socket.emit('error', reset));
+  });
+
   await check('a request nobody answers fails flagged as a timeout, not a refusal', async () => {
     const server = await fakeServer(() => null);
     try {
