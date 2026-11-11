@@ -64,8 +64,15 @@ defmodule OciDailyRunScriptTest do
     echo "oci $*" >> "$FAKE_LOG"
     case "$*" in
       *"resource-manager job create-apply-job"*) echo "ocid1.ormjob.oc1..apply" ;;
+      # Paginated, as the real CLI is: without --all it returns the first 200 entries only, and in a real failed
+      # apply the capacity error came at entry 929 of 977 (job ormjob20261111090013). The first page here holds
+      # only the plan, so a call without --all never sees the error.
       *"resource-manager job get-job-logs"*)
-        if [ "${FAKE_APPLY:-ok}" = "capacity" ]; then echo "Error: Out of host capacity."; else echo "Error: something else"; fi ;;
+        echo "Terraform will perform the following actions: (first page of the plan)"
+        case "$*" in
+          *"--all"*)
+            if [ "${FAKE_APPLY:-ok}" = "capacity" ]; then echo "Error: Out of host capacity."; else echo "Error: something else"; fi ;;
+        esac ;;
       *"resource-manager job get --job-id"*)
         case "${FAKE_APPLY:-ok}" in
           ok) echo SUCCEEDED ;;
