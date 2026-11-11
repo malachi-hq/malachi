@@ -561,9 +561,10 @@ defmodule Malachi.Broker do
       {Map.get(broker.offsets, range_id), is_map_key(broker.unrecovered, range_id),
        is_map_key(broker.horizon_pending, range_id)}
 
-  # Installs the control plane's metadata, moving the view epoch unless it is the one already held.
+  # Installs the control plane's metadata, moving the view epoch unless it is the one already held (matched
+  # exactly, see `apply_metadata/2`).
   defp put_dsrsm(broker, dsrsm),
-    do: if(dsrsm == broker.dsrsm, do: broker, else: views_changed(%{broker | dsrsm: dsrsm}))
+    do: if(dsrsm === broker.dsrsm, do: broker, else: views_changed(%{broker | dsrsm: dsrsm}))
 
   @doc """
   A `Malachi.Broker.ReadView` of `range_id` whose horizon on the range's own records is `durable_end/2`
@@ -2125,7 +2126,9 @@ defmodule Malachi.Broker do
   defp apply_metadata(broker, command) do
     {dsrsm, reply} = broker.command_fun.(broker.dsrsm, Metadata.command_target_topic(command), command)
     applied = %{broker | dsrsm: dsrsm, journal: journal_put(broker.journal, command, dsrsm, broker.dsrsm)}
-    {if(dsrsm == broker.dsrsm or view_neutral?(command), do: applied, else: views_changed(applied)), reply}
+    # matched exactly, as `journal_put/4` matches by identity: a seal changes one entry of the vnode's segments,
+    # and loose equality would walk every other entry of the map before it found the one that differs
+    {if(view_neutral?(command) or dsrsm === broker.dsrsm, do: applied, else: views_changed(applied)), reply}
   end
 
   # The commands that change nothing a `Malachi.Broker.ReadView` holds (no range, no segment): a group's
