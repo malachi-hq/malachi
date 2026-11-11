@@ -118,3 +118,20 @@ run "the_run_hour_must_be_a_valid_hour" {
 
   expect_failures = [var.run_hour_utc]
 }
+
+run "a_replaced_orchestrator_is_created_before_the_old_one_is_destroyed" {
+  command = plan
+
+  # Terraform does not expose lifecycle settings to an assertion, so the file is read: the block must be there.
+  assert {
+    condition     = var.image_tag != "" && can(regex("lifecycle \\{\\n    create_before_destroy = true\\n  \\}", file("compute.tf")))
+    error_message = "Without create_before_destroy, a replacement destroys the orchestrator first and leaves none when OCI has no capacity."
+  }
+
+  # Both instances exist during the replacement, so none may hold a hostname, which must be unique in the subnet.
+  assert {
+    # hostname_label is computed when unset, so its absence is read from the file.
+    condition     = oci_core_instance.orchestrator.create_vnic_details[0].assign_private_dns_record == false && !can(regex("hostname_label\\s*=", file("compute.tf")))
+    error_message = "The orchestrator must have no hostname or private DNS record, or the old and the new instance collide during a replacement."
+  }
+}

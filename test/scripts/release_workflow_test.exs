@@ -7,22 +7,16 @@ defmodule ReleaseWorkflowTest do
   # does, because the repository has no YAML parser among its test dependencies.
   use ExUnit.Case, async: true
 
-  @path Path.expand("../../.github/workflows/release.yml", __DIR__)
+  alias Malachi.Test.WorkflowText
 
   setup_all do
-    text = File.read!(@path)
-    %{text: text, jobs: jobs(text)}
+    text = File.read!(WorkflowText.path("release.yml"))
+    %{text: text, jobs: WorkflowText.jobs(text)}
   end
 
-  # Each job's text, keyed by its name: from `  <name>:` at two spaces to the next job or the end of the file.
-  defp jobs(text) do
-    [_, body] = String.split(text, ~r/^jobs:\n/m, parts: 2)
-
-    # A comment above a job is split off as its own chunk with no job key, and is dropped.
-    for job <- Regex.split(~r/^(?=  [a-z][a-z0-9_-]*:\n)/m, body, trim: true),
-        [name] <- [Regex.run(~r/\A  ([a-z][a-z0-9_-]*):/, job, capture: :all_but_first)],
-        into: %{},
-        do: {name, job}
+  test "the git identity of the bump is the release App's, set by the shared script", %{jobs: jobs} do
+    assert jobs["release"] =~ ~s(run: scripts/app-bot-git-identity.sh "$APP_SLUG")
+    refute jobs["release"] =~ "github-actions[bot]"
   end
 
   test "the three jobs are the ones the checks below read", %{jobs: jobs} do

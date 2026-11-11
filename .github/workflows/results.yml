@@ -14,6 +14,12 @@ name: Publish results
 # main runs them again and commits the result,
 # so what the site publishes is always what the merged code measured on a CI runner rather than on
 # whichever laptop last felt like capturing a sample.
+#
+# main takes changes only through a reviewed pull request, so the results commit is pushed by the
+# malachi-release GitHub App, the one actor main's protection lets skip a pull request, from the
+# commit-results job in the `release` environment (only main may use it). A push made by an App starts
+# workflows, unlike one made with GITHUB_TOKEN, so every job here skips a push by that App: its commits
+# are the version bump and these results, and measuring either would publish again, and again.
 on:
   pull_request:
   push:
@@ -26,6 +32,8 @@ permissions:
 jobs:
   loadtest:
     name: Load test (${{ matrix.generator }})
+    # Not the release App's own pushes: see the header.
+    if: github.event_name != 'push' || github.actor != 'malachi-release[bot]'
     runs-on: ubuntu-latest
     # The sweep takes about 16 minutes per generator (five batch sizes, 25 points, one A-A repeat;
     # measured at 14m54s and 15m11s). A run twice that long is stuck rather than slow, and should fail
@@ -133,6 +141,8 @@ jobs:
 
   chaos:
     name: Chaos certification
+    # Not the release App's own pushes: see the header.
+    if: github.event_name != 'push' || github.actor != 'malachi-release[bot]'
     runs-on: ubuntu-latest
 
     steps:
@@ -172,22 +182,23 @@ jobs:
           path: ${{ runner.temp }}/results/*.json
           if-no-files-found: warn
 
+  # The pull request's comment. Committing to main is commit-results below, a separate job because only
+  # it runs in the release environment, which a pull request's run cannot enter.
   publish:
     name: Publish
     runs-on: ubuntu-latest
     needs: [loadtest, chaos]
     # Not always(): a cancelled run has nothing to say, but a run whose chaos certification FAILED has
     # a great deal to say and must still reach the comment below.
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
 
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
 
     # Reads the comment list and then writes based on what it read, so two runs of this job must not
     # interleave: both would find no marker and both would create one. Keyed per ref so unrelated pull
-    # requests still run in parallel, and never cancel-in-progress, because a run that is already
-    # pushing a commit should finish rather than leave the branch half updated.
+    # requests still run in parallel.
     concurrency:
       group: publish-results-${{ github.ref }}
       cancel-in-progress: false
@@ -197,12 +208,12 @@ jobs:
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit
-      # The full history, because publishing decides between two results by which commit is newer
-      # (scripts/publish-results.sh), and that is an ancestry question a shallow clone cannot answer.
+      # Only the working tree, for the collect step below. Nothing here does authenticated git, so the
+      # token has no business staying in the local git config.
       - name: 📥 Checkout code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       - name: 📥 Download results
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -212,23 +223,15 @@ jobs:
 
       - name: 📋 Collect what was measured
         id: collect
-        env:
-          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           mkdir -p benchmark/published
 
           # A workload that produced no artifact used to leave the last committed file in place, and
-          # the pull request comment then reported that older measurement as this run's.
-          #
-          # Cleared on a pull request only, where nothing is committed and the worst case is a row
-          # that reads "not recorded". On a push to main the commit step below would see the removal
-          # as a deletion and drop a good published result over one failed run, trading a stale number
-          # for no number at all. There the file stays, and every surface that renders it prints the
-          # git ref it came from, so a reader can see it is not this commit's.
-          if [ "$EVENT" = "pull_request" ]; then
-            rm -f benchmark/published/*.json
-          fi
+          # the pull request comment then reported that older measurement as this run's. Nothing is
+          # committed from here, so the worst case of clearing is a row that reads "not recorded".
+          # commit-results does NOT clear: see there.
+          rm -f benchmark/published/*.json
 
           for f in "$RUNNER_TEMP"/artifacts/*.json; do
             [ -e "$f" ] || continue
@@ -366,24 +369,87 @@ jobs:
               body: body
             });
 
-      # Only on main, and only what actually changed. A push authenticated with GITHUB_TOKEN does not
-      # start another workflow run, which is what keeps this from committing to itself forever; the
-      # cost of that same rule is that it does not start the Pages build either, so pages.yml listens
-      # for this workflow to finish instead.
+  # Commits what main's code measured. Only on a push to main, never the release App's own push (see the
+  # header), and in the release environment, the only place the App's key is readable.
+  commit-results:
+    name: Commit results
+    runs-on: ubuntu-latest
+    needs: [loadtest, chaos]
+    # Not always(): a cancelled run has nothing to say. A failed chaos certification is still committed: the
+    # published page says it failed.
+    if: >-
+      ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      github.actor != 'malachi-release[bot]' }}
+    environment: release
+
+    # The push uses the App's token, not this job's.
+    permissions:
+      contents: read
+
+    # The same group as upgrade-chaos.yml's publisher, so the two never push results over each other, and
+    # never cancel-in-progress: a run that is already pushing a commit should finish.
+    concurrency:
+      group: publish-results-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - name: 🔑 Mint a token of the release App
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Contents only: enough to push the results commit, and nothing else.
+          permission-contents: write
+
+      # The full history, because publishing decides between two results by which commit is newer
+      # (scripts/publish-results.sh), and that is an ancestry question a shallow clone cannot answer.
+      - name: 📥 Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: 📥 Download results
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: ${{ runner.temp }}/artifacts
+          merge-multiple: true
+
+      # Not cleared first, unlike the pull request's collect: the commit below would see a removal as a
+      # deletion and drop a good published result over one failed run, trading a stale number for no
+      # number at all. The file stays, and every surface that renders it prints the git ref it came from.
+      - name: 📋 Collect what was measured
+        run: |
+          set -euo pipefail
+          mkdir -p benchmark/published
+          for f in "$RUNNER_TEMP"/artifacts/*.json; do
+            [ -e "$f" ] || continue
+            cp "$f" "benchmark/published/$(basename "$f")"
+          done
+          git status --porcelain -- benchmark/published
+
+      - name: 🪪 Commit as the release App
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: scripts/app-bot-git-identity.sh "$APP_SLUG"
+
+      # Only what actually changed. The commit does not start pages.yml, which listens for this workflow
+      # to finish instead.
       #
       # Main has usually moved by the time this runs, sometimes with results of its own: a rerun of
       # this run after its first attempt already published, or a newer run that finished first. The
       # script decides per file which result main should hold (a newer commit's result is never
       # overwritten, a rerun replaces its own) and ends green when there is nothing left to write. A
       # rebase used to stop on those files as a conflict and fail the run with main already correct
-      # (run 35147990781). The concurrency group above serializes runs of THIS workflow and cannot
-      # serialize a human, so the script also retries a push that loses a race, a bounded number of
-      # times.
+      # (run 35147990781). The concurrency group above serializes the publishers and cannot serialize a
+      # human, so the script also retries a push that loses a race, a bounded number of times.
       - name: 📌 Commit the refreshed results
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           PUBLISH_SHA: ${{ github.sha }}
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-          scripts/publish-results.sh
+        run: scripts/publish-results.sh

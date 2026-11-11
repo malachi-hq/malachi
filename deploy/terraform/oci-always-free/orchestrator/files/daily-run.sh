@@ -166,7 +166,10 @@ apply_once() {
   APPLY_IN_FLIGHT="no"
   [ "$wait_rc" -eq 0 ] || return 3
   [ "$JOB_STATE" = "SUCCEEDED" ] && return 0
-  "${OCI[@]}" resource-manager job get-job-logs --job-id "$job" >"$WORK/apply.log" 2>/dev/null || true
+  # --all: the CLI returns one page of 200 entries by default, and the error comes at the end of a long log. On
+  # 2026-11-11 the capacity error of job ormjob20261111090013 was entry 929 of 977, the first page did not hold
+  # it, and the run tore the cluster down as apply-failed instead of retrying.
+  "${OCI[@]}" resource-manager job get-job-logs --job-id "$job" --all >"$WORK/apply.log" 2>/dev/null || true
   if grep -qi "out of host capacity" "$WORK/apply.log" 2>/dev/null; then return 2; fi
   return 1
 }

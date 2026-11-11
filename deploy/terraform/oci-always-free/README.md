@@ -178,6 +178,15 @@ state read or the destroy job shows up in the run's log with the command's own e
   date is not pinned. The orchestrator's apt packages are not pinned by version. The Docker image is pinned by its
   tag, not by its digest. Nothing is `latest` in the image, and nothing is piped into a shell.
 
+## Updating the orchestrator
+
+The daily run clones the cluster root from `main`, but `daily-run.sh` and the timer live in the orchestrator's
+cloud-init. A change to either reaches the instance only through `terraform apply` of the orchestrator root, which
+replaces the instance. The new instance is created before the old one is destroyed, so when OCI has no micro
+capacity the apply fails and the old orchestrator keeps running; apply again later. Apply outside the daily run:
+during it, the cluster holds the second free micro and 150 GB of the 200 GB of boot volume, and the new instance
+cannot be created.
+
 ## Known limits
 
 - **Idle reclamation.** Oracle reclaims an Always Free instance whose CPU and network stay under 20% (p95) for
