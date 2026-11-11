@@ -24,9 +24,12 @@ resource "oci_core_instance" "orchestrator" {
     assign_public_ip = true
   }
 
+  # OCI refuses instance metadata above 32,000 bytes. The run script is gzipped before it is encoded, because the
+  # whole template is base64-encoded once more and an uncompressed script alone took it past the limit. The
+  # size is checked by tests/policy.tftest.hcl.
   metadata = {
     user_data = base64encode(templatefile("${path.module}/templates/orchestrator.cloud-init.yaml.tftpl", {
-      run_script_b64         = base64encode(file("${path.module}/files/daily-run.sh"))
+      run_script_gz_b64      = base64gzip(file("${path.module}/files/daily-run.sh"))
       run_hour               = var.run_hour_utc
       stack_id               = var.stack_id
       cluster_compartment_id = var.cluster_compartment_id

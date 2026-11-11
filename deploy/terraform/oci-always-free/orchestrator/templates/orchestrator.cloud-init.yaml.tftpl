@@ -24,8 +24,9 @@ write_files:
       WORK=/var/lib/malachi-orchestrator/run
   - path: /opt/malachi/daily-run.sh
     permissions: "0755"
-    encoding: b64
-    content: ${run_script_b64}
+    # gzipped, then base64: compute.tf compresses it so the user_data stays under OCI's 32,000-byte limit.
+    encoding: gz+b64
+    content: ${run_script_gz_b64}
   - path: /etc/systemd/system/malachi-daily.service
     permissions: "0644"
     content: |
