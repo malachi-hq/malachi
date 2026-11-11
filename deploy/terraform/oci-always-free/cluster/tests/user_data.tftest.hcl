@@ -32,7 +32,7 @@ run "every_node_user_data_fits_the_oci_metadata_limit_with_headroom" {
   command = apply
 
   assert {
-    condition     = alltrue([for n in oci_core_instance.node : length(n.metadata["user_data"]) < 30000])
+    condition = alltrue([for n in oci_core_instance.node : length(n.metadata["user_data"]) < 30000])
     # The user_data holds the generated passwords, so it is sensitive; its length reveals nothing, and without
     # nonsensitive() Terraform would hide the whole message.
     error_message = "A node's user_data is too large: ${jsonencode({ for k, n in oci_core_instance.node : k => nonsensitive(length(n.metadata["user_data"])) })} bytes; OCI refuses metadata above 32,000 at launch."
