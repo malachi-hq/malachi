@@ -157,8 +157,18 @@ defmodule DepsCheck do
     full: @gate_order -- @actions_gates,
     # Workflows run on GitHub, not here: a static lint and the pull request's own CI. Workflows the
     # pull request does not trigger stay unverified until dispatched, which the skill reports.
-    actions: @actions_gates
+    actions: @actions_gates,
+    # The runtime base image of the root Dockerfile (Dependabot's docker ecosystem), not a Hex package,
+    # so none of the base Hex gates apply. A change in its libc or package set shows in the release image
+    # built from the worktree and booted, the assets it serves, and the pull request's own CI, which builds
+    # and boots it too. No drill: every drill builds from benchmark/Dockerfile.loadtest, which runs the
+    # Elixir image and never this base. A bump of the Elixir image recompiles everything the drills run,
+    # so it takes the full suite, not this tier.
+    docker: ["scripts/docker-static-assets-check.sh", "make docker-build docker-validate", "pull request CI"]
   }
+
+  # The tiers whose updates are not Hex packages, so they never take the @base gates.
+  @non_hex_tiers [:actions, :docker]
 
   # The gates a run of each workflow proves, because the workflow runs them as blocking steps on Linux.
   # A run URL is evidence for these only, and only with the workflow named beside it. Everything else
@@ -221,12 +231,13 @@ defmodule DepsCheck do
   def tiers_table, do: @tiers
   def proven_by, do: @proven_by
   def tier_names, do: Map.keys(@tier_gates)
+  def non_hex_tiers, do: @non_hex_tiers
 
   # -- Gates and groups ------------------------------------------------------------------------------
 
   @doc "The gates a set of tiers requires, in the order they run."
   def gates_for(tiers) do
-    hex? = Enum.any?(tiers, &(&1 != :actions))
+    hex? = Enum.any?(tiers, &(&1 not in @non_hex_tiers))
     required = MapSet.new(if(hex?, do: @base, else: []) ++ Enum.flat_map(tiers, &Map.fetch!(@tier_gates, &1)))
     Enum.filter(@gate_order, &MapSet.member?(required, &1))
   end
@@ -238,6 +249,7 @@ defmodule DepsCheck do
   def group_for(tiers) do
     cond do
       :actions in tiers -> "actions"
+      :docker in tiers -> "docker"
       :consensus in tiers or :full in tiers -> "ra"
       :auth in tiers -> "hex-auth"
       true -> "hex"

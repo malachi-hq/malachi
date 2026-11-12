@@ -212,6 +212,12 @@ first. The table lives in the script, with the reason for each tier beside it, a
 - **ra**: `ra` and the packages it pins, always on its own, with the multinode suite and every drill.
   A package nothing requires and the table does not name lands here too, with the full suite: nobody
   has said which checks are enough for it, so all of them are.
+- **docker**: the runtime base image of the root `Dockerfile` (`alpine`). It has no lock and no plan
+  line, so its verdict tier is `docker`: the image built from the worktree and validated, the static
+  assets check and the pull request's CI, with none of the Hex gates and no drill, since every drill
+  builds from `benchmark/Dockerfile.loadtest` and never runs this base. A bump of the Elixir image (the
+  builder stage and `benchmark/Dockerfile.loadtest`) recompiles everything the drills run, so its
+  verdict tier is `full`.
 
 A `DECISION` line is a constraint that changed in `mix.exs` (Dependabot widened `joken` from `~> 2.6.2`
 to `~> 2.7.0`, for example). A `STOP` line is any other change to `mix.exs`, which a dependency update
@@ -547,13 +553,15 @@ their logs count.
 
 Then the verdict, which refuses a group unless every gate its tiers need passed on Linux with evidence.
 Its tiers are the group's `verdict tiers:` line in the plan's output, passed exactly as printed (`tool`,
-`auth,http`, `consensus`); for the actions group, `actions`:
+`auth,http`, `consensus`); for the actions group, `actions`; for the docker group, which has no lock
+and so no plan line, `docker`:
 
 ```
 elixir scripts/deps_check.exs verdict "$tiers" "$S/results.json" "$head" "$main" "$tree"
 ```
 
-Never pass a tier the plan did not print for that group: the verdict checks only the gates of the tiers
+Never pass a tier the plan did not print for that group (the actions and docker groups take the fixed
+tier named above, and nothing else): the verdict checks only the gates of the tiers
 it is given, so a wrong one verifies the group against another group's checks. A `$head` equal to
 `$main` is refused: it means nothing was pushed, and every run of main would count as a run of the
 update. The pushed branch's tree is the tree the local gates recorded only when the commits hold

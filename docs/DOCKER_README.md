@@ -342,13 +342,13 @@ endpoint.
 
 | Property | Value |
 |----------|-------|
-| **Base Image** | `alpine:3.21` |
+| **Base Image** | `alpine:3.24` |
 | **Runtime** | Erlang/OTP 28, Elixir 1.19 |
 | **Architecture** | `linux/amd64`, `linux/arm64` |
 | **User** | `malachi` (UID 1000) |
 | **Workdir** | `/app` |
 | **JIT Compilation** | Enabled (`+JPperf true`) |
-| **Runtime Dependencies** | `openssl`, `libstdc++`, `ncurses-libs` |
+| **Runtime Dependencies** | `libssl3` and `libcrypto3` (copied from the builder), `libstdc++`, `libgcc`, `ncurses-libs` |
 
 ---
 
@@ -364,7 +364,7 @@ make docker-validate
 ```
 
 Checks:
-- ✅ Runtime dependencies (argon2 NIF, openssl)
+- ✅ Runtime dependencies (argon2 NIF, crypto NIF loading libcrypto)
 - ✅ ERL_FLAGS configuration with JIT
 - ✅ Service availability (TCP + Dashboard)
 - ✅ Performance benchmarks with throughput metrics
