@@ -1,0 +1,7 @@
+# Local state is never committed. The real state lives in the Resource Manager stack inside OCI.
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform/
+crash.log

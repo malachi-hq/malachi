@@ -1,3 +1,8 @@
+# The script is required before this module compiles, so its functions exist when the tests below are
+# compiled and nothing is left to a runtime load. It runs a subcommand only when no ExUnit server is
+# running, so loading it here under `mix test` does not execute one.
+Code.require_file(Path.expand("../../scripts/deps_check.exs", __DIR__))
+
 defmodule DependencyUpdatesSkillTest do
   # The dependency-updates skill is instructions, so what can be checked is what it ships and what it
   # promises: no em dash in any file this work added (a repository rule), a name and a description that
@@ -25,12 +30,6 @@ defmodule DependencyUpdatesSkillTest do
 
   # Written as an escape, so this file does not carry the character it forbids.
   @em_dash "\u2014"
-
-  setup_all do
-    # Safe to require: the script only runs a subcommand when no ExUnit server is running.
-    Code.require_file("scripts/deps_check.exs")
-    :ok
-  end
 
   defp frontmatter do
     [_, frontmatter | _] = @skill |> File.read!() |> String.split("---\n", parts: 3)
@@ -403,8 +402,15 @@ defmodule DependencyUpdatesSkillTest do
       Enum.any?(step.matrix, fn entry -> Enum.all?(step.conditions, &runs?(&1, entry)) end)
   end
 
+  # The one condition that is not a matrix key: results.yml skips a push by the release App, whose commits are
+  # the version bump and the published results. Such a push is never the run a gate is proven by (that is a
+  # pull request's run, or a push of a merge), so for the proof the step runs.
+  @skips_only_the_release_app "github.event_name != 'push' || github.actor != 'malachi-release[bot]'"
+
   # Only the forms the workflows use are read; any other condition on a mapped step fails the test
   # rather than being guessed at.
+  defp runs?(@skips_only_the_release_app, _entry), do: true
+
   defp runs?(condition, entry) do
     case Regex.run(~r/^(?:\$\{\{\s*)?(!?)\s*matrix\.([a-z_-]+)\s*(?:\}\})?$/, String.trim(to_string(condition))) do
       [_, "", key] -> entry[key] == true

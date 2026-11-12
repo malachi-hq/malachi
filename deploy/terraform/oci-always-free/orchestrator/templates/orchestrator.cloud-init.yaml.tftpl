@@ -1,0 +1,66 @@
+#cloud-config
+# Rendered by compute.tf. Nothing here is a secret: the orchestrator authenticates with instance principal,
+# so it holds no API key. The probe's password lives in the stack state, read at run time.
+package_update: true
+packages:
+  - docker.io
+  - jq
+  - python3-venv
+  - curl
+  - coreutils
+  - git
+
+write_files:
+  - path: /etc/malachi-orchestrator.env
+    permissions: "0644"
+    owner: root:root
+    content: |
+      STACK_ID=${stack_id}
+      CLUSTER_COMPARTMENT_ID=${cluster_compartment_id}
+      TOPIC_ID=${topic_id}
+      IMAGE_TAG=${image_tag}
+      REGION=${region}
+      AVAILABILITY_DOMAIN=${availability_domain}
+      WORK=/var/lib/malachi-orchestrator/run
+  - path: /opt/malachi/daily-run.sh
+    permissions: "0755"
+    # gzipped, then base64: compute.tf compresses it so the user_data stays under OCI's 32,000-byte limit.
+    encoding: gz+b64
+    content: ${run_script_gz_b64}
+  - path: /etc/systemd/system/malachi-daily.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Malachi daily ephemeral cluster run
+      After=network-online.target docker.service
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      EnvironmentFile=/etc/malachi-orchestrator.env
+      Environment=PATH=/opt/malachi-oci/bin:/usr/local/bin:/usr/bin:/bin
+      ExecStart=/opt/malachi/daily-run.sh
+      # Worst case: three apply jobs of up to APPLY_WAIT_LIMIT each (3 h), two 30-minute capacity waits, the
+      # ready and smoke waits, and a destroy job of up to 1.5 h. A SIGTERM during an apply ends the run as apply-stuck;
+      # during a destroy, the destroy completes. systemd's SIGKILL after its stop timeout still cuts either short.
+      TimeoutStartSec=14h
+  - path: /etc/systemd/system/malachi-daily.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Run the Malachi daily cluster at ${run_hour}:00 UTC
+
+      [Timer]
+      OnCalendar=*-*-* ${run_hour}:00:00 UTC
+      Persistent=false
+
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  # The OCI CLI is pinned to one release, installed into its own virtualenv. Never a curl piped into a shell.
+  - ["sh", "-c", "python3 -m venv /opt/malachi-oci && /opt/malachi-oci/bin/pip install --no-cache-dir oci-cli==3.96.0"]
+  - ["sh", "-c", "mkdir -p /var/lib/malachi-orchestrator/run"]
+  - ["systemctl", "enable", "--now", "docker"]
+  - ["systemctl", "daemon-reload"]
+  - ["systemctl", "enable", "--now", "malachi-daily.timer"]

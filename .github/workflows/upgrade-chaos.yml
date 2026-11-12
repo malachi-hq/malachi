@@ -43,7 +43,7 @@ jobs:
           egress-policy: audit
       # The full history and its tags: OLD is a release tag, resolved and exported by git.
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -65,7 +65,7 @@ jobs:
       # JSON and keeps the logs of every container it replaced before exiting non-zero.
       - name: 📤 Upload result and evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: chaos-upgrade
           path: |
@@ -80,11 +80,15 @@ jobs:
     # A failed certification is published too, the same way the node-fault drill's is: the page says it failed.
     # Only from main, and never from a run taken to another release by hand, which certifies a different pair.
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' && inputs.old_ref == '' }}
+    # main takes changes only through a reviewed pull request, so the commit is pushed by the malachi-release
+    # GitHub App, whose key is readable only in the release environment (only main may use it).
+    environment: release
 
+    # The push uses the App's token, not this job's.
     permissions:
-      contents: write
+      contents: read
 
-    # The same group as results.yml's publisher, so the two never push results over each other.
+    # The same group as results.yml's commit-results, so the two never push results over each other.
     concurrency:
       group: publish-results-${{ github.ref }}
       cancel-in-progress: false
@@ -94,17 +98,27 @@ jobs:
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit
+      - name: 🔑 Mint a token of the release App
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Contents only: enough to push the result commit, and nothing else.
+          permission-contents: write
+
       # The full history, because publishing decides between two results by which commit is newer.
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
 
       # By pattern rather than by name: a run killed before it wrote anything uploads no artifact, and asking for
       # a named one that does not exist would fail this job as well, a second red job saying nothing new.
       # Every other early end of the drill writes its result, as failed, and is published like any other.
       - name: 📥 Download result
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: chaos-upgrade
           path: ${{ runner.temp }}/artifacts
@@ -120,12 +134,16 @@ jobs:
           done
           git status --porcelain -- benchmark/published
 
+      - name: 🪪 Commit as the release App
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: scripts/app-bot-git-identity.sh "$APP_SLUG"
+
       # scripts/publish-results.sh decides per file whether main should hold this result and retries a push that
-      # loses a race. Its commit does not start pages.yml, so the page refreshes with the next results.yml run.
+      # loses a race. Its commit does not start pages.yml, and results.yml skips the release App's pushes, so the
+      # page refreshes with the next results.yml run on a merge.
       - name: 📌 Commit the refreshed result
         env:
           PUBLISH_SHA: ${{ github.sha }}
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-          scripts/publish-results.sh
+        run: scripts/publish-results.sh

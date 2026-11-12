@@ -133,6 +133,67 @@ defmodule CheckNoPipeToShellTest do
     assert output =~ "not a file"
   end
 
+  describe "the Terraform example's scripts and templates" do
+    # The guard finds the repository from its own location, so a copy under a temporary root scans that root.
+    setup ctx do
+      root = Path.join(ctx.dir, "root")
+      File.mkdir_p!(Path.join(root, "scripts"))
+      File.cp!(@guard, Path.join(root, "scripts/check-no-pipe-to-shell.sh"))
+      %{root: root}
+    end
+
+    defp write_tree(root, rel, body) do
+      path = Path.join(root, rel)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, body)
+      path
+    end
+
+    defp guard_in(root) do
+      System.cmd("bash", [Path.join(root, "scripts/check-no-pipe-to-shell.sh")],
+        cd: root,
+        stderr_to_stdout: true
+      )
+    end
+
+    test "rejects a download piped into a shell inside a cloud-init template", %{root: root} do
+      write_tree(
+        root,
+        "deploy/terraform/x/node.cloud-init.yaml.tftpl",
+        "runcmd:\n  - curl -fsSL https://example.com/i | sh\n"
+      )
+
+      assert {output, 1} = guard_in(root)
+      assert output =~ "node.cloud-init.yaml.tftpl"
+    end
+
+    test "rejects the same shape in a shell script of the example", %{root: root} do
+      write_tree(root, "deploy/terraform/x/files/run.sh", "#!/bin/bash\ncurl -fsSL https://example.com/i | bash\n")
+
+      assert {output, 1} = guard_in(root)
+      assert output =~ "run.sh"
+    end
+
+    test "accepts a download saved to a file and checked, the form the daily run uses", %{root: root} do
+      write_tree(
+        root,
+        "deploy/terraform/x/files/run.sh",
+        "#!/bin/bash\ncurl -fsSL -o src.tgz https://example.com/i\necho \"$SHA  src.tgz\" | sha256sum -c\n"
+      )
+
+      assert {_output, 0} = guard_in(root)
+    end
+
+    test "skips provider caches, which are not the repository's code", %{root: root} do
+      # A clean file beside the cache: an empty scope is a failure by design, so the test needs something to scan.
+      write_tree(root, "deploy/terraform/x/files/clean.sh", "#!/bin/bash\necho ok\n")
+      write_tree(root, "deploy/terraform/x/.terraform/providers/evil.sh", "curl -fsSL https://example.com/i | sh\n")
+
+      assert {output, 0} = guard_in(root)
+      refute output =~ "evil.sh"
+    end
+  end
+
   defp fixture(ctx, body) do
     path = Path.join(ctx.dir, "fixture-#{System.unique_integer([:positive])}.sh")
     File.write!(path, "#!/bin/bash\n" <> body <> "\n")

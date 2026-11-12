@@ -1,90 +1,161 @@
 name: Release & Publish
 
+# Every pull request merged into main publishes a release: the version in mix.exs is bumped, the bump is committed
+# to main, the commit is tagged, and the image is built from the tag.
+#
+# main takes changes only through a reviewed pull request, and the daily OCI run executes whatever main holds, so
+# no workflow token may write to it. The bump is the one exception, and it is pushed with a short-lived token of
+# the malachi-release GitHub App, the only actor the branch protection lets skip the pull request. The App's key
+# lives in the `release` environment, whose deployment branches are main alone: a workflow running for a pull
+# request cannot read it. That is why this runs on a push to main and not on the pull request's closed event,
+# which runs with the pull request's ref and could not use the environment.
+
 on:
-  pull_request:
-    types: [closed]
-    branches:
-      - main
+  push:
+    branches: [main]
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
+
+# Two merges in a row release one after the other, never at once: each bump must land on the tip of main.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  # First, verify that CI passed
+  # Find the merged pull request this push came from, and check that its CI passed.
   verify-ci:
-    if: github.event.pull_request.merged == true
+    # The bump commit pushed by the release job is itself a push to main. It has no pull request, so the step
+    # below would skip it anyway; this condition says so before a runner starts.
+    if: "!startsWith(github.event.head_commit.message, 'chore: bump version')"
     runs-on: ubuntu-latest
-    
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
+    outputs:
+      release: ${{ steps.pr.outputs.release }}
+      title: ${{ steps.pr.outputs.title }}
+      labels: ${{ steps.pr.outputs.labels }}
+
     steps:
       - name: 🛡️ Harden the runner
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit
-      - name: 🔍 Verify CI passed before release
-        uses: actions/github-script@v7
+      - name: 🔍 Find the merged pull request and verify its CI passed
+        id: pr
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
+            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha
+            });
+
+            // Only the pull request whose merge produced this exact commit. A direct push (an admin's, or the
+            // bump) has none, and is not released.
+            const pr = prs.find(p => p.merged_at && p.base.ref === 'main' && p.merge_commit_sha === context.sha);
+            if (!pr) {
+              console.log(`No merged pull request produced ${context.sha}; nothing to release.`);
+              core.setOutput('release', 'false');
+              return;
+            }
+            console.log(`Commit ${context.sha} is the merge of #${pr.number}: ${pr.title}`);
+
             const { data: checkRuns } = await github.rest.checks.listForRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              ref: context.payload.pull_request.head.sha
+              ref: pr.head.sha
             });
-            
+
             console.log('Check runs for this PR:');
             checkRuns.check_runs.forEach(run => {
               console.log(`- ${run.name}: ${run.conclusion}`);
             });
-            
+
             // Check if CI workflow passed
             const ciRun = checkRuns.check_runs.find(run => run.name.includes('CI Summary'));
-            
+
             if (!ciRun) {
               console.log('⚠️  CI workflow not found, proceeding anyway');
-              return;
-            }
-            
-            if (ciRun.conclusion !== 'success') {
+            } else if (ciRun.conclusion !== 'success') {
               core.setFailed(`❌ CI must pass before release. Current status: ${ciRun.conclusion}`);
               return;
+            } else {
+              console.log('✅ CI passed, proceeding with release');
             }
-            
-            console.log('✅ CI passed, proceeding with release');
-  
+
+            core.setOutput('release', 'true');
+            core.setOutput('title', pr.title);
+            core.setOutput('labels', pr.labels.map(l => l.name).join(','));
+
   release:
     needs: verify-ci
-    if: github.event.pull_request.merged == true
+    if: needs.verify-ci.outputs.release == 'true'
     runs-on: ubuntu-latest
-    # Scoped here (not workflow-wide) so only this job holds write: it pushes the bump/tag/release
-    # (contents) and dispatches the Pages workflow (actions). Job permissions replace the top-level set.
+    # The App's key is an environment secret: only a run from main passes the environment's branch rule.
+    environment: release
+    # Scoped here (not workflow-wide) so only this job holds write: it creates the GitHub release (contents) and
+    # dispatches the Pages workflow (actions). The push to main uses the App's token, not this one.
     permissions:
       contents: write
       actions: write
 
     outputs:
       new_version: ${{ steps.bump.outputs.NEW_VERSION }}
-      
+
     steps:
       - name: 🛡️ Harden the runner
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Mint a token of the release App
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Contents only: enough to push the bump and the tag, and nothing else.
+          permission-contents: write
+
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The tip of main, not the merge commit: the bump has to be a fast-forward of main as it is now.
+          ref: main
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Skip when this commit is already in a release
+        id: released
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          # Two merges close together: the first release's bump already contains the second merge, so the
+          # second run has nothing new to release.
+          if [ -n "$(git tag --contains "$SHA" --list 'v*')" ]; then
+            echo "Commit $SHA is already in $(git tag --contains "$SHA" --list 'v*' | head -1); nothing to release."
+            echo "SKIP=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "SKIP=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Setup Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+        if: steps.released.outputs.SKIP == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        # Commit as the App's bot user, so the history says which actor wrote to main outside a pull request.
+        run: scripts/app-bot-git-identity.sh "$APP_SLUG"
 
       - name: Determine version bump type
+        if: steps.released.outputs.SKIP == 'false'
         id: bump_type
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_TITLE: ${{ needs.verify-ci.outputs.title }}
+          PR_LABELS: ${{ needs.verify-ci.outputs.labels }}
         run: |
           # Check labels first
           if [[ "$PR_LABELS" == *"major"* ]] || [[ "$PR_TITLE" == *"[major]"* ]]; then
@@ -96,12 +167,14 @@ jobs:
           fi
 
       - name: Bump version
+        if: steps.released.outputs.SKIP == 'false'
         id: bump
         run: |
           chmod +x ./scripts/bump-version.sh
           ./scripts/bump-version.sh ${{ steps.bump_type.outputs.BUMP_TYPE }}
 
       - name: Get new version
+        if: steps.released.outputs.SKIP == 'false'
         id: version
         run: |
           NEW_VERSION=$(grep '@version' mix.exs | head -1 | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
@@ -109,11 +182,12 @@ jobs:
           echo "New version: $NEW_VERSION"
 
       - name: Generate changelog
+        if: steps.released.outputs.SKIP == 'false'
         id: changelog
         run: |
           # Get previous tag
           PREVIOUS_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          
+
           if [ -z "$PREVIOUS_TAG" ]; then
             # First release
             CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
@@ -121,43 +195,47 @@ jobs:
             # Get commits since last tag
             CHANGELOG=$(git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
           fi
-          
+
           # Save changelog to file
           echo "## Changes" > /tmp/changelog.md
           echo "" >> /tmp/changelog.md
           echo "$CHANGELOG" >> /tmp/changelog.md
-          
+
           # Set output for GitHub release
           echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
           echo "$CHANGELOG" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Commit version bump
+        if: steps.released.outputs.SKIP == 'false'
         run: |
           git add mix.exs
           git commit -m "chore: bump version to ${{ steps.version.outputs.NEW_VERSION }}"
-          git push origin main
+          # The checkout holds the App's token, the one actor allowed to push to main without a pull request.
+          git push origin HEAD:main
 
       - name: Create Git tag
+        if: steps.released.outputs.SKIP == 'false'
         run: |
           git tag -a "v${{ steps.version.outputs.NEW_VERSION }}" -m "Release v${{ steps.version.outputs.NEW_VERSION }}"
           git push origin "v${{ steps.version.outputs.NEW_VERSION }}"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        if: steps.released.outputs.SKIP == 'false'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: v${{ steps.version.outputs.NEW_VERSION }}
           name: Release v${{ steps.version.outputs.NEW_VERSION }}
           body: |
             ## 🚀 Malachi v${{ steps.version.outputs.NEW_VERSION }}
-            
+
             ${{ steps.changelog.outputs.CHANGELOG }}
-            
+
             ### 🐳 Docker
             ```bash
             docker pull hectorcardoso/malachi:${{ steps.version.outputs.NEW_VERSION }}
             ```
-            
+
             ### 📦 Installation
             ```bash
             git clone https://github.com/malachi-hq/malachi.git
@@ -169,17 +247,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # The version bump was pushed to main with GITHUB_TOKEN, and pushes made with GITHUB_TOKEN do not
-      # trigger workflows, so the Pages build never rebuilds the docs for the new version. workflow_dispatch
-      # is exempt from that rule, so dispatch the Pages workflow here; it checks out main (now bumped) and
-      # republishes the site with the new version.
+      # The Pages site is built by pages.yml, which runs after Publish results or on a dispatch, never on a push.
+      # Dispatch it here so it checks out main (now bumped) and republishes the site with the new version.
       - name: Rebuild the documentation site for the new version
+        if: steps.released.outputs.SKIP == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run pages.yml --ref main
 
   docker:
     needs: release
+    # Empty when the release job found the commit already released, or skipped it.
+    if: needs.release.outputs.new_version != ''
     runs-on: ubuntu-latest
     env:
       DOCKER_USERNAME: hectorcardoso
@@ -190,7 +269,7 @@ jobs:
         with:
           egress-policy: audit
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: v${{ needs.release.outputs.new_version }}
 
@@ -205,19 +284,19 @@ jobs:
           echo "MAJOR_MINOR=$MAJOR.$MINOR" >> $GITHUB_OUTPUT
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           username: ${{ env.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -248,7 +327,7 @@ jobs:
       # the release; it only leaves the overview stale, which is visible in the step log.
       - name: Update Docker Hub description
         continue-on-error: true
-        uses: peter-evans/dockerhub-description@v4
+        uses: peter-evans/dockerhub-description@432a30c9e07499fd01da9f8a49f0faf9e0ca5b77 # v4
         with:
           username: ${{ env.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
