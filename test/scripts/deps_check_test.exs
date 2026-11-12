@@ -253,7 +253,7 @@ defmodule DepsCheckTest do
     end
 
     test "build the image from the worktree before validating it, for the tiers that boot it" do
-      for tier <- [:auth, :observability, :full] do
+      for tier <- [:auth, :observability, :full, :docker] do
         gates = DepsCheck.gates_for([tier])
         assert "make docker-build docker-validate" in gates, "#{tier}"
         refute "scripts/validate-docker-build.sh" in gates, "#{tier}"
@@ -265,10 +265,35 @@ defmodule DepsCheckTest do
       assert DepsCheck.group_for([:actions]) == "actions"
     end
 
+    test "for the runtime base image are the image booted from the worktree and the CI, with no mix gate or drill" do
+      gates = DepsCheck.gates_for([:docker])
+
+      assert gates == [
+               "scripts/docker-static-assets-check.sh",
+               "make docker-build docker-validate",
+               "pull request CI"
+             ]
+
+      assert DepsCheck.group_for([:docker]) == "docker"
+      refute Enum.any?(gates, &String.starts_with?(&1, "mix "))
+      # The drills build from benchmark/Dockerfile.loadtest and never run this base.
+      assert MapSet.disjoint?(MapSet.new(gates), MapSet.new(@drills))
+    end
+
+    test "the non-Hex tiers are the only ones without the base Hex gates" do
+      assert Enum.sort(DepsCheck.non_hex_tiers()) == [:actions, :docker]
+
+      for tier <- DepsCheck.tier_names() do
+        has_base? = "mix deps.audit" in DepsCheck.gates_for([tier])
+        hex? = tier not in DepsCheck.non_hex_tiers()
+        assert has_base? == hex?, "#{tier}"
+      end
+    end
+
     test "the full suite holds every gate of every Hex tier" do
       full = MapSet.new(DepsCheck.gates_for([:full]))
 
-      for tier <- DepsCheck.tier_names(), tier != :actions do
+      for tier <- DepsCheck.tier_names(), tier not in DepsCheck.non_hex_tiers() do
         assert MapSet.subset?(MapSet.new(DepsCheck.gates_for([tier])), full), "#{tier}"
       end
     end
@@ -777,6 +802,25 @@ defmodule DepsCheckTest do
 
       assert DepsCheck.run(["verdict", "consensus", file, @head, @main, @tree]) ==
                {["NOT VERIFIED consensus", "  scripts/docker-upgrade-chaos.sh: not run"], 3}
+    end
+
+    test "verifies the runtime base image only with the image gates and the CI", %{dir: dir} do
+      file = results(dir, DepsCheck.gates_for([:docker]))
+      assert DepsCheck.run(["verdict", "docker", file, @head, @main, @tree]) == {["VERIFIED docker"], 0}
+
+      for gate <- DepsCheck.gates_for([:docker]) do
+        missing = results(dir, DepsCheck.gates_for([:docker]) -- [gate])
+
+        assert DepsCheck.run(["verdict", "docker", missing, @head, @main, @tree]) ==
+                 {["NOT VERIFIED docker", "  #{gate}: not run"], 3}
+      end
+    end
+
+    test "refuses a base image whose image gate ran off Linux or on another tree", %{dir: dir} do
+      for override <- [%{"host" => "darwin"}, %{"tree" => String.duplicate("e", 40)}] do
+        file = results(dir, DepsCheck.gates_for([:docker]), %{"make docker-build docker-validate" => override})
+        assert {["NOT VERIFIED docker", _], 3} = DepsCheck.run(["verdict", "docker", file, @head, @main, @tree])
+      end
     end
 
     test "refuses an unclassified package with only the cheap checks", %{dir: dir} do

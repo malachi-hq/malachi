@@ -104,11 +104,29 @@ defmodule DependencyUpdatesSkillTest do
     end
   end
 
+  test "a base image bump takes the docker tier only for the runtime base, and the full suite for the Elixir image" do
+    # The Dependabot docker ecosystem covers both / and /benchmark, and nothing in deps_check.exs tells
+    # the two images apart: this paragraph is the only thing that does, so dropping it would verify an
+    # Elixir image bump, which recompiles everything the drills run, with no mix gate and no drill.
+    skill = File.read!(@skill) |> String.replace(~r/\s+/, " ")
+
+    assert skill =~ "**docker**: the runtime base image of the root `Dockerfile` (`alpine`)"
+    assert skill =~ "so its verdict tier is `docker`"
+
+    assert skill =~
+             "A bump of the Elixir image (the builder stage and `benchmark/Dockerfile.loadtest`) recompiles " <>
+               "everything the drills run, so its verdict tier is `full`."
+  end
+
   test "the verdict takes the group's own tiers from the plan, never a fixed one" do
     skill = File.read!(@skill)
 
     assert skill =~ ~s(elixir scripts/deps_check.exs verdict "$tiers" "$S/results.json" "$head" "$main" "$tree")
     assert skill =~ "`verdict tiers:`"
+    # The two groups with no plan line, named where the rule forbids any tier the plan did not print.
+    assert String.replace(skill, ~r/\s+/, " ") =~
+             "for the actions group, `actions`; for the docker group, which has no lock and so no plan line, `docker`"
+
     assert Regex.scan(~r/deps_check\.exs verdict (\S+)/, skill, capture: :all_but_first) == [[~s("$tiers")]]
 
     # The tree the verdict holds every log to: taken from the worktree through a private index before
