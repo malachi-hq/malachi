@@ -23,7 +23,7 @@ COPY priv/static priv/static
 RUN mix compile && \
     mix release
 
-FROM alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd AS runner
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS runner
 
 ARG APP_VERSION
 
@@ -42,7 +42,7 @@ RUN apk add --no-cache \
 
 # Copy OpenSSL libraries from builder to ensure binary compatibility with crypto.so
 # The elixir:1.19-otp-28-alpine image has crypto.so compiled against a specific OpenSSL version
-# that may not match Alpine 3.21's package version
+# that may not match the runner's Alpine package version (the two base images are bumped separately)
 COPY --from=builder /usr/lib/libssl.so.3 /usr/lib/
 COPY --from=builder /usr/lib/libcrypto.so.3 /usr/lib/
 

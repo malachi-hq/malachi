@@ -342,7 +342,7 @@ endpoint.
 
 | Property | Value |
 |----------|-------|
-| **Base Image** | `alpine:3.21` |
+| **Base Image** | `alpine:3.24` |
 | **Runtime** | Erlang/OTP 28, Elixir 1.19 |
 | **Architecture** | `linux/amd64`, `linux/arm64` |
 | **User** | `malachi` (UID 1000) |
