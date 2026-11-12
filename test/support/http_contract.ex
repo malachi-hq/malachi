@@ -12,7 +12,7 @@ defmodule Malachi.Test.HttpContract do
   adds its case here, and the dashboard goes when the console passes on its own.
   """
 
-  import ExUnit.Assertions, only: [assert: 1, assert: 2]
+  import ExUnit.Assertions, only: [assert: 1, assert: 2, refute: 1]
 
   alias Malachi.Dashboard
   alias Malachi.Test.ConsoleFixture
@@ -72,6 +72,10 @@ defmodule Malachi.Test.HttpContract do
 
         assert {:ok, %{status: 431, body: body}, _} = HttpClient.recv(socket)
         assert Jason.decode!(body) == %{"type" => "errors.http.header_fields_too_large", "status" => 431}
+      end
+
+      test "trailing whitespace in header values does not count toward the byte budget", %{port: port, path: path} do
+        HttpContract.assert_trailing_ows_not_counted(port, path)
       end
 
       test "Content-Length is exactly the bytes of the body", %{port: port, path: path} do
@@ -182,6 +186,30 @@ defmodule Malachi.Test.HttpContract do
   # The dashboard's answer to a line its socket driver refuses, or a deadline it enforces: none.
   def assert_closed_unanswered(socket) do
     assert(:gen_tcp.recv(socket, 0, 2_000) == {:error, :closed})
+  end
+
+  @doc false
+  # RFC 9110 section 5.5: whitespace after a field value is not part of it. Bandit drops it before any
+  # plug runs, so the dashboard drops it too, or the two would answer the same request differently.
+  # Five values padded past the budget with spaces and tabs (each line under 10,000, the raw sum over
+  # 32,768) are answered exactly as the same values unpadded.
+  def assert_trailing_ows_not_counted(port, path) do
+    padded = for i <- 1..5, do: {"x-big#{i}", "a" <> String.duplicate(" \t", 3_500)}
+    plain = for i <- 1..5, do: {"x-big#{i}", "a"}
+
+    padded_status = status(port, path, padded)
+
+    refute(padded_status == 431)
+    assert(padded_status == status(port, path, plain))
+  end
+
+  # The status of a GET to `path` with `headers`, over a connection of its own.
+  defp status(port, path, headers) do
+    {:ok, socket} = HttpClient.connect(port)
+    :ok = HttpClient.send_raw(socket, HttpClient.encode("GET", path, headers))
+    {:ok, %{status: status}, _} = HttpClient.recv(socket)
+    :gen_tcp.close(socket)
+    status
   end
 
   @doc false
