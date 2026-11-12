@@ -1,4 +1,4 @@
-FROM elixir:1.19-otp-28-alpine@sha256:07b2cb62c04ce868a1cc7105ab4b673511a8bd18cd1c3fea68d1ba99b969be59 AS builder
+FROM elixir:1.20.4-otp-29-alpine@sha256:f95251968625b0b61716355b372b58b1916bb618b949de3d2e62fb803ad68784 AS builder
 
 WORKDIR /app
 
