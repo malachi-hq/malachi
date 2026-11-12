@@ -2,7 +2,8 @@ defmodule Malachi.RateLimitEnforcementTest do
   # async: false. Toggles the global publish/subscribe limits and shares the running acceptor.
   #
   # End-to-end over the real TCP server: the configured publish/subscribe quotas are applied on the
-  # produce and subscribe paths, keyed by the authenticated username and enforced per node. What is
+  # stream keys, an append on a producer stream (publish) and an open_consume (subscribe), keyed by the
+  # authenticated username and enforced per node. What is
   # pinned here is the operator-visible contract: the wire reason, the counter that feeds
   # `rate_limit_blocked{action=...}`, the key the quota is counted by, and that an unconfigured limit
   # changes nothing.
@@ -12,14 +13,24 @@ defmodule Malachi.RateLimitEnforcementTest do
 
   alias Malachi.Auth
   alias Malachi.Metrics
+  alias Malachi.Test.RouterTopology
+  alias Malachi.Test.StreamTCP
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
   @moduletag :security
 
-  @limit_keys [:publish_rate_limit, :publish_rate_window_ms, :subscribe_rate_limit, :subscribe_rate_window_ms]
+  @limit_keys [
+    :publish_rate_limit,
+    :publish_rate_window_ms,
+    :publish_bytes_rate_limit,
+    :publish_bytes_rate_window_ms,
+    :subscribe_rate_limit,
+    :subscribe_rate_window_ms
+  ]
 
   setup do
+    :ok = RouterTopology.clear()
     prior = for key <- @limit_keys, into: %{}, do: {key, Application.get_env(:malachi, key)}
     on_exit(fn -> for {key, value} <- prior, do: restore(key, value) end)
     :ok
@@ -35,6 +46,7 @@ defmodule Malachi.RateLimitEnforcementTest do
   @window_ms 60_000
 
   defp limit_publish(limit), do: put_limit(:publish_rate_limit, :publish_rate_window_ms, limit)
+  defp limit_publish_bytes(limit), do: put_limit(:publish_bytes_rate_limit, :publish_bytes_rate_window_ms, limit)
   defp limit_subscribe(limit), do: put_limit(:subscribe_rate_limit, :subscribe_rate_window_ms, limit)
 
   defp put_limit(limit_key, window_key, limit) do
@@ -69,22 +81,59 @@ defmodule Malachi.RateLimitEnforcementTest do
     reply(TCPHelper.request(socket, Wire.create_topic_key(), 1, Wire.encode_create_topic_req(topic, 8)))
   end
 
-  defp produce(socket, topic) do
-    payload = Wire.encode_produce_req(topic, [%Malachi.Log.Record{value: "v"}])
-    reply(TCPHelper.request(socket, Wire.produce_key(), 1, payload))
+  # Appends `values` on this connection's producer stream on `topic`, opened on its first append, at the
+  # stream's next sequence: `:ok` when acknowledged, else the refusal, of the open or of the append at its
+  # sequence (the stream goes on after a refused append).
+  defp produce(socket, topic, values \\ ["v"]) do
+    with {:ok, id, sequence} <- stream_for(socket, topic) do
+      StreamTCP.send_append(socket, id, sequence, StreamTCP.batch(values))
+      {_ack, errors} = StreamTCP.acked_through(socket, sequence)
+      Process.put({:stream, socket, topic}, {id, sequence + 1})
+
+      case Enum.find(errors, &(&1.sequence == sequence)) do
+        nil -> :ok
+        %{reason: reason} -> {:error, reason}
+      end
+    end
   end
 
-  # A blocked subscribe answers an error frame instead of entering stream mode, so unlike an accepted
-  # one it has a response to read.
+  defp stream_for(socket, topic) do
+    case Process.get({:stream, socket, topic}) do
+      {id, sequence} ->
+        {:ok, id, sequence}
+
+      nil ->
+        with {:ok, %{stream_id: id}} <- StreamTCP.open(socket, topic) do
+          Process.put({:stream, socket, topic}, {id, 0})
+          {:ok, id, 0}
+        end
+    end
+  end
+
+  # An open_consume on `topic`: `:ok` when the stream opened, else the refusal.
   defp subscribe(socket, topic) do
-    :ok = TCPHelper.subscribe(socket, topic, nil, 100, 100, 7)
-    {:ok, frame_body} = TCPHelper.recv_frame(socket)
-    {7, code, payload} = Wire.decode_response(frame_body)
-    reply({code, payload})
+    case StreamTCP.open_consume(socket, topic) do
+      {:ok, _stream} -> :ok
+      {:error, _reason} = refused -> refused
+    end
   end
 
   defp reply({code, payload}) do
     if code == Wire.ok_code(), do: :ok, else: {:error, Wire.decode_error_reason(payload)}
+  end
+
+  defp strict_acls do
+    prior = Application.get_env(:malachi, :acl_strict)
+    Application.put_env(:malachi, :acl_strict, true)
+    on_exit(fn -> restore(:acl_strict, prior) end)
+  end
+
+  # The reason of the error frame an append on a stream is refused with (correlation id 11).
+  defp error_frame(socket) do
+    {:ok, body} = TCPHelper.recv_frame(socket)
+    {11, code, payload} = Wire.decode_response(body)
+    assert code == Wire.error_code()
+    Wire.decode_error_reason(payload)
   end
 
   defp blocked_count(action) do
@@ -132,7 +181,8 @@ defmodule Malachi.RateLimitEnforcementTest do
         before = blocked_count(:publish_blocked)
         spent = snapshot(user, :publish)
 
-        # create_topic is gated by :produce but is not a publish, so it spends no token
+        # create_topic is gated by :produce but is not a publish, and neither is opening the stream, so
+        # neither spends a token
         for _ <- 1..3, do: assert(:ok = produce(socket, topic))
 
         # `overloaded` is the group-commit valve (see test/malachi/group_commit_test.exs); a client must be
@@ -184,18 +234,27 @@ defmodule Malachi.RateLimitEnforcementTest do
 
     test "a request the user was never allowed to make spends no token" do
       limit_publish(1)
-      topic = new_topic()
 
-      {_owner, owner_socket} = connect_as_new_user()
-      assert :ok = create_topic(owner_socket, topic)
+      within_one_window(@window_ms, fn ->
+        {user, socket} = connect_as_new_user()
+        topic = new_topic()
+        assert :ok = create_topic(socket, topic)
+        :ok = Auth.grant_acl(user, :produce, topic)
+        strict_acls()
 
-      # consumer holds :consume only, so its produce is denied before the quota is consulted
-      consumer = connect_as("consumer", "consumer123")
-      before = blocked_count(:publish_blocked)
+        # the stream opens while the user may produce; the grant is then revoked, so the append is one
+        # the user was not allowed to make, refused before the quota is consulted
+        {:ok, %{stream_id: id}} = StreamTCP.open(socket, topic)
+        :ok = Auth.revoke_acl(user, :produce, topic)
+        before = blocked_count(:publish_blocked)
+        StreamTCP.send_append(socket, id, 0, StreamTCP.batch(["v"]))
+        assert error_frame(socket) == "permission_denied"
+        assert blocked_count(:publish_blocked) == before
 
-      for _ <- 1..5, do: assert({:error, "permission_denied"} = produce(consumer, topic))
-
-      assert blocked_count(:publish_blocked) == before
+        # the only token of the window is still there: granted again, the next append takes it
+        :ok = Auth.grant_acl(user, :produce, topic)
+        assert :ok = produce(connect_as(user, @password), topic)
+      end)
     end
 
     test "the limit is not applied when rate limiting is switched off entirely" do
@@ -212,6 +271,56 @@ defmodule Malachi.RateLimitEnforcementTest do
     end
   end
 
+  describe "publish quotas count records and bytes" do
+    test "a produce spends one unit per record" do
+      limit_publish(5)
+
+      within_one_window(@window_ms, fn ->
+        {user, socket} = connect_as_new_user()
+        topic = new_topic()
+        assert :ok = create_topic(socket, topic)
+
+        spent = snapshot(user, :publish)
+        assert :ok = produce(socket, topic, ["a", "b", "c"])
+        # 3 spent, 3 more would make 6
+        assert_refused(produce(socket, topic, ["d", "e", "f"]), spent, user, :publish)
+        assert :ok = produce(socket, topic, ["d", "e"])
+      end)
+    end
+
+    test "a produce spends its bytes under the bytes quota, which refuses on its own" do
+      limit_publish_bytes(1_000)
+
+      # the counter is read inside each attempt, so an attempt a window boundary reruns is not counted twice
+      within_one_window(@window_ms, fn ->
+        {user, socket} = connect_as_new_user()
+        topic = new_topic()
+        assert :ok = create_topic(socket, topic)
+
+        before = blocked_count(:publish_bytes_blocked)
+        spent = snapshot(user, :publish_bytes)
+        assert :ok = produce(socket, topic, [String.duplicate("x", 600)])
+        assert_refused(produce(socket, topic, [String.duplicate("y", 600)]), spent, user, :publish_bytes)
+        assert blocked_count(:publish_bytes_blocked) == before + 1
+      end)
+    end
+
+    test "a produce bigger than a whole window is quota_too_small, counted as blocked, and spends nothing" do
+      limit_publish(2)
+
+      within_one_window(@window_ms, fn ->
+        {_user, socket} = connect_as_new_user()
+        topic = new_topic()
+        assert :ok = create_topic(socket, topic)
+
+        before = blocked_count(:publish_blocked)
+        assert {:error, "quota_too_small"} = produce(socket, topic, ["a", "b", "c"])
+        assert blocked_count(:publish_blocked) == before + 1
+        assert :ok = produce(socket, topic, ["a", "b"])
+      end)
+    end
+  end
+
   describe "subscribe quota" do
     test "subscribe over the limit is refused as rate_limited and the counter advances" do
       limit_subscribe(1)
@@ -225,10 +334,9 @@ defmodule Malachi.RateLimitEnforcementTest do
         before = blocked_count(:subscribe_blocked)
         spent = snapshot(username, :subscribe)
 
-        # an accepted subscribe turns its connection into a push stream, so the second one needs its own
-        # connection: same user, so the same bucket
+        # a second connection of the same user: the same bucket
         streaming = connect_as(username, @password)
-        :ok = TCPHelper.subscribe(streaming, topic, nil, 100, 100, 7)
+        :ok = subscribe(streaming, topic)
 
         refused = connect_as(username, @password)
         assert_refused(subscribe(refused, topic), spent, username, :subscribe)
@@ -244,9 +352,9 @@ defmodule Malachi.RateLimitEnforcementTest do
       assert :ok = create_topic(socket, topic)
 
       before = blocked_count(:subscribe_blocked)
-      :ok = TCPHelper.subscribe(socket, topic, nil, 100, 100, 7)
+      for _ <- 1..5, do: assert(:ok = subscribe(socket, topic))
 
-      # the subscribe was accepted (it entered stream mode), so nothing was blocked
+      # every stream opened, so nothing was blocked
       assert blocked_count(:subscribe_blocked) == before
     end
 
@@ -269,23 +377,18 @@ defmodule Malachi.RateLimitEnforcementTest do
         assert :ok = produce(socket, topic)
         assert_refused(produce(socket, topic), spent, username, :publish)
 
-        # Same user, publish quota gone: the subscribe must still be admitted on its own bucket. An accepted
-        # subscribe switches the connection to stream mode and immediately pushes the backlog, so the record
-        # produced above coming back is positive proof it was admitted, not merely an absence of refusal. A
-        # refusal would answer an error frame carrying `rate_limited` on the same correlation id.
+        # Same user, publish quota gone: the subscribe must still be admitted on its own bucket, and the
+        # record produced above, pushed on the stream it opened, is positive proof it was admitted, not
+        # merely an absence of refusal.
         streaming = connect_as(username, @password)
-        :ok = TCPHelper.subscribe(streaming, topic, nil, 100, 100, 7)
 
-        assert {:ok, frame_body} = TCPHelper.recv_frame(streaming, timeout: 2_000)
-        {7, code, payload} = Wire.decode_response(frame_body)
-
-        # Named rather than asserted bare, because the failure that matters here is a refusal, and the
-        # reason is only decodable once we know this IS an error frame.
-        if code != Wire.ok_code() do
-          flunk("the subscribe was refused (#{Wire.decode_error_reason(payload)}), so the quotas share a bucket")
+        case subscribe(streaming, topic) do
+          :ok -> :ok
+          {:error, reason} -> flunk("the subscribe was refused (#{reason}), so the quotas share a bucket")
         end
 
-        assert {[%{value: "v"}], _cursor} = Wire.decode_fetch_resp(payload)
+        assert {:records, page} = StreamTCP.push(streaming, StreamTCP.consumer_corr())
+        assert [{_position, "v"}] = StreamTCP.page_records(page)
       end)
     end
   end

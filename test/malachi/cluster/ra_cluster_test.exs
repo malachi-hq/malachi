@@ -11,6 +11,7 @@ defmodule Malachi.Cluster.RaClusterTest do
   alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.Ring
   alias Malachi.Cluster.RingMachine
+  alias Malachi.Cluster.RingServer
   alias Malachi.Cluster.RingTopology
   alias Malachi.Test.PollingHelper
   alias Malachi.Test.SilentRaMember
@@ -33,6 +34,47 @@ defmodule Malachi.Cluster.RaClusterTest do
     assert server_id == {name, node()}
     assert RaCluster.ready?(server_id)
     assert RaCluster.leader?(server_id)
+  end
+
+  describe "a location: a cluster's members, in the order to try them" do
+    test "a member that is gone passes the command and the read to the next" do
+      {name, server_id} = start_cluster()
+      location = [{name, :"gone@127.0.0.1"}, server_id]
+
+      assert {:ok, :ok} = RaCluster.command(location, {:init, seed_topology()})
+      assert {:ok, %{}} = RaCluster.query(location)
+      assert {:ok, %RingTopology{}} = RingServer.topology(server_id)
+      assert RaCluster.ready?(location)
+    end
+
+    test "with every member gone, the answer is the last one's, as one member's would be" do
+      name = :"racluster_none_#{System.unique_integer([:positive])}"
+      location = [{name, :"gone1@127.0.0.1"}, {name, :"gone2@127.0.0.1"}]
+
+      assert RaCluster.command(location, :anything) == {:error, :nodedown}
+      assert RaCluster.query(location) == {:error, :nodedown}
+    end
+
+    test "a timeout ends it: the command may have committed, and must not be sent again" do
+      {_name, server_id} = start_cluster()
+      silent = :"racluster_silent_#{System.unique_integer([:positive])}"
+      {:ok, _pid} = SilentRaMember.start_link(silent)
+      on_exit(fn -> SilentRaMember.stop(silent) end)
+      location = [{silent, node()}, server_id]
+
+      assert RaCluster.command(location, {:init, seed_topology()}, 100) == {:error, :timeout}
+      assert RingServer.topology(server_id) == {:ok, :none}
+      assert RaCluster.project(location, {:maps, :with, [[:ring]]}, 100) == {:error, :timeout}
+    end
+
+    test "an answer that is a refusal ends it too: only a member that could not take it passes it on" do
+      {_name, server_id} = start_cluster()
+      {_other, other_id} = start_cluster()
+      assert {:ok, :ok} = RaCluster.command(server_id, {:init, seed_topology()})
+
+      assert {:ok, {:error, _already}} = RaCluster.command([server_id, other_id], {:init, seed_topology()})
+      assert RingServer.topology(other_id) == {:ok, :none}
+    end
   end
 
   test "member_node/1 prefers the local node, else the first placement node" do

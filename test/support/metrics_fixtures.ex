@@ -24,7 +24,8 @@ defmodule Malachi.Test.MetricsFixtures do
       atom_table: %{atom_count: 20_000, atom_limit: 1_048_576},
       rate_limiting: %{
         auth_blocked: 5,
-        publish_blocked: 0,
+        publish_blocked: 4,
+        publish_bytes_blocked: 6,
         subscribe_blocked: 1,
         dashboard_api_blocked: 2,
         connection_blocks: 3
@@ -45,6 +46,10 @@ defmodule Malachi.Test.MetricsFixtures do
         auth_error: 3,
         replication_ok: 50,
         replication_no_quorum: 1,
+        producer_streams_opened: 5,
+        producer_streams_closed: 2,
+        producer_streams_moved: 1,
+        producer_streams_open: 2,
         integrity_bad_crc: 2,
         integrity_bad_magic: 0,
         integrity_incomplete: 1,

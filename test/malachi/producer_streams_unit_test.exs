@@ -1,0 +1,413 @@
+defmodule Malachi.ProducerStreamsUnitTest do
+  # `Malachi.ProducerStreams` against a broker stand-in that holds every append until the test releases it,
+  # so the orders a real broker produces only by racing can be set up one step at a time: an answer after a
+  # move, an answer out of order, a broker that goes down with appends in flight.
+  use ExUnit.Case, async: true
+
+  alias Malachi.Log.Record
+  alias Malachi.ProducerStreams
+  alias Malachi.Wire
+  alias Malachi.Wire.Batch
+
+  defmodule HeldBroker do
+    @moduledoc false
+    use GenServer
+
+    def start(opts \\ []), do: GenServer.start(__MODULE__, nil, opts)
+    # answers the held appends of `sequences`, in the order given, with `reply`
+    def release(broker, sequences, reply), do: GenServer.call(broker, {:release, sequences, reply})
+
+    @impl true
+    def init(nil), do: {:ok, %{held: []}}
+
+    @impl true
+    def handle_call({:stream_produce, _range_id, records, _ctx}, from, state),
+      do: {:noreply, %{state | held: state.held ++ [{hd(records).value, from}]}}
+
+    def handle_call({:close_stream, _token}, _from, state), do: {:reply, :ok, state}
+
+    def handle_call({:release, values, reply}, _from, state) do
+      Enum.each(values, fn value -> GenServer.reply(:proplists.get_value(value, state.held), {reply, 1.0}) end)
+      {:reply, :ok, %{state | held: Enum.reject(state.held, fn {value, _from} -> value in values end)}}
+    end
+  end
+
+  setup do
+    {:ok, broker} = HeldBroker.start()
+    on_exit(fn -> if Process.alive?(broker), do: Process.exit(broker, :kill) end)
+    token = make_ref()
+    granted = %{appends: 8, bytes: 1_000_000}
+
+    opened = %{
+      corr: 7,
+      broker: broker,
+      broker_pid: broker,
+      topic: "t",
+      range_id: {"t", 0},
+      token: token,
+      granted: granted
+    }
+
+    id = 1
+    streams = ProducerStreams.open(ProducerStreams.new(), Map.put(opened, :id, id))
+    %{broker: broker, token: token, streams: streams, id: id}
+  end
+
+  defp batch(value), do: Batch.encode([{Record.new(value), false}], :none)
+
+  # quotas that admit everything
+  defp free(_records, _bytes), do: :ok
+
+  defp append(streams, id, sequence) do
+    {streams, frames} =
+      ProducerStreams.append(streams, id, sequence, batch(Integer.to_string(sequence)), 1_000_000, &free/2)
+
+    {streams, Enum.map(frames, &push/1)}
+  end
+
+  defp push(frame) do
+    {:ok, body, <<>>} = Wire.decode_frame(frame)
+    {7, 0, payload} = Wire.decode_response(body)
+    Wire.decode_push(payload)
+  end
+
+  # Feeds the connection's mailbox to the streams until `count` pushes came out.
+  defp pushes(streams, count, acc \\ [])
+  defp pushes(streams, 0, acc), do: {streams, Enum.reverse(acc)}
+
+  defp pushes(streams, count, acc) do
+    receive do
+      message ->
+        case ProducerStreams.handle_message(streams, message) do
+          {streams, frames} -> pushes(streams, count - length(frames), Enum.reverse(Enum.map(frames, &push/1)) ++ acc)
+          :no -> pushes(streams, count, acc)
+        end
+    after
+      2_000 -> flunk("expected #{count} more pushes")
+    end
+  end
+
+  test "an ack names the sequence below which every append is answered: 0 until the first one is", ctx do
+    {streams, []} = append(ctx.streams, ctx.id, 0)
+    {streams, []} = append(streams, ctx.id, 1)
+
+    :ok = HeldBroker.release(ctx.broker, ["1"], {:error, :no_quorum})
+    {streams, [{:append_ack, ack}]} = pushes(streams, 1)
+    # 1 answered, 0 not: nothing below 0 is answered, and the failure waits for 0 to be named
+    assert %{acked_sequence: 0, errors: []} = ack
+
+    :ok = HeldBroker.release(ctx.broker, ["0"], {:ok, %{}})
+    {_streams, [{:append_ack, ack}]} = pushes(streams, 1)
+    assert %{acked_sequence: 2, errors: [%{sequence: 1, reason: "no_quorum"}]} = ack
+  end
+
+  test "after a move the stream takes no new append, and the appends in flight are still answered", ctx do
+    {streams, []} = append(ctx.streams, ctx.id, 0)
+    send(self(), {:stream_moved, ctx.token, :sealed, [{{"t", 0}, nil}]})
+
+    {streams, [{:moved, moved}]} = pushes(streams, 1)
+    assert moved.reason == "sealed"
+    assert ProducerStreams.append(streams, ctx.id, 1, batch("1"), 1_000_000, &free/2) == {:unknown, ctx.id}
+    assert ProducerStreams.busy?(streams)
+
+    :ok = HeldBroker.release(ctx.broker, ["0"], {:ok, %{}})
+    {streams, [{:append_ack, ack}]} = pushes(streams, 1)
+    assert ack.acked_sequence == 1
+    # answered, so the stream is gone
+    refute ProducerStreams.busy?(streams)
+    assert ProducerStreams.topic(streams, ctx.id) == nil
+  end
+
+  test "a gap stops the stream, and the appends before it are still answered", ctx do
+    {streams, []} = append(ctx.streams, ctx.id, 0)
+    {streams, [{:append_ack, gap}]} = append(streams, ctx.id, 2)
+    assert %{acked_sequence: 0, errors: [%{sequence: 2, reason: "sequence_gap"}]} = gap
+
+    :ok = HeldBroker.release(ctx.broker, ["0"], {:ok, %{}})
+    {_streams, [{:append_ack, ack}]} = pushes(streams, 1)
+    assert ack.acked_sequence == 1
+  end
+
+  test "a broker that goes down moves every stream on it, and its appends in flight answer as failed", ctx do
+    {streams, []} = append(ctx.streams, ctx.id, 0)
+    Process.exit(ctx.broker, :kill)
+
+    {_streams, pushed} = pushes(streams, 2)
+
+    assert {:moved, %{reason: "restarted", targets: [%{range: 0, segment: nil}]}} =
+             Enum.find(pushed, &match?({:moved, _}, &1))
+
+    assert {:append_ack, %{acked_sequence: 1, errors: [%{sequence: 0}]}} =
+             Enum.find(pushed, &match?({:append_ack, _}, &1))
+  end
+
+  test "a broker restarted under its name is watched anew: the old one's DOWN moves only its own streams" do
+    name = :"held_broker_#{System.unique_integer([:positive])}"
+    {:ok, old} = HeldBroker.start(name: name)
+    granted = %{appends: 8, bytes: 1_000_000}
+
+    opened = fn range, pid ->
+      %{corr: 7, broker: name, broker_pid: pid, topic: "t", range_id: {"t", range}, token: make_ref(), granted: granted}
+    end
+
+    first = 1
+    streams = ProducerStreams.open(ProducerStreams.new(), Map.put(opened.(0, old), :id, first))
+
+    Process.exit(old, :kill)
+    wait_for_unregistered(name)
+    {:ok, new} = HeldBroker.start(name: name)
+    on_exit(fn -> Process.exit(new, :kill) end)
+    # opened on the new process before the old one's DOWN is read
+    second = 2
+    streams = ProducerStreams.open(streams, Map.put(opened.(1, new), :id, second))
+
+    {streams, [{:moved, %{stream_id: ^first, reason: "restarted"}}]} = pushes(streams, 1)
+    assert ProducerStreams.topic(streams, first) == nil
+    assert ProducerStreams.topic(streams, second) == "t"
+  end
+
+  test "a stream whose broker restarted between its answer and the open being recorded is moved at once", ctx do
+    # The broker that answered the open died, and another took its name before the connection recorded the
+    # stream: the stream is watched on the process that answered, whose index held it, and moved.
+    name = :"held_broker_#{System.unique_integer([:positive])}"
+    {:ok, answered} = HeldBroker.start(name: name)
+    Process.exit(answered, :kill)
+    wait_for_unregistered(name)
+    {:ok, successor} = HeldBroker.start(name: name)
+    on_exit(fn -> Process.exit(successor, :kill) end)
+
+    opened = %{
+      corr: 7,
+      broker: name,
+      broker_pid: answered,
+      topic: "t",
+      range_id: {"t", 1},
+      token: make_ref(),
+      granted: %{appends: 1, bytes: 1}
+    }
+
+    id = ctx.id + 1
+    streams = ProducerStreams.open(ctx.streams, Map.put(opened, :id, id))
+
+    {streams, [{:moved, %{stream_id: ^id, reason: "restarted"}}]} = pushes(streams, 1)
+    assert ProducerStreams.topic(streams, id) == nil
+    # the stream on the live broker is untouched
+    assert ProducerStreams.topic(streams, ctx.id) == "t"
+  end
+
+  test "an append on a stream the connection never opened is unknown", ctx do
+    assert ProducerStreams.append(ctx.streams, ctx.id + 1, 0, batch("x"), 1_000_000, &free/2) == {:unknown, ctx.id + 1}
+  end
+
+  test "messages that are not about its streams are not taken", ctx do
+    # a move for a stream it does not hold, and an unrelated message, with nothing in flight and with an append out
+    assert ProducerStreams.handle_message(ctx.streams, {:stream_moved, make_ref(), :sealed, []}) == :no
+    assert ProducerStreams.handle_message(ctx.streams, :unrelated) == :no
+    {streams, []} = append(ctx.streams, ctx.id, 0)
+    assert ProducerStreams.handle_message(streams, :unrelated) == :no
+  end
+
+  test "a failure's reason is named by its atom, or its tag when it carries detail", ctx do
+    {streams, []} = append(ctx.streams, ctx.id, 0)
+    {streams, []} = append(streams, ctx.id, 1)
+    {streams, []} = append(streams, ctx.id, 2)
+    :ok = HeldBroker.release(ctx.broker, ["0"], {:error, {:sealed, 12}})
+    :ok = HeldBroker.release(ctx.broker, ["1"], {:error, "odd"})
+    :ok = HeldBroker.release(ctx.broker, ["2"], {:error, :no_quorum})
+
+    {_streams, acks} = pushes(streams, 3)
+    errors = Enum.flat_map(acks, fn {:append_ack, ack} -> ack.errors end)
+
+    assert errors == [
+             %{sequence: 0, reason: "sealed"},
+             %{sequence: 1, reason: ~s("odd")},
+             %{sequence: 2, reason: "no_quorum"}
+           ]
+  end
+
+  test "a move names each target range with its active segment and primary, when it has one", ctx do
+    targets = [{{"t", 3}, {{{"t", 3}, 7}, {:repl, :n1@host}}}, {{"t", 4}, nil}]
+    send(self(), {:stream_moved, ctx.token, :retired, targets})
+
+    {_streams, [{:moved, moved}]} = pushes(ctx.streams, 1)
+    assert moved.reason == "retired"
+
+    assert [%{range: 3, segment: %{segment: 7, primary: primary}}, %{range: 4, segment: nil}] = moved.targets
+    assert primary == Malachi.Metadata.broker_ref_string({:repl, :n1@host})
+  end
+
+  test "an append is charged its inflated records and bytes, after every other check, before it is sent", ctx do
+    test = self()
+    charge = fn records, bytes -> send(test, {:charged, records, bytes}) && :ok end
+    two = Batch.encode([{Record.new("a"), false}, {Record.new("bb"), false}], :zstd)
+    {%{inflated_size: inflated}, <<>>} = Batch.split(two)
+
+    # a tombstone is refused before it is charged
+    tombstone = Batch.encode([{Record.new("t"), true}], :none)
+    {streams, [frame]} = ProducerStreams.append(ctx.streams, ctx.id, 0, tombstone, 1_000_000, charge)
+    assert {:append_ack, %{errors: [%{sequence: 0, reason: "tombstone_unsupported"}]}} = push(frame)
+    refute_received {:charged, _, _}
+
+    {streams, []} = ProducerStreams.append(streams, ctx.id, 1, two, 1_000_000, charge)
+    assert_received {:charged, 2, ^inflated}
+    assert ProducerStreams.busy?(streams)
+  end
+
+  test "an append its quota refuses is answered at its sequence, is not sent, and the stream goes on", ctx do
+    refuse = fn _records, _bytes -> {:error, :rate_limited} end
+    {streams, [frame]} = ProducerStreams.append(ctx.streams, ctx.id, 0, batch("0"), 1_000_000, refuse)
+    {:append_ack, ack} = push(frame)
+    assert %{acked_sequence: 1, errors: [%{sequence: 0, reason: "rate_limited"}]} = ack
+    refute ProducerStreams.busy?(streams)
+
+    {streams, []} = ProducerStreams.append(streams, ctx.id, 1, batch("1"), 1_000_000, &free/2)
+    :ok = HeldBroker.release(ctx.broker, ["1"], {:ok, %{}})
+    {_streams, [{:append_ack, ack}]} = pushes(streams, 1)
+    assert %{acked_sequence: 2, errors: []} = ack
+  end
+
+  defp wait_for_unregistered(name) do
+    if Process.whereis(name), do: Process.sleep(5) && wait_for_unregistered(name), else: :ok
+  end
+
+  test "a stream that moved no longer holds the socket back when its window is full", ctx do
+    one = %{
+      corr: 7,
+      broker: ctx.broker,
+      broker_pid: ctx.broker,
+      topic: "t",
+      range_id: {"t", 1},
+      token: make_ref(),
+      granted: %{appends: 1, bytes: 1_000}
+    }
+
+    other = ctx.id + 1
+    streams = ProducerStreams.open(ctx.streams, Map.put(one, :id, other))
+    {streams, []} = ProducerStreams.append(streams, other, 0, batch("x"), 1_000_000, &free/2)
+    refute ProducerStreams.room?(streams)
+
+    send(self(), {:stream_moved, one.token, :sealed, [{{"t", 1}, nil}]})
+    {streams, [{:moved, _}]} = pushes(streams, 1)
+    assert ProducerStreams.room?(streams)
+  end
+
+  describe "what the operator interfaces see" do
+    # the streams this process holds, as the directory counts them
+    defp tracked do
+      case Registry.lookup(Malachi.ProducerDirectory, self()) do
+        [{_pid, count}] -> count
+        [] -> 0
+      end
+    end
+
+    defp attach_events(topic) do
+      parent = self()
+      handler = "producer-stream-#{inspect(make_ref())}"
+
+      :telemetry.attach_many(
+        handler,
+        for(event <- [:opened, :closed, :moved], do: [:malachi, :producer_stream, event]),
+        fn
+          [:malachi, :producer_stream, event], %{count: 1}, %{topic: ^topic}, _config ->
+            send(parent, {:stream_event, event})
+
+          _event, _measurements, _metadata, _config ->
+            :ok
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
+    defp opened(ctx, id, extra),
+      do:
+        Map.merge(
+          %{
+            id: id,
+            corr: 7,
+            broker: ctx.broker,
+            broker_pid: ctx.broker,
+            topic: "t",
+            range_id: {"t", 3},
+            token: make_ref(),
+            granted: %{appends: 8, bytes: 1_000_000}
+          },
+          extra
+        )
+
+    test "an open stream is described with its range, segment, window, sequences, label and opening", ctx do
+      {streams, []} = append(ctx.streams, ctx.id, 0)
+      streams = ProducerStreams.open(streams, opened(ctx, 2, %{segment_id: {{"t", 3}, 7}, label: "billing-writer"}))
+
+      [first, second] = streams |> ProducerStreams.describe() |> Enum.sort_by(& &1.stream_id)
+      assert %{stream_id: 1, topic: "t", range: 0, segment: nil, label: "", next_sequence: 1, acked_sequence: 0} = first
+      assert first.in_flight == %{appends: 1, bytes: first.in_flight.bytes} and first.in_flight.bytes > 0
+      assert first.window == %{appends: 8, bytes: 1_000_000}
+      assert first.primary == Atom.to_string(node())
+      assert is_integer(first.opened_at)
+
+      assert %{stream_id: 2, range: 3, segment: 7, label: "billing-writer", in_flight: %{appends: 0, bytes: 0}} = second
+    end
+
+    test "a broker that goes down moves its streams out of the directory, as moved", ctx do
+      # a topic of its own: the async suites move streams of other topics meanwhile
+      topic = "down_#{System.unique_integer([:positive])}"
+      streams = ProducerStreams.open(ctx.streams, opened(ctx, 2, %{topic: topic}))
+      attach_events(topic)
+      assert tracked() == 2
+
+      Process.exit(ctx.broker, :kill)
+      assert_receive {:DOWN, _ref, :process, _pid, _reason} = down
+      assert {_streams, [_one, _two]} = ProducerStreams.handle_message(streams, down)
+      assert_receive {:stream_event, :moved}
+      assert tracked() == 0
+    end
+
+    test "a stream that moved with appends still in flight is not listed, though it waits for their answers",
+         ctx do
+      {streams, []} = append(ctx.streams, ctx.id, 0)
+      {streams, [_moved]} = ProducerStreams.handle_message(streams, {:stream_moved, ctx.token, :sealed, []})
+
+      assert Map.has_key?(streams.streams, ctx.id)
+      assert ProducerStreams.describe(streams) == []
+    end
+
+    test "a label is shown as printable ASCII only, cut at 128 bytes" do
+      ctx = %{broker: self()}
+      control = ProducerStreams.open(ProducerStreams.new(), opened(ctx, 1, %{label: "a\nb\e[31mc\u00e9"}))
+      assert [%{label: "a?b?[31mc??"}] = ProducerStreams.describe(control)
+
+      long = ProducerStreams.open(ProducerStreams.new(), opened(ctx, 1, %{label: String.duplicate("x", 300)}))
+      assert [%{label: label}] = ProducerStreams.describe(long)
+      assert label == String.duplicate("x", 128)
+    end
+
+    test "a stream is in the directory while open, and leaves it as it is closed, moved or ends out of sequence",
+         ctx do
+      topic = "events_#{System.unique_integer([:positive])}"
+      attach_events(topic)
+
+      streams =
+        Enum.reduce([10, 11, 12], ProducerStreams.new(), fn id, acc ->
+          ProducerStreams.open(acc, opened(ctx, id, %{topic: topic, token: :"token_#{id}"}))
+        end)
+
+      for _ <- 1..3, do: assert_receive({:stream_event, :opened})
+      # the setup's stream and these three
+      assert tracked() == 4
+
+      {:ok, streams} = ProducerStreams.close(streams, 10)
+      assert_receive {:stream_event, :closed}
+
+      {streams, [_moved]} = ProducerStreams.handle_message(streams, {:stream_moved, :token_11, :sealed, []})
+      assert_receive {:stream_event, :moved}
+
+      {streams, _frames} = ProducerStreams.append(streams, 12, 5, batch("gap"), 1_000_000, &free/2)
+      assert_receive {:stream_event, :closed}
+
+      assert tracked() == 1
+      assert ProducerStreams.describe(streams) == []
+    end
+  end
+end

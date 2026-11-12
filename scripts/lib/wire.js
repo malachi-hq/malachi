@@ -9,18 +9,20 @@
  *   Request:   <api_key:u16> <correlation_id:u32> <payload>
  *   Response:  <correlation_id:u32> <error_code:u16> <payload>   // 0 = ok, 1 = error (reason string)
  *
- * A string is length-prefixed with a presence flag (0 => null, 1 => <len:u32><bytes>), so a record on
- * the wire carries no offset: position travels only in the opaque cursor.
+ * A string is length-prefixed with a presence flag (0 => null, 1 => <len:u32><bytes>). Records travel in
+ * batches (`encodeBatch`), on producer and consume streams and in `fetch_range` pages, where a record read
+ * carries its raw position in its range.
+ *
+ * A position travels in two forms (see lib/malachi/wire.ex). Raw, [sourceIndex, offset]: what a
+ * consume_ack carries and what a consume batch puts beside each record, transport a reader keeps to itself.
+ * As a token, opaque: what an application holds, resumes from and commits, never computes. Here a token is
+ * the lowercase hex of its bytes (at most 64 bytes), handed back to the server as it came; the server mints
+ * every token, this module never builds one.
  */
 
 const API = {
   auth: 0,
   createTopic: 1,
-  produce: 2,
-  fetch: 3,
-  commit: 4,
-  subscribe: 5,
-  streamAck: 6,
   leaveGroup: 7,
   // admin user management (require the admin permission)
   createUser: 8,
@@ -40,6 +42,18 @@ const API = {
   // admin console roles (require the admin permission, #228)
   setRole: 22,
   listUsersWithRoles: 23,
+  // streams, routing and groups (#275, see "Streams, routing and groups" in lib/malachi/wire.ex)
+  clusterState: 24,
+  topicRoutes: 25,
+  openStream: 26,
+  append: 27,
+  closeStream: 28,
+  openConsume: 29,
+  consumeAck: 30,
+  fetchRange: 31,
+  joinGroup: 32,
+  groupHeartbeat: 33,
+  commitOffsets: 34,
 };
 
 const OK = 0;
@@ -93,6 +107,23 @@ class Reader {
     this.pos += 8;
     return v;
   }
+  u8() {
+    const v = this.buf.readUInt8(this.pos);
+    this.pos += 1;
+    return v;
+  }
+  // a u64 as a Number when it is exact as one, a BigInt past 2^53
+  num64() {
+    const v = this.u64();
+    return v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : v;
+  }
+  // a counted list: <count:u16> item*
+  list(take) {
+    const count = this.u16();
+    const items = [];
+    for (let i = 0; i < count; i++) items.push(take(this));
+    return items;
+  }
   bytes(len) {
     const v = this.buf.subarray(this.pos, this.pos + len);
     this.pos += len;
@@ -130,8 +161,14 @@ function decodeFrame(buffer) {
   return { body: buffer.subarray(4, 4 + len), rest: buffer.subarray(4 + len) };
 }
 
+// One buffer for the whole frame, so the payload is copied once: an append's payload is its batch.
 function encodeRequest(apiKey, correlationId, payload) {
-  return encodeFrame(Buffer.concat([u16(apiKey), u32(correlationId), payload]));
+  const buf = Buffer.allocUnsafe(10 + payload.length);
+  buf.writeUInt32BE(6 + payload.length, 0);
+  buf.writeUInt16BE(apiKey, 4);
+  buf.writeUInt32BE(correlationId, 6);
+  payload.copy(buf, 10);
+  return buf;
 }
 
 function decodeResponse(body) {
@@ -158,24 +195,46 @@ function encodeCreateTopicReq(topic, keyspaceBits) {
 
 // records: [{ key?, value, headers?: {k:v}, timestamp? }]
 function encodeRecord(record) {
-  const value = Buffer.isBuffer(record.value) ? record.value : Buffer.from(String(record.value), 'utf8');
-  const ts = record.timestamp !== undefined ? record.timestamp : Date.now();
-  const headers = record.headers || {};
-  const entries = Object.entries(headers);
-  const headerBody = Buffer.concat(entries.map(([k, v]) => Buffer.concat([putStr(k), putStr(String(v))])));
-  return Buffer.concat([
-    putStr(record.key ?? null),
-    u32(value.length),
-    value,
-    u64(ts),
-    u32(entries.length),
-    headerBody,
-  ]);
+  const part = recordPart(record);
+  const buf = Buffer.allocUnsafe(part.size);
+  writeRecordPart(buf, 0, part);
+  return buf;
 }
 
-function encodeProduceReq(topic, records) {
-  const body = Buffer.concat(records.map(encodeRecord));
-  return Buffer.concat([putStr(topic), u32(records.length), body]);
+// A record's fields as encodeRecord lays them out, with the bytes it takes: what a batch writes, record by
+// record, into one buffer rather than into a buffer per field and per record.
+function recordPart(record) {
+  const key = record.key ?? null;
+  const keyBytes = key === null ? null : Buffer.isBuffer(key) ? key : Buffer.from(key, 'utf8');
+  const value = Buffer.isBuffer(record.value) ? record.value : Buffer.from(String(record.value), 'utf8');
+  const headers = Object.entries(record.headers || {});
+  const headerBody = Buffer.concat(headers.map(([k, v]) => Buffer.concat([putStr(k), putStr(String(v))])));
+  const timestamp = record.timestamp !== undefined ? record.timestamp : Date.now();
+  const size = (keyBytes === null ? 1 : 5 + keyBytes.length) + 4 + value.length + 8 + 4 + headerBody.length;
+  return { keyBytes, value, timestamp, headerCount: headers.length, headerBody, size };
+}
+
+// Writes `part` (recordPart/1) into `buf` at `off`; returns the offset past it.
+function writeRecordPart(buf, off, { keyBytes, value, timestamp, headerCount, headerBody }) {
+  if (keyBytes === null) {
+    buf[off] = 0;
+    off += 1;
+  } else {
+    buf[off] = 1;
+    buf.writeUInt32BE(keyBytes.length, off + 1);
+    off += 5 + keyBytes.copy(buf, off + 5);
+  }
+  buf.writeUInt32BE(value.length, off);
+  off += 4 + value.copy(buf, off + 4);
+  // a millisecond count is a safe integer, written as two halves rather than through a BigInt per record
+  if (Number.isSafeInteger(timestamp) && timestamp >= 0) {
+    buf.writeUInt32BE(Math.floor(timestamp / 0x100000000), off);
+    buf.writeUInt32BE(timestamp % 0x100000000, off + 4);
+  } else {
+    buf.writeBigUInt64BE(BigInt(timestamp), off);
+  }
+  buf.writeUInt32BE(headerCount, off + 8);
+  return off + 12 + headerBody.copy(buf, off + 12);
 }
 
 function decodeRecord(r) {
@@ -192,38 +251,8 @@ function decodeRecord(r) {
   return { key, value, timestamp, headers };
 }
 
-function decodeFetchResp(payload) {
-  const r = new Reader(payload);
-  const count = r.u32();
-  const records = [];
-  for (let i = 0; i < count; i++) records.push(decodeRecord(r));
-  const cursor = r.str();
-  return { records, cursor };
-}
-
-// member is an optional consumer-group member id (null = whole-group / single consumer); with it set the
-// server scopes the fetch to the member's ranges and returns records + an opaque cursor (no range ids).
-function encodeFetchReq(topic, cursor, group, member, max, waitMs) {
-  return Buffer.concat([putStr(topic), putStr(cursor), putStr(group), putStr(member), u32(max), u32(waitMs)]);
-}
-
 function encodeLeaveGroupReq(topic, group, member) {
   return Buffer.concat([putStr(topic), putStr(group), putStr(member)]);
-}
-
-function encodeCommitReq(topic, group, cursor) {
-  return Buffer.concat([putStr(topic), putStr(group), putStr(cursor)]);
-}
-
-// member is an optional consumer-group member id (null = whole-group subscription); with it set the
-// server scopes the push stream to the member's ranges (opaque: the push is still records + cursor).
-function encodeSubscribeReq(topic, group, member, window, max) {
-  return Buffer.concat([putStr(topic), putStr(group), putStr(member), u32(window), u32(max)]);
-}
-
-// A member stream_ack doubles as a coordinator heartbeat + range refresh (an empty ack = a heartbeat).
-function encodeStreamAckReq(topic, group, member, cursor, count) {
-  return Buffer.concat([putStr(topic), putStr(group), putStr(member), putStr(cursor), u32(count)]);
 }
 
 // ---- admin user management (permissions are byte strings: "admin"/"produce"/"consume") ----
@@ -434,6 +463,387 @@ function decodeTopicPolicyResp(payload) {
   return { topic, policy, resolution, definition, effective };
 }
 
+// ---- streams, routing and groups (keys 24 to 34, see lib/malachi/wire.ex) ----
+
+const zlib = require('zlib');
+
+const BROKER_STATUSES = ['alive', 'suspect', 'dead'];
+const RANGE_STATES = ['active', 'sealed'];
+const CODECS = ['none', 'zstd'];
+const PUSH_KINDS = ['append_ack', 'moved', 'records'];
+
+function u8(n) {
+  return Buffer.from([n]);
+}
+
+function codeIn(table, name) {
+  const code = table.indexOf(name);
+  if (code < 0) throw new Error(`unknown name ${name}`);
+  return code;
+}
+
+// A counted list: <count:u16> item*
+function putList(items, put) {
+  return Buffer.concat([u16(items.length), ...items.map(put)]);
+}
+
+// A raw position is [sourceIndex, offset]: the source in a range's history (an ancestor, or the range
+// itself) and an offset in it.
+function putPosition([source, offset]) {
+  return Buffer.concat([u16(source), u64(offset)]);
+}
+
+function readPosition(r) {
+  return [r.u16(), r.num64()];
+}
+
+// The longest token a frame carries, in bytes.
+const MAX_TOKEN_BYTES = 64;
+
+// A position token: <len:u8> <token>, the token given as the lowercase hex of its bytes.
+function putToken(token) {
+  if (typeof token !== 'string' || !/^([0-9a-f]{2})*$/.test(token) || token.length > 2 * MAX_TOKEN_BYTES) {
+    throw new Error(`a position token is the hex of at most ${MAX_TOKEN_BYTES} bytes, not ${JSON.stringify(token)}`);
+  }
+  const bytes = Buffer.from(token, 'hex');
+  return Buffer.concat([u8(bytes.length), bytes]);
+}
+
+function readToken(r) {
+  const len = r.u8();
+  if (len > MAX_TOKEN_BYTES) throw new Error(`a position token of ${len} bytes, past ${MAX_TOKEN_BYTES}`);
+  if (r.pos + len > r.buf.length) throw new Error('a position token cut short');
+  return r.bytes(len).toString('hex');
+}
+
+// The order of two position tokens: 'lt', 'eq' or 'gt' when both are version 1 tokens (19 bytes, the first
+// 1) of one topic and one issuer, the first 9 bytes, else 'incomparable', as Malachi.Position.compare/2
+// answers. Then the order of the rest is the order of their positions. Two tokens are compared as they
+// are, never taken apart: the end of one source and the start of the next name the same next record and
+// still compare 'lt'.
+function comparePositions(a, b) {
+  const v1 = (t) => typeof t === 'string' && /^01[0-9a-f]{36}$/.test(t);
+  if (!v1(a) || !v1(b) || a.slice(0, 18) !== b.slice(0, 18)) return 'incomparable';
+  if (a === b) return 'eq';
+  return a < b ? 'lt' : 'gt';
+}
+
+// Where a consume starts: 'earliest', 'latest', { position: token } or { committed: group }.
+function putStart(start) {
+  if (start === 'earliest') return u8(0);
+  if (start === 'latest') return u8(1);
+  if (start && typeof start === 'object' && 'position' in start) return Buffer.concat([u8(2), putToken(start.position)]);
+  if (start && typeof start === 'object' && 'committed' in start) return Buffer.concat([u8(3), putStr(start.committed)]);
+  throw new Error(`unknown start ${JSON.stringify(start)}`);
+}
+
+// The codecs a reader accepts, as a bitmask (bit n for codec code n).
+function putAccept(codecs) {
+  return u8(codecs.reduce((mask, codec) => mask | (1 << codeIn(CODECS, codec)), 0));
+}
+
+function readRouteSegment(r) {
+  if (r.u8() === 0) return null;
+  return { segment: r.u32(), primary: r.str() };
+}
+
+function encodeClusterStateReq() {
+  return Buffer.alloc(0);
+}
+
+function decodeClusterStateResp(payload) {
+  const r = new Reader(payload);
+  const version = r.num64();
+  const streamsEnabled = r.u8() === 1;
+  const brokers = r.list((x) => ({ id: x.str(), host: x.str(), port: x.u16(), status: codeOf(BROKER_STATUSES, x.u8()) }));
+  const vnodes = r.list((x) => x.u32());
+  expectEnd(r);
+  return { version, streams_enabled: streamsEnabled, brokers, vnodes };
+}
+
+function encodeTopicRoutesReq(topic) {
+  return putStr(topic);
+}
+
+function decodeTopicRoutesResp(payload) {
+  const r = new Reader(payload);
+  const topic = r.str();
+  const version = r.num64();
+  const keyspaceBits = r.u8();
+  const ranges = r.list((x) => ({
+    range: x.u32(),
+    key_start: x.num64(),
+    key_end: x.num64(),
+    state: codeOf(RANGE_STATES, x.u8()),
+    segment: readRouteSegment(x),
+  }));
+  expectEnd(r);
+  return { topic, version, keyspace_bits: keyspaceBits, ranges };
+}
+
+// The window a stream opens with: an integer from 1 to 2^32 - 1 in each count, as Malachi.Wire requires.
+// Checked before encoding, because writeUInt32BE turns its argument into a number without a word: undefined,
+// NaN, null or a non-numeric string as 0, a numeric string as its value, a fraction truncated. It throws
+// only outside 0 to 2^32 - 1.
+function openWindow(counts) {
+  if (!counts.every((count) => Number.isInteger(count) && count >= 1 && count <= 0xffffffff)) {
+    throw new Error(`a stream opens with a window from 1 to 4294967295, not ${JSON.stringify(counts)}`);
+  }
+}
+
+function encodeOpenStreamReq(req) {
+  openWindow([req.window_appends, req.window_bytes]);
+  return Buffer.concat([
+    putStr(req.topic),
+    u32(req.range),
+    u64(req.routes_version),
+    u8(codeIn(CODECS, req.codec)),
+    u32(req.window_appends),
+    u32(req.window_bytes),
+    putStr(req.producer_id),
+    putStr(req.label),
+  ]);
+}
+
+function decodeOpenStreamResp(payload) {
+  const r = new Reader(payload);
+  const resp = {
+    stream_id: r.u32(),
+    segment: r.u32(),
+    window_appends: r.u32(),
+    window_bytes: r.u32(),
+    routes_version: r.num64(),
+  };
+  expectEnd(r);
+  return resp;
+}
+
+// `batch` is a Buffer from encodeBatch, encoded once by the sender.
+function encodeAppendReq(streamId, sequence, batch) {
+  return Buffer.concat([u32(streamId), u64(sequence), batch]);
+}
+
+function encodeCloseStreamReq(streamId) {
+  return u32(streamId);
+}
+
+function encodeOpenConsumeReq(req) {
+  openWindow([req.window]);
+  return Buffer.concat([
+    putStr(req.topic),
+    u32(req.range),
+    u64(req.routes_version),
+    putStart(req.start),
+    u32(req.window),
+    u32(req.max),
+    u32(req.max_bytes),
+    putAccept(req.accept),
+  ]);
+}
+
+function decodeOpenConsumeResp(payload) {
+  const r = new Reader(payload);
+  const resp = { stream_id: r.u32(), position: readToken(r) };
+  expectEnd(r);
+  return resp;
+}
+
+// A read ack names the raw position read up to (a page's `ack`), as NorthGuard's read ack carries an offset.
+function encodeConsumeAckReq(req) {
+  return Buffer.concat([u32(req.stream_id), putPosition(req.position), u32(req.window)]);
+}
+
+function encodeFetchRangeReq(req) {
+  return Buffer.concat([
+    putStr(req.topic),
+    u32(req.range),
+    u64(req.routes_version),
+    putStart(req.start),
+    u32(req.max),
+    u32(req.max_bytes),
+    u32(req.wait_ms),
+    putAccept(req.accept),
+  ]);
+}
+
+// A page (fetch_range's answer, and the body of a records push): where the next page starts, as the token to
+// resume from and commit (`next`) and as the raw position to ack with (`ack`); the batch stays encoded, for
+// decodeBatch.
+function readPage(r) {
+  const page = {
+    next: readToken(r),
+    ack: readPosition(r),
+    skip: r.u32(),
+    backlog: r.num64(),
+    expired: r.num64(),
+    expired_exact: r.u8() === 1,
+  };
+  page.batch = readBatch(r);
+  return page;
+}
+
+function decodePage(payload) {
+  const r = new Reader(payload);
+  const page = readPage(r);
+  expectEnd(r);
+  return page;
+}
+
+function decodePush(payload) {
+  const r = new Reader(payload);
+  const kind = codeOf(PUSH_KINDS, r.u8());
+  const streamId = r.u32();
+  let push;
+  if (kind === 'append_ack') {
+    push = {
+      stream_id: streamId,
+      // every sequence below this one has been answered (0 before the first answer)
+      acked_sequence: r.num64(),
+      window_appends: r.u32(),
+      window_bytes: r.u32(),
+      errors: r.list((x) => ({ sequence: x.num64(), reason: x.str() })),
+    };
+  } else if (kind === 'moved') {
+    push = {
+      stream_id: streamId,
+      reason: r.str(),
+      routes_version: r.num64(),
+      targets: r.list((x) => ({ range: x.u32(), segment: readRouteSegment(x) })),
+    };
+  } else {
+    push = { stream_id: streamId, ...readPage(r) };
+  }
+  expectEnd(r);
+  return [kind, push];
+}
+
+function encodeJoinGroupReq(req) {
+  return Buffer.concat([putStr(req.topic), putStr(req.group), putStr(req.member)]);
+}
+
+function encodeGroupHeartbeatReq(req) {
+  return Buffer.concat([encodeJoinGroupReq(req), u64(req.generation)]);
+}
+
+// join_group and group_heartbeat both answer with the member's assignment.
+function decodeAssignmentResp(payload) {
+  const r = new Reader(payload);
+  const resp = { generation: r.num64(), session_ms: r.u32(), ranges: r.list((x) => x.u32()) };
+  expectEnd(r);
+  return resp;
+}
+
+function encodeCommitOffsetsReq(req) {
+  const positions = putList(req.positions, (p) => Buffer.concat([u32(p.range), putToken(p.position)]));
+  return Buffer.concat([encodeJoinGroupReq(req), u64(req.generation), positions]);
+}
+
+// ---- batches (see Malachi.Wire.Batch) ----
+
+// The smallest whole zstd frame: magic number (4), frame header descriptor (1), window descriptor or
+// content size (1), block header (3).
+const MIN_ZSTD_FRAME = 9;
+
+// A record behind its flags byte (bit 0: a tombstone).
+function flagged(entry) {
+  return Buffer.concat([u8(entry.tombstone ? 1 : 0), encodeRecord(entry.record)]);
+}
+
+// A batch of { record, tombstone } entries for an append, or of { position, record, tombstone } ones as a
+// consume carries them (layout 'positioned').
+function encodeBatch(entries, codec, layout = 'plain') {
+  if (layout === 'plain') return encodePlainBatch(entries, codec);
+  const encoded = entries.map((entry) =>
+    layout === 'plain' ? flagged(entry) : Buffer.concat([putPosition(entry.position), flagged(entry)]),
+  );
+  const inflated = Buffer.concat(encoded);
+  const payload = codec === 'zstd' ? zlib.zstdCompressSync(inflated) : inflated;
+  return Buffer.concat([u8(codeIn(CODECS, codec)), u32(entries.length), u32(inflated.length), u32(payload.length), payload]);
+}
+
+// A batch's header: codec (1), record count (4), inflated size (4), payload size (4).
+const BATCH_HEADER_BYTES = 13;
+
+// The plain layout, an append's, written once into one buffer behind room for its header: every record
+// sent pays for this, so it copies each record once instead of once per field, per record and per batch.
+function encodePlainBatch(entries, codec) {
+  const code = codeIn(CODECS, codec);
+  const parts = entries.map(({ record }) => recordPart(record));
+  const inflatedSize = parts.reduce((acc, part) => acc + 1 + part.size, 0);
+  const buf = Buffer.allocUnsafe(BATCH_HEADER_BYTES + inflatedSize);
+  let off = BATCH_HEADER_BYTES;
+  entries.forEach((entry, i) => {
+    buf[off] = entry.tombstone ? 1 : 0;
+    off = writeRecordPart(buf, off + 1, parts[i]);
+  });
+  const payload = codec === 'zstd' ? zlib.zstdCompressSync(buf.subarray(BATCH_HEADER_BYTES)) : null;
+  const header = payload === null ? buf : Buffer.allocUnsafe(BATCH_HEADER_BYTES);
+  header[0] = code;
+  header.writeUInt32BE(entries.length, 1);
+  header.writeUInt32BE(inflatedSize, 5);
+  header.writeUInt32BE(payload === null ? inflatedSize : payload.length, 9);
+  return payload === null ? buf : Buffer.concat([header, payload]);
+}
+
+// A batch's header, read without inflating it: its codec, record count, inflated size and payload size, as
+// Malachi.Wire.Batch.split/1 reads it. What a producer counts against its byte window, and what a reader
+// counts records by.
+function batchHeader(batch) {
+  const r = new Reader(batch);
+  return { codec: codeOf(CODECS, r.u8()), count: r.u32(), inflated_size: r.u32(), size: r.u32() };
+}
+
+function readBatch(r) {
+  const start = r.pos;
+  r.u8();
+  r.u32();
+  r.u32();
+  const size = r.u32();
+  r.bytes(size);
+  return r.buf.subarray(start, r.pos);
+}
+
+// A zstd payload inflated no further than its declared size, naming its errors as Malachi.Wire.Batch does.
+// zlib reads only the first frame and ignores any bytes after it, which the server refuses; the server
+// always compresses a batch into one frame, so a client reading its answers is only more lenient.
+function inflateZstd(payload, inflatedSize) {
+  try {
+    // zlib refuses a maxOutputLength of 0, which an empty batch declares; any output past the declaration
+    // makes the check after this refuse the batch all the same.
+    return zlib.zstdDecompressSync(payload, { maxOutputLength: Math.max(inflatedSize, 1) });
+  } catch (err) {
+    if (err.code === 'ERR_BUFFER_TOO_LARGE') throw new Error(`batch_size_mismatch: inflates past ${inflatedSize}`);
+    throw new Error(`malformed_batch: ${err.message}`);
+  }
+}
+
+// The records of a batch, inflated no further than `maxInflatedBytes`.
+function decodeBatch(batch, { maxInflatedBytes, layout = 'plain' }) {
+  const r = new Reader(batch);
+  const codec = codeOf(CODECS, r.u8());
+  const count = r.u32();
+  const inflatedSize = r.u32();
+  const payload = r.bytes(r.u32());
+  expectEnd(r);
+  if (inflatedSize > maxInflatedBytes) throw new Error(`batch_too_large: ${inflatedSize} > ${maxInflatedBytes}`);
+  if (codec === 'zstd' && payload.length < MIN_ZSTD_FRAME) throw new Error(`malformed_batch: ${payload.length} bytes`);
+  const inflated = codec === 'zstd' ? inflateZstd(payload, inflatedSize) : payload;
+  if (inflated.length !== inflatedSize) throw new Error(`batch_size_mismatch: ${inflated.length} != ${inflatedSize}`);
+  const records = new Reader(inflated);
+  const entries = [];
+  for (let i = 0; i < count; i++) {
+    const position = layout === 'plain' ? null : readPosition(records);
+    const flags = records.u8();
+    // Only bit 0 (a tombstone) is defined; a reserved bit is refused, as the server does.
+    if (flags > 1) throw new Error(`malformed_batch: reserved flags ${flags}`);
+    const tombstone = flags === 1;
+    const record = decodeRecord(records);
+    entries.push(layout === 'plain' ? { record, tombstone } : { position, record, tombstone });
+  }
+  expectEnd(records);
+  return entries;
+}
+
 module.exports = {
   API,
   OK,
@@ -446,13 +856,7 @@ module.exports = {
   encodeAuthReq,
   decodeString,
   encodeCreateTopicReq,
-  encodeProduceReq,
-  decodeFetchResp,
-  encodeFetchReq,
   encodeLeaveGroupReq,
-  encodeCommitReq,
-  encodeSubscribeReq,
-  encodeStreamAckReq,
   encodeCreateUserReq,
   encodeDeleteUserReq,
   encodeChangePasswordReq,
@@ -470,6 +874,28 @@ module.exports = {
   encodeBindTopicPolicyReq,
   encodeGetTopicPolicyReq,
   decodeTopicPolicyResp,
+  encodeClusterStateReq,
+  decodeClusterStateResp,
+  encodeTopicRoutesReq,
+  decodeTopicRoutesResp,
+  encodeOpenStreamReq,
+  decodeOpenStreamResp,
+  encodeAppendReq,
+  encodeCloseStreamReq,
+  encodeOpenConsumeReq,
+  decodeOpenConsumeResp,
+  encodeConsumeAckReq,
+  encodeFetchRangeReq,
+  decodePage,
+  decodePush,
+  encodeJoinGroupReq,
+  encodeGroupHeartbeatReq,
+  decodeAssignmentResp,
+  encodeCommitOffsetsReq,
+  comparePositions,
+  encodeBatch,
+  decodeBatch,
+  batchHeader,
 };
 
 // Self-test: `node scripts/lib/wire.js`. No server needed. Guards the frame-length cap against
@@ -493,6 +919,25 @@ if (require.main === module) {
   const framed = encodeFrame(body);
   const decoded = decodeFrame(framed);
   assert.ok(decoded && decoded.body.equals(body), 'a normal frame decodes unchanged');
+
+  // Two tokens of one topic and issuer order as their positions do; any other pair is incomparable. The
+  // tokens are written out by hand, as a broker mints them: version 1, crc32('orders'), issuer, source,
+  // offset.
+  const token = (issuer, source, offset) =>
+    Buffer.concat([Buffer.from([1]), u32(3845127662), u32(issuer), u16(source), u64(offset)]).toString('hex');
+  assert.strictEqual(comparePositions(token(3, 0, 5), token(3, 0, 6)), 'lt');
+  assert.strictEqual(comparePositions(token(3, 1, 0), token(3, 0, 2 ** 40)), 'gt', 'the source orders first');
+  assert.strictEqual(comparePositions(token(3, 0, 256), token(3, 0, 255)), 'gt', 'as numbers, not as digits');
+  assert.strictEqual(comparePositions(token(3, 2, 9), token(3, 2, 9)), 'eq');
+  assert.strictEqual(comparePositions(token(3, 0, 10), token(3, 1, 0)), 'lt', 'one source ends, the next starts: still lt');
+  assert.strictEqual(comparePositions(token(3, 0, 5), token(4, 0, 5)), 'incomparable', 'another issuer');
+  const otherTopic = '01' + 'ffffffff' + token(3, 0, 5).slice(10);
+  assert.strictEqual(comparePositions(token(3, 0, 5), otherTopic), 'incomparable', 'another topic');
+  const v2 = '02' + token(3, 0, 5).slice(2);
+  assert.strictEqual(comparePositions(v2, v2), 'incomparable', 'another version');
+  for (const bad of [token(3, 0, 5).slice(0, 36), token(3, 0, 5) + '00', token(3, 0, 5).toUpperCase(), null, [0, 5]]) {
+    assert.strictEqual(comparePositions(bad, token(3, 0, 5)), 'incomparable', `not a token: ${JSON.stringify(bad)}`);
+  }
 
   console.log('wire.js self-test passed');
 }

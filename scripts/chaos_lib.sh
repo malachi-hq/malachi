@@ -210,6 +210,19 @@ node_task() {
     "cd /app && elixir --sname chaoscli --cookie malachi_bench -S mix $* --node malachi@malachi$idx" 2>&1
 }
 
+# Switches the producer_streams cluster flag on through node 1. A build of this tree serves the stream keys
+# whatever the flag says (it is a retired no-op here); a release that predates that serves them only while
+# the flag is on. Only the upgrade drill calls this, right after `start_cluster`, because its cluster starts
+# on such an OLD release and the checker produces and reads on the stream keys: a cluster that refuses the
+# flag ends the run there rather than certify nothing. Each node learns of the flag on its own next
+# refresh; the checker waits for the node it asks to serve the keys before it starts.
+enable_stream_keys() {
+  out=$(node_task 1 "malachi.flag enable producer_streams")
+  echo "$out" | grep -q "cluster flag enabled: producer_streams" ||
+    abort_run "the producer_streams flag could not be enabled: $(echo "$out" | tail -2 | tr '\n' ' ')"
+  echo "the stream keys are on"
+}
+
 # Re-sharding is lease-gated and the lease is elected, so an operator has to issue it on the node that
 # currently holds it; refusing elsewhere with "try another node" is the task's documented behaviour.
 # Walking the three nodes is what an operator does, and it keeps a drill from failing on an election
@@ -310,7 +323,7 @@ verify_acked() {
   # one: this is the evidence a rerun cannot recover, because by then the cluster has moved on.
   #
   # The SCAN SKIPPED line comes first because it is the finding, not the raw material: it separates a
-  # scan that ran out of time (raise the budget) from a cursor that advanced past records the server
+  # scan that ran out of time (raise the budget) from a position that advanced past records the server
   # had not made visible (a different bug entirely), which the verdict alone could never distinguish.
   grep "^SCAN SKIPPED" "$WORK/verify.log" || true
   if grep -q "^PAGE " "$WORK/verify.log"; then
@@ -476,6 +489,7 @@ write_result() {
 
   verdict=passed
   [ "$FAILED" != "0" ] && verdict=failed
+  [ -n "${SKIPPED:-}" ] && verdict=skipped
 
   jq -n \
     --argjson meta "$(chaos_meta)" \
@@ -487,13 +501,26 @@ write_result() {
     --argjson failures "$(json_array ${FAILURES[@]+"${FAILURES[@]}"})" \
     --arg evidence_dir "$EVIDENCE_KEPT" \
     --argjson details "${CHAOS_DETAILS:-null}" \
+    --arg skip_reason "${SKIPPED:-}" \
     '{meta: $meta, certification: $certification, verdict: $verdict,
       replication_factor: $replication_factor, events: $events,
       invariants: $invariants, failures: $failures,
       evidence_dir: (if $evidence_dir == "" then null else $evidence_dir end),
-      details: $details}' > "$CHAOS_RESULT_FILE"
+      details: $details,
+      skip_reason: (if $skip_reason == "" then null else $skip_reason end)}' > "$CHAOS_RESULT_FILE"
 
   echo "result written to $CHAOS_RESULT_FILE"
+}
+
+# Ends a run that has nothing to certify, $1 saying why, before it started anything: recorded as skipped,
+# neither passed nor failed, and exit 0, so a scheduled job does not report a failure for a run that cannot
+# be made yet. Only a drill that named its certification in CHAOS_CERTIFICATION can skip.
+skip_run() {
+  SKIPPED="$1"
+  say "result"
+  write_result "$CHAOS_CERTIFICATION"
+  echo "$CHAOS_CERTIFICATION SKIPPED: $1"
+  exit 0
 }
 
 # Prints the certification banner named $1 and exits 0/1 by the accumulated FAILED flag. On

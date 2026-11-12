@@ -3,11 +3,13 @@ defmodule Malachi.BrokerTest do
   use ExUnitProperties
 
   alias Malachi.Broker
+  alias Malachi.Broker.ReadView
   alias Malachi.Broker.Skip
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.Placement
   alias Malachi.Cluster.SegmentRoll
+  alias Malachi.Keyspace
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Test.FakeSegmentStore
@@ -191,6 +193,83 @@ defmodule Malachi.BrokerTest do
     end
   end
 
+  describe "produce_primaries/3 (where a producer stream's append would be planned)" do
+    test "a range with no segment has it opened, and its primary named, with nothing reserved" do
+      {broker, root} = broker_with_topic()
+      records = [record("a", "k"), record("b", "k")]
+
+      assert {broker, {:ok, %{^root => :primary}}} = Broker.produce_primaries(broker, "events", records)
+      assert {:ok, {^root, 0}, :primary} = broker |> Broker.stream_segment(root) |> elem(1)
+
+      # the plan goes into that segment, from the range's first offset: no offset was taken
+      assert {_broker, {:ok, %{^root => {0, 1}}, [%{segment_id: {^root, 0}, primary: :primary}]}} =
+               Broker.produce_plan(broker, "events", records)
+    end
+
+    test "a range with an active segment names that segment's primary and opens nothing", %{store: store} do
+      {broker, root} = broker_with_topic("events", 4, brokers: [:a, :b])
+      {broker, {:ok, _}} = produce_only(broker, store, "events", [record("a", "k")])
+      [%{replica_set: [primary | _]}] = segments(broker, root)
+
+      assert {after_check, {:ok, %{^root => ^primary}}} =
+               Broker.produce_primaries(broker, "events", [record("b", "k")])
+
+      assert segments(after_check, root) == segments(broker, root)
+      assert {_broker, {:ok, %{^root => {1, 1}}}} = produce_only(after_check, store, "events", [record("b", "k")])
+    end
+
+    test "records of a retired range are named by the children their keys route to" do
+      {broker, root} = broker_with_topic()
+      {broker, {:ok, left, right}} = Broker.split_range(broker, root)
+      records = for index <- 0..29, do: record("v#{index}", "k#{index}")
+
+      assert {_broker, {:ok, primaries}} = Broker.produce_primaries(broker, "events", records)
+      assert primaries == %{left => :primary, right => :primary}
+    end
+
+    test "no records name no range, and open nothing" do
+      {broker, root} = broker_with_topic()
+
+      assert {broker, {:ok, primaries}} = Broker.produce_primaries(broker, "events", [])
+      assert primaries == %{}
+      assert segments(broker, root) == []
+    end
+
+    test "fails as the plan does: a topic that does not exist, a segment that cannot be placed" do
+      assert {_broker, {:error, :no_such_topic}} = Broker.produce_primaries(open_broker(), "nope", [record("a", "k")])
+
+      {broker, root} =
+        broker_with_topic("events", 4,
+          brokers: [:a1, :b1],
+          replication_factor: 2,
+          spread_by: "rack",
+          broker_attributes: %{a1: %{"rack" => "a"}, b1: %{"rack" => "a"}},
+          min_domains: 2,
+          placement_policy: :hard
+        )
+
+      assert {broker, {:error, {:insufficient_domains, 1, 2}}} =
+               Broker.produce_primaries(broker, "events", [record("a", "k")])
+
+      assert segments(broker, root) == []
+    end
+  end
+
+  describe "keys_in_range?/3 (whether a producer stream's append belongs to its range)" do
+    test "a range holding the whole keyspace holds every key; a child only the keys of its slice" do
+      {broker, root} = broker_with_topic()
+      records = for index <- 0..29, do: record("v#{index}", "k#{index}")
+      assert Broker.keys_in_range?(broker, root, records)
+
+      {broker, {:ok, left, right}} = Broker.split_range(broker, root)
+      refute Broker.keys_in_range?(broker, left, records)
+      {in_left, in_right} = Enum.split_with(records, &(Keyspace.position_of(&1.key, 16) < 8))
+      assert Broker.keys_in_range?(broker, left, in_left)
+      assert Broker.keys_in_range?(broker, right, in_right)
+      refute Broker.keys_in_range?(broker, {"events", 99}, in_left)
+    end
+  end
+
   describe "min_domains hard policy (failure-domain hardening)" do
     # three brokers over only two racks (a, b)
     @racks %{a1: %{"rack" => "a"}, a2: %{"rack" => "a"}, b1: %{"rack" => "b"}}
@@ -334,6 +413,21 @@ defmodule Malachi.BrokerTest do
       assert Broker.read_history(broker, root_id, empty) == {:ok, []}
     end
 
+    test "with a store that assigns no offsets, a history page past a hole moves on from where it began",
+         %{store: store} do
+      # The read asked for offset 1, inside the hole, and began at 2; counting the cursor from the request
+      # put it back at 2, and the next history page returned v2 a second time.
+      {broker, root_id} = range_with_hole(store)
+
+      unassigned = fn ref, segment, offset, max ->
+        with {:ok, records} <- FakeSegmentStore.read(store, ref, segment, offset, max),
+             do: {:ok, Enum.map(records, &%{&1 | offset: nil})}
+      end
+
+      assert {:ok, [%{value: "v2"}], cursor} = Broker.stream_history(broker, root_id, {0, 1}, 1, unassigned)
+      assert {:ok, [%{value: "v3"}], _cursor} = Broker.stream_history(broker, root_id, cursor, 1, unassigned)
+    end
+
     test "a read error is surfaced, never taken for the end of a source", %{store: store} do
       # The clause order this depends on: the error tuple must be matched before the catch-all that
       # treats anything else as a drained source, or a failing replica reads as an empty history.
@@ -424,6 +518,70 @@ defmodule Malachi.BrokerTest do
 
       # a forged/stale cursor pointing past the range's sources has nothing to read, pause, no crash
       assert {:ok, [], {9999, 0}, []} = Broker.read_consume(broker, root_id, {9999, 0}, 100, read_fun(store))
+    end
+  end
+
+  describe "ranges whose horizon a recovery has not learned yet" do
+    # A restarted frontend: its bookkeeping and its horizons gone, the end of `root_id` learned again at 2.
+    defp restarted_with_records(store) do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("a", "k1"), record("b", "k2")])
+      restarted = %{broker | offsets: %{}, segment_seq: %{}, durable: %{}} |> Broker.seed_range_state(root_id, 2, 1)
+      {restarted, root_id}
+    end
+
+    test "records past the horizon refuse a consume until a probe vouches for them", %{store: store} do
+      {restarted, root_id} = restarted_with_records(store)
+      waiting = Broker.await_horizon(restarted, root_id, 2)
+
+      assert Broker.horizon_pending?(waiting, root_id)
+      # not an empty page, which a reader cannot tell from having caught up
+      assert Broker.read_consume(waiting, root_id, :start, 100, read_fun(store)) == {:error, :metadata_unavailable}
+      assert Broker.consume_start(waiting, root_id, :latest) == {:error, :metadata_unavailable}
+
+      vouched = Broker.seed_durable(waiting, root_id, 2)
+      refute Broker.horizon_pending?(vouched, root_id)
+      {delivered, _cursor} = consume(vouched, store, root_id, :start)
+      assert delivered |> Enum.map(& &1.value) |> Enum.sort() == ["a", "b"]
+      assert Broker.consume_start(vouched, root_id, :latest) == {:ok, {0, 2}}
+    end
+
+    test "a produce answered or a seal ends the wait as a probe does", %{store: store} do
+      {restarted, root_id} = restarted_with_records(store)
+      waiting = Broker.await_horizon(restarted, root_id, 2)
+
+      refute waiting |> Broker.mark_durable(%{root_id => {2, 2}}) |> Broker.horizon_pending?(root_id)
+
+      %{id: segment_id} = waiting.segments[root_id]
+      refute waiting |> Broker.forget_sealed(root_id, segment_id, 2) |> Broker.horizon_pending?(root_id)
+    end
+
+    test "a range with nothing past its horizon, a new one among them, is left readable", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      empty = broker |> Broker.seed_range_state(root_id, 0, 1) |> Broker.await_horizon(root_id, 0)
+      refute Broker.horizon_pending?(empty, root_id)
+      assert {:ok, [], _cursor, []} = Broker.read_consume(empty, root_id, :start, 100, read_fun(store))
+
+      # nor one whose horizon is known, even below its end: a quorum held 1 of the 2, and only that one is read
+      {restarted, root_id} = restarted_with_records(store)
+      known = restarted |> Broker.seed_durable(root_id, 1) |> Broker.await_horizon(root_id, 2)
+      refute Broker.horizon_pending?(known, root_id)
+      assert Broker.durable_end(known, root_id) == 1
+    end
+
+    test "offsets a produce in flight reserved are not records a recovery found" do
+      # A range opened since boot: its first produce is planned (offsets 0 and 1 reserved) and not answered
+      # when a recovery pass learns the end the primary holds, nothing yet. Compared with the reserved end,
+      # the range refused its reads, and a produce that then failed left it refusing until a later probe.
+      {broker, root_id} = broker_with_topic()
+
+      {in_flight, {:ok, _placements, _dispatches}} =
+        Broker.produce_plan(broker, "events", [record("a", "k1"), record("b", "k2")])
+
+      assert Broker.range_end(in_flight, root_id) == 2
+
+      recovered = in_flight |> Broker.seed_range_state(root_id, 0, 1) |> Broker.await_horizon(root_id, 0)
+      refute Broker.horizon_pending?(recovered, root_id)
     end
   end
 
@@ -559,6 +717,210 @@ defmodule Malachi.BrokerTest do
       {broker, {:ok, left_id, _right_id}} = Broker.split_range(broker, root_id)
       broker = delete_segments(broker, expire.(segments(broker, root_id)))
       {broker, root_id, left_id}
+    end
+
+    test "a sealed ancestor segment that answers nothing fails the read instead of being taken as drained",
+         %{store: store} do
+      # The read was routed through metadata that still lists the segment, but its copy is gone (retention
+      # or a heal deleted it since), so the store answers :eof. Taking that as the end of the ancestor
+      # moved the reader into the next source, past what the ancestor's later segments still held, and
+      # reported nothing. Failing leaves the position where it was; the next read sees the deletion.
+      {broker, root_id, left_id} = split_with_expired_parent(store, fn _segments -> [] end)
+      assert {:ok, _records, _cursor, []} = Broker.read_consume(broker, left_id, :start, 100, read_fun(store))
+      [gone | _] = segments(broker, root_id)
+
+      reader = fn ref, segment, offset, max ->
+        if segment == gone.id, do: :eof, else: FakeSegmentStore.read(store, ref, segment, offset, max)
+      end
+
+      assert {:error, :sealed_segment_unreadable} = Broker.read_consume(broker, left_id, :start, 100, reader)
+    end
+
+    test "a sealed segment whose head does not answer is read from another copy of it", %{store: store} do
+      # Two copies of every segment; the head's broker died, and this segment is not the one a failover
+      # moved a live copy to the head of. The fake store keeps one copy, under the head, and the other copy
+      # serves exactly what it holds.
+      one_record = Record.encoded_size(record("v0", "k0"))
+
+      {broker, root_id} =
+        broker_with_topic("events", 4, brokers: [:a, :b], replication_factor: 2, segment_max_bytes: one_record)
+
+      broker =
+        Enum.reduce(0..2, broker, fn index, broker ->
+          {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v#{index}", "k#{index}")])
+          broker
+        end)
+
+      [sealed | _] = segments(broker, root_id)
+      assert is_integer(sealed.length)
+      [head, other] = sealed.replica_set
+
+      copies = fn
+        ^head, _segment, _offset, _max -> {:error, :unreachable}
+        ^other, segment, offset, max -> FakeSegmentStore.read(store, head, segment, offset, max)
+      end
+
+      assert {:ok, [%{value: "v0"}]} = Broker.read(broker, root_id, 0, 10, copies)
+
+      # a head whose copy is gone (its directory lost) answers :eof, and the other copy still serves the read
+      gone_head = fn
+        ^head, _segment, _offset, _max -> :eof
+        ^other, segment, offset, max -> FakeSegmentStore.read(store, head, segment, offset, max)
+      end
+
+      assert {:ok, [%{value: "v0"}]} = Broker.read(broker, root_id, 0, 10, gone_head)
+
+      # every copy refusing still fails the read, with the refusal
+      refusing = fn _replica, _segment, _offset, _max -> {:error, :unreachable} end
+      assert {:error, :unreachable} = Broker.read(broker, root_id, 0, 10, refusing)
+    end
+
+    test "a copy that answers an empty page does not hide one that holds the records, nor one that refused",
+         %{store: store} do
+      one_record = Record.encoded_size(record("v0", "k0"))
+
+      {broker, root_id} =
+        broker_with_topic("events", 4, brokers: [:a, :b, :c], replication_factor: 3, segment_max_bytes: one_record)
+
+      broker =
+        Enum.reduce(0..2, broker, fn index, broker ->
+          {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v#{index}", "k#{index}")])
+          broker
+        end)
+
+      [sealed | _] = segments(broker, root_id)
+      [head, damaged, intact] = sealed.replica_set
+
+      # the head is gone, the next copy is damaged (it answers nothing below the sealed end), the last holds it
+      copies = fn
+        ^head, _segment, _offset, _max -> {:error, :unreachable}
+        ^damaged, _segment, _offset, _max -> {:ok, []}
+        ^intact, segment, offset, max -> FakeSegmentStore.read(store, head, segment, offset, max)
+      end
+
+      assert {:ok, [%{value: "v0"}]} = Broker.read(broker, root_id, 0, 10, copies)
+
+      # no copy with the records: the refusal fails the read rather than the empty page passing for drained
+      without = fn
+        ^head, _segment, _offset, _max -> {:error, :unreachable}
+        _other, _segment, _offset, _max -> {:ok, []}
+      end
+
+      assert {:error, :unreachable} = Broker.read(broker, root_id, 0, 10, without)
+
+      # every copy empty: the empty page stands, as a single copy's always has
+      empty = fn _copy, _segment, _offset, _max -> {:ok, []} end
+      assert {:ok, []} = Broker.read(broker, root_id, 0, 10, empty)
+    end
+
+    test "a copy on a node this one is not connected to is not asked, unless it is the head", %{store: store} do
+      local = {:repl, node()}
+      ghost = {:repl, :"ghost@nowhere.invalid"}
+      one_record = Record.encoded_size(record("v0", "k0"))
+
+      {broker, root_id} =
+        broker_with_topic("events", 4, brokers: [local, ghost], replication_factor: 2, segment_max_bytes: one_record)
+
+      broker =
+        Enum.reduce(0..2, broker, fn index, broker ->
+          {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v#{index}", "k#{index}")])
+          broker
+        end)
+
+      [sealed | _] = segments(broker, root_id)
+      [first | _] = sealed.replica_set
+      parent = self()
+
+      copies = fn copy, segment, offset, max ->
+        send(parent, {:asked, copy})
+        if copy == local, do: {:error, :unreachable}, else: FakeSegmentStore.read(store, first, segment, offset, max)
+      end
+
+      # the local copy first, refusing: the ghost after it is not asked
+      broker = Broker.apply_heal(broker, [{:set_segment_replicas, sealed.id, [local, ghost]}])
+      assert {:error, :unreachable} = Broker.read(broker, root_id, 0, 10, copies)
+      assert_received {:asked, ^local}
+      refute_received {:asked, ^ghost}
+
+      # the ghost at the head is asked, as the head always is
+      broker = Broker.apply_heal(broker, [{:set_segment_replicas, sealed.id, [ghost, local]}])
+      Broker.read(broker, root_id, 0, 10, copies)
+      assert_received {:asked, ^ghost}
+    end
+
+    test "a page over a filtered ancestor reads whole pages, however few of their records it keeps",
+         %{store: store} do
+      # 99 records of the left child's slice, then a long run of the right child's. Asking each read for
+      # only what was left of the page (1 once 99 were kept) cost one store call per sibling record.
+      {broker, root_id} = broker_with_topic()
+
+      keys = fn half ->
+        Stream.map(0..10_000, &"k#{&1}") |> Stream.filter(&(Keyspace.position_of(&1, 16) < 8 == (half == :left)))
+      end
+
+      left = Enum.take(keys.(:left), 99)
+      right = Enum.take(keys.(:right), 300)
+      {broker, {:ok, _}} = produce(broker, store, "events", Enum.map(left ++ right, &record(&1, &1)))
+      broker = seal_active(broker, store, root_id)
+      {broker, {:ok, left_id, _right_id}} = Broker.split_range(broker, root_id)
+
+      calls = :counters.new(1, [])
+
+      reader = fn ref, segment, offset, max ->
+        :counters.add(calls, 1, 1)
+        FakeSegmentStore.read(store, ref, segment, offset, max)
+      end
+
+      assert {:ok, records, _cursor, []} = Broker.read_consume(broker, left_id, :start, 100, reader)
+      assert Enum.map(records, & &1.value) == left
+      assert :counters.get(calls, 1) <= 10
+    end
+
+    test "a page cut short by its budget resumes right after the last record it took", %{store: store} do
+      # Two records from the ancestor leave room for two of the child's own five: its read returns four
+      # (a whole page), the page takes two, and the next page must start at the third.
+      {broker, root_id} = broker_with_topic()
+      left = Stream.map(0..10_000, &"k#{&1}") |> Stream.filter(&(Keyspace.position_of(&1, 16) < 8)) |> Enum.take(7)
+      {inherited, own} = Enum.split(left, 2)
+      {broker, {:ok, _}} = produce(broker, store, "events", Enum.map(inherited, &record(&1, &1)))
+      broker = seal_active(broker, store, root_id)
+      {broker, {:ok, left_id, _right_id}} = Broker.split_range(broker, root_id)
+      {broker, {:ok, _}} = produce_only(broker, store, "events", Enum.map(own, &record(&1, &1)))
+
+      assert {:ok, first, cursor, []} = Broker.read_consume(broker, left_id, :start, 4, read_fun(store))
+      assert Enum.map(first, & &1.value) == inherited ++ Enum.take(own, 2)
+      assert {:ok, rest, _cursor, []} = Broker.read_consume(broker, left_id, cursor, 10, read_fun(store))
+      assert Enum.map(rest, & &1.value) == Enum.drop(own, 2)
+    end
+
+    test "with a store that assigns no offsets, a read past a hole moves on from where it began",
+         %{store: store} do
+      # The read asked for offset 1, inside the hole, and began at 2. Counting the cursor from the request
+      # put it back at 2, and the next page delivered v2 a second time.
+      {broker, root_id} = range_with_hole(store)
+
+      unassigned = fn ref, segment, offset, max ->
+        with {:ok, records} <- FakeSegmentStore.read(store, ref, segment, offset, max),
+             do: {:ok, Enum.map(records, &%{&1 | offset: nil})}
+      end
+
+      assert {:ok, [%{value: "v2"}], cursor, _skips} = Broker.read_consume(broker, root_id, {0, 1}, 1, unassigned)
+      assert {:ok, [%{value: "v3"}], _cursor, _skips} = Broker.read_consume(broker, root_id, cursor, 1, unassigned)
+    end
+
+    test "an active segment is read no further than where the range ends for the reader", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _}} = produce_only(broker, store, "events", for(i <- 0..4, do: record("v#{i}", "k#{i}")))
+      test = self()
+
+      reader = fn ref, segment, offset, max ->
+        send(test, {:asked, offset, max})
+        FakeSegmentStore.read(store, ref, segment, offset, max)
+      end
+
+      assert {:ok, records} = Broker.read(broker, root_id, 2, 100, reader)
+      assert Enum.map(records, & &1.value) == ["v2", "v3", "v4"]
+      assert_received {:asked, 2, 3}
     end
 
     test "a cursor below the earliest stored offset reports the exact span it skips", %{store: store} do
@@ -730,6 +1092,252 @@ defmodule Malachi.BrokerTest do
         {:ok, records, next, more} ->
           drain(broker, store, range_id, page, next, delivered ++ Enum.map(records, & &1.offset), skipped ++ more)
       end
+    end
+  end
+
+  describe "view_epoch/1 (when a reader's view of a range must be sent again)" do
+    # The oracle: whenever an operation leaves the epoch where it was, every view of every range of the
+    # topic, all but the range's own end (which each wake sets), is what it was before. A change the
+    # epoch missed fails here instead of leaving a consume stream on a stale view.
+    property "an unmoved epoch means an unchanged view of every range" do
+      index = StreamData.integer(0..5)
+      offset = StreamData.integer(0..40)
+      keys = StreamData.list_of(StreamData.integer(0..63), min_length: 1, max_length: 6)
+
+      op =
+        StreamData.one_of([
+          StreamData.tuple({StreamData.constant(:produce), keys}),
+          StreamData.tuple({StreamData.constant(:produce_only), keys}),
+          StreamData.tuple({StreamData.constant(:seal), index}),
+          StreamData.tuple({StreamData.constant(:split), index}),
+          StreamData.tuple({StreamData.constant(:merge), index}),
+          StreamData.tuple({StreamData.constant(:delete), index}),
+          StreamData.tuple({StreamData.constant(:seed), index, offset, StreamData.integer(0..5)}),
+          StreamData.tuple({StreamData.constant(:unreachable), index, StreamData.integer(0..5)}),
+          StreamData.tuple({StreamData.constant(:await_horizon), index, offset}),
+          StreamData.tuple({StreamData.constant(:seed_durable), index, offset}),
+          StreamData.tuple({StreamData.constant(:adopt), index, offset}),
+          StreamData.tuple({StreamData.constant(:remote), StreamData.member_of([:seal, :split, :delete]), index}),
+          StreamData.tuple({StreamData.constant(:fence), index}),
+          StreamData.constant(:open_group)
+        ])
+
+      one_record = Record.encoded_size(record("v0", "k0"))
+
+      check all(ops <- StreamData.list_of(op, min_length: 1, max_length: 25), max_runs: 200) do
+        # a store per run: segment ids repeat from run to run, and a seal one run left would change the next
+        {:ok, store} = FakeSegmentStore.start_link()
+        {broker, _root_id} = broker_with_topic("events", 2, segment_max_bytes: 3 * one_record)
+
+        Enum.reduce(ops, broker, fn op, before ->
+          after_op = apply_view_op(before, store, op)
+
+          if Broker.view_epoch(after_op) == Broker.view_epoch(before) do
+            for range_id <- topic_range_ids(before) ++ topic_range_ids(after_op) do
+              assert base_view(after_op, range_id) == base_view(before, range_id),
+                     "#{inspect(op)} changed the view of #{inspect(range_id)} and left the epoch"
+            end
+          end
+
+          after_op
+        end)
+
+        Agent.stop(store)
+      end
+    end
+
+    test "a produce that lifts a range's recovery mark moves the epoch", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+      %{id: segment_id} = broker.segments[root_id]
+
+      # after a restart a range waits for a recovery, and the first produce's answer is what lifts it
+      marked = %{broker | unrecovered: Map.put(broker.unrecovered, root_id, true)}
+      assert ReadView.unrecovered?(ReadView.new(marked, [root_id]), root_id)
+
+      adopted = Broker.adopt_offsets(marked, root_id, segment_id, 0)
+      refute ReadView.unrecovered?(ReadView.new(adopted, [root_id]), root_id)
+      assert Broker.view_epoch(adopted) > Broker.view_epoch(marked)
+    end
+
+    test "a produce on a range nobody recovers leaves the epoch where it was", %{store: store} do
+      {broker, _root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v0", "k0")])
+      epoch = Broker.view_epoch(broker)
+
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v1", "k1")])
+      assert Broker.view_epoch(broker) == epoch
+    end
+  end
+
+  defp topic_range_ids(broker),
+    do: broker.dsrsm |> DSRSM.ranges_of_topic("events") |> Enum.map(& &1.id) |> Enum.sort()
+
+  defp base_view(broker, range_id) do
+    view = ReadView.new(broker, [range_id])
+    %{view | ends: Map.delete(view.ends, range_id)}
+  end
+
+  defp pick(broker, index) do
+    case topic_range_ids(broker) do
+      [] -> nil
+      ids -> Enum.at(ids, rem(index, length(ids)))
+    end
+  end
+
+  defp records_for(keys), do: Enum.map(keys, &record("v#{&1}", "k#{&1}"))
+
+  defp apply_view_op(broker, store, {:produce, keys}) do
+    broker = broker |> produce_only(store, "events", records_for(keys)) |> elem(0)
+    Enum.reduce(Broker.due_rolls(broker), broker, &view_seal(&2, store, &1))
+  end
+
+  defp apply_view_op(broker, store, {:produce_only, keys}),
+    do: broker |> produce_only(store, "events", records_for(keys)) |> elem(0)
+
+  defp apply_view_op(broker, store, {:seal, index}),
+    do: view_seal_active(broker, store, pick(broker, index))
+
+  defp apply_view_op(broker, store, {:split, index}) do
+    range_id = pick(broker, index)
+    broker = view_seal_active(broker, store, range_id)
+
+    case Broker.split_range(broker, range_id) do
+      {broker, {:ok, _left, _right}} -> broker
+      {broker, {:error, _reason}} -> broker
+    end
+  end
+
+  defp apply_view_op(broker, store, {:merge, index}) do
+    case broker.dsrsm |> DSRSM.active_ranges_of_topic("events") |> Enum.map(& &1.id) |> Enum.sort() do
+      [_, _ | _] = ids ->
+        first = rem(index, length(ids) - 1)
+        [a, b] = Enum.slice(ids, first, 2)
+        broker = Enum.reduce([a, b], broker, &view_seal_active(&2, store, &1))
+
+        case Broker.merge_ranges(broker, a, b) do
+          {broker, {:ok, _child}} -> broker
+          {broker, {:error, _reason}} -> broker
+        end
+
+      _fewer ->
+        broker
+    end
+  end
+
+  defp apply_view_op(broker, _store, {:delete, index}) do
+    case Enum.filter(segments(broker, pick(broker, index)), &(&1.state == :sealed)) do
+      [oldest | _] -> broker |> Broker.delete_segment(oldest.id) |> elem(0)
+      [] -> broker
+    end
+  end
+
+  defp apply_view_op(broker, _store, {:seed, index, next, seq}),
+    do: Broker.seed_range_state(broker, pick(broker, index), next, seq)
+
+  defp apply_view_op(broker, _store, {:unreachable, index, seq}),
+    do: Broker.seed_unrecovered_range(broker, pick(broker, index), seq)
+
+  defp apply_view_op(broker, _store, {:await_horizon, index, recovered_end}),
+    do: Broker.await_horizon(broker, pick(broker, index), recovered_end)
+
+  defp apply_view_op(broker, _store, {:seed_durable, index, offset}),
+    do: Broker.seed_durable(broker, pick(broker, index), offset)
+
+  defp apply_view_op(broker, _store, {:adopt, index, last}) do
+    range_id = pick(broker, index)
+
+    case Map.get(broker.segments, range_id) do
+      %{id: segment_id} -> Broker.adopt_offsets(broker, range_id, segment_id, last)
+      nil -> broker
+    end
+  end
+
+  # Another node fences the range's active segment in the store and this broker has not learned its seal
+  # yet: its next produce there is refused with where the segment ends (`Malachi.Broker.forget_sealed/4`).
+  defp apply_view_op(broker, store, {:fence, index}) do
+    case Enum.find(segments(broker, pick(broker, index)), &(&1.state == :active)) do
+      nil ->
+        broker
+
+      active ->
+        [primary | _] = active.replica_set
+        _ = FakeSegmentStore.seal(store, primary, active.id, active.start_offset)
+        broker
+    end
+  end
+
+  # Another node changes the metadata, from what this broker holds, and this broker learns it the way a
+  # reconcile does: the read installed, the journal replayed, the segments it no longer leads dropped.
+  defp apply_view_op(broker, store, {:remote, change, index}) do
+    case remote_change(broker, store, change, pick(broker, index)) do
+      nil -> broker
+      dsrsm -> refresh(broker, dsrsm)
+    end
+  end
+
+  defp apply_view_op(broker, _store, :open_group), do: broker |> Broker.open_group("g", "events") |> elem(0)
+
+  # A failover's seal of the range's active segment: the store is fenced where it holds the records.
+  defp remote_change(broker, store, :seal, range_id) do
+    case Enum.find(segments(broker, range_id), &(&1.state == :active)) do
+      nil ->
+        nil
+
+      active ->
+        [primary | _] = active.replica_set
+
+        case FakeSegmentStore.seal(store, primary, active.id, active.start_offset) do
+          {:ok, end_offset, bytes} ->
+            command = Metadata.seal_command(active, end_offset, bytes, 1_000)
+            broker.dsrsm |> DSRSM.command("events", command) |> elem(0)
+
+          {:error, _reason} ->
+            nil
+        end
+    end
+  end
+
+  defp remote_change(broker, _store, :split, range_id) do
+    case Broker.split_range(broker, range_id) do
+      {split, {:ok, _left, _right}} -> split.dsrsm
+      {_broker, {:error, _reason}} -> nil
+    end
+  end
+
+  defp remote_change(broker, _store, :delete, range_id) do
+    case Enum.filter(segments(broker, range_id), &(&1.state == :sealed)) do
+      [oldest | _] -> broker |> Broker.delete_segment(oldest.id) |> elem(0) |> Map.fetch!(:dsrsm)
+      [] -> nil
+    end
+  end
+
+  # What `Malachi.BrokerServer` does with a metadata read on a reconcile.
+  defp refresh(broker, dsrsm) do
+    {journaled, broker} = Broker.take_journal(broker)
+
+    broker
+    |> Broker.put_cache(dsrsm)
+    |> Broker.replay_journal(journaled)
+    |> Broker.drop_stale_active_segments()
+  end
+
+  # `seal_active/3` and its fence, taking a refusal as the broker left: another node may have fenced the
+  # segment first, and its seal is then the one the metadata records.
+  defp view_seal_active(broker, store, range_id) do
+    case Broker.active_roll(broker, range_id) do
+      :none -> broker
+      roll -> view_seal(broker, store, roll)
+    end
+  end
+
+  defp view_seal(broker, store, roll) do
+    with {:ok, end_offset, bytes} <- FakeSegmentStore.seal(store, roll.primary, roll.segment_id, roll.start_offset),
+         {broker, :ok} <- Broker.record_seal(broker, roll, end_offset, bytes, 1_000) do
+      broker
+    else
+      {broker, {:error, _reason}} -> broker
+      {:error, _reason} -> broker
     end
   end
 
@@ -1099,6 +1707,23 @@ defmodule Malachi.BrokerTest do
 
       refute Map.has_key?(refreshed.segments, root_id)
       assert refreshed.offsets[root_id] == 1
+    end
+
+    test "drop_stale_active_segments/1 takes the replica set the refreshed metadata holds for an active segment",
+         %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      {broker, {:ok, _placements}} = produce_only(broker, store, "events", [record("v0", "k0")])
+      %{replica_set: [cached_primary | _] = cached, bytes: bytes} = broker.segments[root_id]
+      assert {:active, {^root_id, 0}, ^cached_primary} = Broker.stream_target(broker, root_id)
+
+      # A healing pass on another node replaced the primary: the metadata names a new set while this
+      # frontend still caches the one it registered, and would send its streams to a primary nobody names.
+      replaced = [:replaced_primary | cached]
+      {dsrsm, :ok} = DSRSM.command(broker.dsrsm, "events", {:set_segment_replicas, {root_id, 0}, replaced})
+      refreshed = Broker.drop_stale_active_segments(%{broker | dsrsm: dsrsm})
+
+      assert %{id: {^root_id, 0}, replica_set: ^replaced, bytes: ^bytes} = refreshed.segments[root_id]
+      assert Broker.stream_target(refreshed, root_id) == {:active, {root_id, 0}, :replaced_primary}
     end
 
     test "a zero-length seal is stepped over rather than answered with :eof", %{store: store} do
@@ -1517,7 +2142,7 @@ defmodule Malachi.BrokerTest do
       # served plus one, which is already inside seq 1, so seq 1's head was never delivered and the
       # scan looked like one unbroken run. With the read capped at the sealed edge, the page holds
       # exactly v0..v2 from seq 0 (fewer than the page size), and consume_page carries on from offset
-      # 3 into seq 1 with the full page budget.
+      # 3 into seq 1 with what is left of the page budget.
       {broker, root_id, _sealed, _active} = sealed_with_surplus(store)
 
       {records, cursor} = consume(broker, store, root_id, :start)
@@ -1531,8 +2156,12 @@ defmodule Malachi.BrokerTest do
       assert {:ok, page, {0, 2}, []} = Broker.read_consume(broker, root_id, :start, 2, read_fun(store))
       assert Enum.map(page, &{&1.offset, &1.value}) == [{0, "v0"}, {1, "v1"}]
 
-      assert {:ok, page, {0, 5}, []} = Broker.read_consume(broker, root_id, {0, 2}, 2, read_fun(store))
-      assert Enum.map(page, &{&1.offset, &1.value}) == [{2, "v2"}, {3, "v3"}, {4, "v4"}]
+      # The page budget holds across the boundary: one record from seq 0, the one left from seq 1's head.
+      assert {:ok, page, {0, 4}, []} = Broker.read_consume(broker, root_id, {0, 2}, 2, read_fun(store))
+      assert Enum.map(page, &{&1.offset, &1.value}) == [{2, "v2"}, {3, "v3"}]
+
+      assert {:ok, page, {0, 5}, []} = Broker.read_consume(broker, root_id, {0, 4}, 2, read_fun(store))
+      assert Enum.map(page, &{&1.offset, &1.value}) == [{4, "v4"}]
 
       assert {:ok, [], {0, 5}, []} = Broker.read_consume(broker, root_id, {0, 5}, 2, read_fun(store))
     end
@@ -1775,12 +2404,12 @@ defmodule Malachi.BrokerTest do
       {broker, _root_id} = broker_with_topic("events")
       broker = Broker.journal(broker)
 
-      {broker, :ok} = Broker.commit_offset(broker, "billing", "events", %{{"events", 0} => 7})
+      {broker, :ok} = Broker.commit_offset(broker, "billing", "events", %{{"events", 0} => {0, 7}}, 0)
       {broker, _reply} = Broker.create_topic(broker, "orders", 4)
 
       {commands, drained} = Broker.take_journal(broker)
 
-      assert [{:commit_offset, "billing", "events", _}, {:create_topic, "orders", 4}] = commands
+      assert [{:commit_offset, "billing", "events", _, 0}, {:create_topic, "orders", 4}] = commands
       assert Broker.take_journal(drained) == {[], drained}
     end
 
@@ -1817,20 +2446,28 @@ defmodule Malachi.BrokerTest do
       assert is_integer(opened_at)
     end
 
-    test "a replayed commit never moves a group backwards" do
-      # The machine applies commit_offset last-write-wins, which is right for the log and wrong for a
-      # replay: the read being replayed onto was taken first and may already carry a higher position
-      # another node committed. Rolling a group back is redelivery, so the higher one wins.
+    test "a replayed fenced commit never moves a group backwards, nor past a later generation" do
       {broker, root_id} = broker_with_topic("events")
       broker = Broker.journal(broker)
 
-      {broker, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => 10})
+      {broker, {:ok, 1}} = Broker.open_group(broker, "billing", "events")
+      {g5, g8} = {Bitwise.bsl(1, 32) + 5, Bitwise.bsl(1, 32) + 8}
+      {broker, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => {0, 10}}, g5)
       {commands, broker} = Broker.take_journal(broker)
+      fence = fn broker -> broker.dsrsm |> DSRSM.merged_metadata() |> Metadata.group_fence("billing", "events") end
 
-      {ahead, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => 900})
+      # a read already ahead at the same generation keeps its position
+      {ahead, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => {0, 900}}, g5)
       replayed = Broker.replay_journal(ahead, commands)
+      assert Broker.committed_offsets(replayed, "billing", "events") == %{root_id => {0, 900}}
+      # and the replayed opening gives the cache no epoch the log did not
+      assert fence.(replayed).epoch == fence.(ahead).epoch
 
-      assert Broker.committed_offsets(replayed, "billing", "events") == %{root_id => 900}
+      # a read that a later generation committed refuses the replayed commit, whatever its position
+      {later, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => {0, 3}}, g8)
+      replayed = Broker.replay_journal(later, commands)
+      assert Broker.committed_offsets(replayed, "billing", "events") == %{root_id => {0, 3}}
+      assert fence.(replayed).generations == %{root_id => g8}
     end
 
     test "a command the control plane refused or never answered is not journaled" do
@@ -1852,6 +2489,44 @@ defmodule Malachi.BrokerTest do
       assert journaled == []
       assert Broker.replay_journal(drained, journaled) == drained
       assert DSRSM.get_topic(Broker.replay_journal(drained, journaled).dsrsm, "orders") == nil
+    end
+
+    test "a commit of issued positions journals and replays the bare positions the control plane stores" do
+      # The ra command keeps the shape it had before tokens: `replay_apply/2` takes the higher of two
+      # positions by term order, which holds only for `{source_index, offset}` pairs.
+      {broker, root_id} = broker_with_topic("events")
+      {broker, {:ok, left, _right}} = Broker.split_range(broker, root_id)
+      broker = Broker.journal(broker)
+      stale = broker.dsrsm
+
+      positions = %{left => {root_id, {0, 3}}}
+      {broker, :ok} = Broker.commit_positions(broker, "billing", "events", positions, 0)
+      {commands, broker} = Broker.take_journal(broker)
+
+      assert commands == [{:commit_offset, "billing", "events", %{left => {0, 3}}, 0}]
+      assert Broker.committed_offsets(broker, "billing", "events") == %{left => {0, 3}}
+
+      replayed = broker |> Broker.put_cache(stale, []) |> Broker.replay_journal(commands)
+      assert Broker.committed_offsets(replayed, "billing", "events") == %{left => {0, 3}}
+    end
+
+    test "a commit with one position its range does not descend from is refused whole and not journaled" do
+      {broker, root_id} = broker_with_topic("events")
+      {broker, {:ok, left, right}} = Broker.split_range(broker, root_id)
+      broker = Broker.journal(broker)
+
+      # the right child's position is one the left child's read handed out: a sibling, not an issuer
+      positions = %{left => {root_id, {0, 1}}, right => {left, {0, 1}}}
+      assert {broker, {:error, :invalid_position}} = Broker.commit_positions(broker, "billing", "events", positions, 0)
+      assert Broker.take_journal(broker) == {[], broker}
+      assert Broker.committed_offsets(broker, "billing", "events") == %{}
+    end
+
+    test "a checkpoint committed as the start before tokens still opens a read from the start" do
+      {broker, root_id} = broker_with_topic("events")
+      {broker, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => :start}, 0)
+
+      assert Broker.consume_start(broker, root_id, {:committed, "billing"}) == {:ok, {0, 0}}
     end
 
     test "replaying a command whose topic no longer routes anywhere leaves the cache alone" do

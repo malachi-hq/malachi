@@ -114,7 +114,8 @@ defmodule OciDailyRunScriptTest do
     |> String.replace("__SECRET__", @secret)
   end
 
-  # FAKE_SMOKE: pass | fail | empty (exit 3, no records). FAKE_PLAIN: refused (10) | accepted (0) | stall (124) | other (1).
+  # FAKE_SMOKE: pass | fail | empty (exit 3, no records).
+  # FAKE_PLAIN: refused (10) | accepted (0) | stall (124) | other (1).
   defp docker_stub do
     ~S"""
     #!/bin/bash

@@ -23,6 +23,7 @@ defmodule Malachi.Application do
   alias Malachi.Auth.UserMachine
   alias Malachi.Auth.UserServer
   alias Malachi.BrokerServer
+  alias Malachi.Cluster.Advertised
   alias Malachi.Cluster.AutoRebalancer
   alias Malachi.Cluster.Capabilities
   alias Malachi.Cluster.ClusterFlags
@@ -69,6 +70,7 @@ defmodule Malachi.Application do
   alias Malachi.Retention.Orphans
   alias Malachi.Retention.OrphanSweeper
   alias Malachi.Retention.SkipReporter
+  alias Malachi.StartupRefusal
   alias Malachi.Storage.DataDirGuard
   alias Malachi.Storage.FormatMarker
   alias Malachi.TLSValidator
@@ -98,6 +100,10 @@ defmodule Malachi.Application do
     # binary cannot read is refused here rather than recovered as damage and overwritten.
     :ok = ensure_data_format(log_data_dir())
 
+    # Before membership gossips it: a node with peers that would advertise an address no client can
+    # reach is refused here rather than routing every client to itself.
+    :ok = ensure_advertised_address()
+
     port = Application.get_env(:malachi, :tcp_port, 4040)
     dashboard_port = Application.get_env(:malachi, :dashboard_port, 4041)
 
@@ -118,6 +124,9 @@ defmodule Malachi.Application do
         [
           # Increase max_children for Task.Supervisor to allow large parallel broadcasts
           {Task.Supervisor, name: Malachi.TaskSupervisor, max_children: 200_000},
+          # which connections hold producer streams, for the operator interfaces: before Metrics, whose
+          # snapshot reads its open count, and so stopped after it
+          Malachi.ProducerDirectory,
           Malachi.Metrics,
           # Audit logging (must start early for security event tracking)
           Malachi.AuditLog,
@@ -881,14 +890,44 @@ defmodule Malachi.Application do
   end
 
   # The node-wide consumer-group coordinator (non-sharded control plane): assigns a topic's ranges across
-  # group members for parallel, server-scoped consumption (the client never sees ranges). `owns_fun` is a
-  # no-op guard here (single-node always owns); the sharded case runs one coordinator per led vnode instead.
-  defp group_coordinator_child do
-    {GroupCoordinator,
-     name: Malachi.LogGroupCoordinator,
-     ranges_fun: fn topic -> BrokerServer.active_range_ids(Malachi.LogBroker, topic) end,
-     owns_fun: fn topic -> CoordinatorRouter.owns?(topic) end}
+  # group members for parallel, server-scoped consumption (the client never sees ranges). On a single node
+  # it always owns; in a cluster whose metadata is one Raft group, the coordinator on that group's leader
+  # owns (`CoordinatorRouter.put_leader/1`) and the others refuse with `not_owner`, while the leader is
+  # known (an unresolved leader falls back to local, see `CoordinatorRouter`). The sharded case runs one
+  # coordinator per led vnode instead.
+  defp group_coordinator_child, do: {GroupCoordinator, group_coordinator_opts(Malachi.LogGroupCoordinator)}
+
+  @doc false
+  # What every group coordinator is started with, the node-wide one and each vnode's: the topic's ranges,
+  # the ownership guard, the group epochs the control plane opens (on the broker that owns the topic, as a
+  # commit goes) and the session (`MALACHI_GROUP_SESSION_MS`, a positive count of milliseconds that fits
+  # the wire's 32 bits, or the 30_000 default).
+  @spec group_coordinator_opts(atom()) :: keyword()
+  def group_coordinator_opts(name) do
+    [
+      name: name,
+      ranges_fun: fn topic -> BrokerServer.active_range_ids(Malachi.LogBroker, topic) end,
+      owns_fun: fn topic -> CoordinatorRouter.owns?(topic) end,
+      open_fun: fn group, topic ->
+        group_command_reply(BrokerServer.open_group(DataPlaneRouter.shard_for(topic), group, topic))
+      end,
+      session_ms:
+        Malachi.Config.checked(
+          Application.get_env(:malachi, :group_session_ms, 30_000),
+          :group_session_ms,
+          30_000,
+          &(is_integer(&1) and &1 > 0 and &1 <= 0xFFFFFFFF)
+        )
+    ]
   end
+
+  @doc false
+  # The group fence's commands (`{:open_group, ...}`, the fenced `commit_offset`) are introduced at machine
+  # version 8: a control plane still below it (an upgrade not finalized yet) refuses them, which the group
+  # keys answer as `unsupported`.
+  @spec group_command_reply(term()) :: term()
+  def group_command_reply({:error, {:unsupported_command, _key, _introduced, _effective}}), do: {:error, :unsupported}
+  def group_command_reply(reply), do: reply
 
   # Started whatever the environment says. Retention used to be gated on the two global limits being set,
   # which is not where a policy can be: with both unset, the default, no coordinator existed at all and a
@@ -1087,7 +1126,50 @@ defmodule Malachi.Application do
   """
   @spec membership_attributes() :: map()
   def membership_attributes do
-    Capabilities.attributes(parse_attributes(Application.get_env(:malachi, :log_attributes)))
+    attributes = Capabilities.attributes(parse_attributes(Application.get_env(:malachi, :log_attributes)))
+
+    case advertised_address() do
+      {:ok, address} -> Advertised.put(attributes, address)
+      {:error, _refusal} -> attributes
+    end
+  end
+
+  @doc """
+  The address this node advertises to clients (`Malachi.Cluster.Advertised.resolve/5`), from
+  `MALACHI_ADVERTISED_HOST`, `MALACHI_ADVERTISED_PORT`, the listener's port and whether the node has peers
+  in a control plane. A node measured in memory (no control plane) gossips no membership, so its
+  `MALACHI_LOG_NODES` makes no peers here.
+  """
+  @spec advertised_address() :: {:ok, Advertised.t()} | {:error, Advertised.refusal()}
+  def advertised_address do
+    Advertised.resolve(
+      Application.get_env(:malachi, :advertised_host),
+      Application.get_env(:malachi, :advertised_port),
+      Application.get_env(:malachi, :tcp_port, 4040),
+      node(),
+      Application.get_env(:malachi, :log_cluster) != nil and length(configured_nodes()) > 1
+    )
+  end
+
+  @doc """
+  The startup gate over the advertised address (`advertised_address/0` unless given): refuses the start,
+  through `Malachi.StartupRefusal`, when a node with peers has no host to advertise or a loopback one.
+  """
+  @spec ensure_advertised_address(
+          {:ok, Advertised.t()} | {:error, Advertised.refusal()},
+          (non_neg_integer() -> any())
+        ) :: :ok | any()
+  def ensure_advertised_address(resolved \\ advertised_address(), halt_fun \\ &System.halt/1) do
+    case resolved do
+      {:ok, _address} ->
+        :ok
+
+      {:error, :missing_host} ->
+        StartupRefusal.refuse!(I18n.t(:advertised_host_missing), halt_fun)
+
+      {:error, {:loopback_host, host}} ->
+        StartupRefusal.refuse!(I18n.t(:advertised_host_loopback, host: host), halt_fun)
+    end
   end
 
   @doc ~S"""
@@ -1511,12 +1593,7 @@ defmodule Malachi.Application do
   # under a per-vnode name so `CoordinatorRouter.resolve/2` on any node can forward to it; the manager runs
   # it only while this node leads the vnode, and `owns_fun` rejects work during a brief leadership flap.
   defp group_coordinator_vnode_child(vnode_id) do
-    opts = [
-      name: CoordinatorRouter.coordinator_name(Malachi.LogGroupCoordinator, vnode_id),
-      ranges_fun: fn topic -> BrokerServer.active_range_ids(Malachi.LogBroker, topic) end,
-      owns_fun: fn topic -> CoordinatorRouter.owns?(topic) end
-    ]
-
+    opts = group_coordinator_opts(CoordinatorRouter.coordinator_name(Malachi.LogGroupCoordinator, vnode_id))
     %{id: Malachi.LogGroupCoordinator, start: {GroupCoordinator, :start_link, [opts]}}
   end
 

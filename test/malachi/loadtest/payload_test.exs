@@ -207,4 +207,25 @@ defmodule Malachi.Loadtest.PayloadTest do
       assert Payload.start_batch(9, 1, 4) == 0
     end
   end
+
+  describe "record_batches/7" do
+    test "is the pool's values in order, as whole batches of records" do
+      batches = Payload.record_batches(:json, 7, 300, 4, 50, 3, 2)
+      size = Payload.pool_size(300, 4, 3, 2)
+
+      assert tuple_size(batches) == div(size, 4)
+      assert Enum.all?(Tuple.to_list(batches), &(length(&1) == 4))
+
+      records = batches |> Tuple.to_list() |> List.flatten()
+      assert Enum.map(records, & &1.value) == Payload.values(:json, 7, 300, size)
+      assert Enum.all?(records, &(&1.timestamp == 0 and &1.headers == []))
+    end
+
+    test "keys the pool's value at position pos as k<rem(pos, keys)>" do
+      keys =
+        :random |> Payload.record_batches(1, 64, 5, 3, 1, 1) |> Tuple.to_list() |> List.flatten() |> Enum.map(& &1.key)
+
+      assert Enum.take(keys, 6) == ["k0", "k1", "k2", "k0", "k1", "k2"]
+    end
+  end
 end

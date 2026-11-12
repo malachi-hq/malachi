@@ -1,7 +1,7 @@
 # The log model
 
 Malachi is a log, not a queue. This guide explains the four concepts a client touches, **topic**, **key**,
-**cursor**, **consumer group**, and the three the server manages underneath - **range**, **segment**,
+**position**, **consumer group**, and the three the server manages underneath - **range**, **segment**,
 **replica set**.
 
 > **Analogy.** A log is an append-only ledger: you only ever write at the end, and you never edit or delete
@@ -15,10 +15,11 @@ A client deals in three things and nothing else:
 - **topic**: a named, ordered, replicated log.
 - **key**: on produce, routes each record to a range of the topic's keyspace. Ordering is guaranteed
   **per key**, not globally.
-- **opaque cursor**: on consume, a position token you echo back to continue.
+- **position**: on consume, each record comes with its position in its range's history, and a reader
+  continues from the position it reached (or a consumer group's checkpoint of it).
 
-That is the entire client-facing model. There is no partition count to choose, no offset arithmetic, no
-rebalance protocol to implement.
+That is the entire client-facing model. There is no partition count to choose, no offset arithmetic, and
+the group coordinator, not the client, decides which member reads which range.
 
 ```mermaid
 flowchart LR
@@ -30,27 +31,36 @@ flowchart LR
 > **Analogy.** The key is like a name you file under: the same name always lands on the same shelf, so
 > everything for one key stays in order. You never choose the shelf; the hash does.
 
-## Why the cursor is opaque
+## Why a position survives a split
 
-Internally a cursor encodes per-range positions. It is deliberately opaque so the broker can **split, merge
-and restripe ranges while the cluster is running** without breaking clients.
+A client holds a position as an **opaque token**: it compares two and hands one back to resume, and
+never computes one. Inside, a token names `{source_index, offset}`: an offset in one source of the
+range's **history**, which lists the range's ancestors oldest first and then the range itself. A split
+only adds to the end of that list, so a child's history starts with its parent's, and the broker can
+**split, merge and restripe ranges while the cluster is running** without a position changing meaning.
 
-This is the core departure from Kafka, which exposes partitions and offsets to clients. Once a client knows
-"partition 7, offset 12345", the partition count is frozen into your clients' assumptions, resharding
-becomes a migration event. Here the equivalent change is a server-side operation the client never notices.
+A consumer of the new ranges starts from the start of their history: it reads its share of the parent's
+records again before the children's own, so each record arrives **at least once and is never lost**. A
+merge lists both buddies, so a token read in one of them is refused on the merged range,
+which is read from the start of its own history the same way.
+
+This is the core departure from Kafka, which exposes a fixed set of partitions to clients. Once a client
+knows "partition 7, offset 12345", the partition count is frozen into its assumptions, and resharding
+becomes a migration event. Here it is a server-side operation the client sees at most as records read
+again.
 
 ```mermaid
 flowchart TD
   subgraph offset["Exposed offset (brittle)"]
     O1["client remembers 'partition 7, offset 12345'"] --> O2["a reshard changes the partition count"] --> O3["the client's assumption breaks"]
   end
-  subgraph cursor["Opaque cursor (durable)"]
-    C1["client holds a token (a coat-check ticket)"] --> C2["the broker rearranges ranges underneath"] --> C3["the same token still resolves"]
+  subgraph position["Position in a range's history (durable)"]
+    C1["client holds a place in the history (a coat-check ticket)"] --> C2["the broker splits a range underneath"] --> C3["the same place names the same record in the child"]
   end
 ```
 
-> **Analogy.** An opaque cursor is a coat-check ticket. You hold the ticket, not the coat's rack position,
-> so the cloakroom can rearrange the racks and your ticket still finds your coat. An exposed offset is like
+> **Analogy.** A position in a range's history is a coat-check ticket. You hold the ticket, not the coat's
+> rack position, so the cloakroom can rearrange the racks and your ticket still finds your coat. An exposed offset is like
 > memorizing "row 3, hook 5": the moment they rearrange, your note is wrong.
 
 ## What the server manages
@@ -60,16 +70,17 @@ flowchart TD
   T["Topic (the whole library)"] --> R["Range (one shelf: a band of keys)"]
   R --> S["Segment (a book, sealed when full)"]
   S --> Rec["Record (a page: key, value, headers)"]
-  R -. "splits as it grows" .-> R2["Range (a second shelf)"]
+  R -. "split by an operator" .-> R2["Range (a second shelf)"]
 ```
 
 > **Analogy.** A topic is a library, a range is one shelf holding a band of keys, a segment is a book on
-> that shelf (sealed once full, never rewritten), and a record is a page. When a shelf fills up, the library
-> adds a second shelf and moves half the books' labels over: no book is recopied, only the catalog changes.
+> that shelf (sealed once full, never rewritten), and a record is a page. When the librarian splits a shelf,
+> the library adds a second shelf and moves half the books' labels over: no book is recopied, only the
+> catalog changes.
 
 - **Range.** A topic's keyspace is divided into ranges. A record's key hashes to a position, and that
-  position lands in exactly one range. Ranges **split** as they grow, which is how a topic scales without
-  the client choosing a partition count up front.
+  position lands in exactly one range. An operator **splits** a range in two, or merges two buddies back
+  into one, which is how a topic scales without the client choosing a partition count up front.
 - **Segment.** Each range is a series of segments. The active segment takes appends until it crosses its
   size threshold, then it is **sealed** and a new one rolls. Sealing is a fence, not a label: the store is
   closed first and reports where it ended, and that answer becomes the segment's recorded length, so a
@@ -79,20 +90,20 @@ flowchart TD
   acknowledged when a **quorum** has it durably (fsync before counting), so the system tolerates
   ⌊(N-1)/2⌋ slow or failed replicas.
 
-Reads never expose any of this. `Malachi.LogApi.fetch/5` returns records plus the next cursor.
+Reads never expose segments or replicas: a reader names a range and a position in its history, and gets
+back records with the position of each (`fetch_range` and consume streams, see `Malachi.Wire`).
 
 ## Consumer groups
 
-A cursor you carry yourself is fine for a single reader. For a shared, resumable position, use a **consumer
-group**: the server commits the group's position, so a restart resumes where the group left off.
+A position you carry yourself is fine for a single reader. For a shared, resumable position, use a
+**consumer group**: the server keeps the group's checkpoint of each range, so a restart resumes where the group left off.
 
 ```bash
 node consumer.js orders --group workers    # position committed server-side
 ```
 
-For parallel consumption, run several members of the same group with distinct member ids, the server
-assigns each member a share of the topic's ranges and scopes its reads to them. The client still never sees
-a range id.
+For parallel consumption, run several members of the same group with distinct member ids: the group
+assigns each member a share of the topic's ranges, and each reads only those, from the group's checkpoint.
 
 > **Analogy.** A consumer group is a team sharing one bookmark that the server holds. Add members and the
 > team also splits the reading, each taking a section, like several people working through one filing
@@ -124,7 +135,8 @@ client-visible partition is `hash(key) mod partitions`, so raising the partition
 different partition. Its new records go there while its old records stay behind, and the per-key order
 breaks.
 
-Malachi never exposes a partition or an offset, only the opaque cursor, so it has no such caveat. A range
+Malachi never exposes a partition count, and a position names an offset in a range's history rather than
+in a fixed partition, so it has no such caveat. A range
 split is a metadata operation with a **seal-first fence**: the parent range is sealed before either child
 takes a write. A reader of that key then drains the parent's sealed records for its slice of the keyspace
 first (oldest first), then the child's new records. The key stays in exactly one child, and its history
@@ -155,9 +167,10 @@ them are covered by the guarantee:
 - **It is order, not adjacency.** A range holds many keys, so between two records of the same key there
   are records of other keys. "The next record for this key is written after the previous one" is
   guaranteed; "at the next offset" is not.
-- **Concurrent writers are not ordered relative to each other.** Two produces in flight at the same
-  time, on different connections or different nodes, land in whatever order they reach the primary's
-  mailbox. There are no producer sequence numbers and no idempotence. Ordering is guaranteed for writes
+- **Concurrent writers are not ordered relative to each other.** Two appends in flight at the same
+  time, on different streams or connections, land in whatever order they reach the primary's mailbox. The
+  sequence numbers on a producer stream only detect a gap or a repeat in what that stream sends; there
+  is no idempotence, so a record sent again is stored again. Ordering is guaranteed for writes
   a client has ordered itself, that is, waiting for the acknowledgment before sending the next one.
   Kafka's guarantee has the same shape: it is per producer, per partition.
 - **A retried produce lands at its retry position.** The primary appends a batch to its local log before
@@ -196,8 +209,9 @@ them are covered by the guarantee:
 - **The write half of the split gap is closed; the read half needs no closing.** Before a split (or a
   merge) the parent's write head is **fenced in the data plane**: its primary seals the segment's log
   and refuses every later append with `{:error, {:sealed, end_offset}}`, durably, so it refuses again
-  after a restart. A frontend that has not yet seen the split is refused, seats itself at the fenced
-  edge, and retries against the successor. The head is found in the **control plane**, not in the
+  after a restart. A producer stream on the parent is answered `moved`, and an append the fence
+  refused after it was sent is answered `sealed` with nothing of it stored, so the client reads the
+  routes again and sends it to the child that holds its key. The head is found in the **control plane**, not in the
   splitting node's own cache, so the fence does not depend on that node having produced to the range and
   an operator can split from any node ([#41](https://github.com/malachi-hq/malachi/issues/41)).
 

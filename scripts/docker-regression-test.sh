@@ -29,6 +29,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Runs an Elixir snippet in the node (`bin/malachi rpc`) with `client` bound to a `Malachi.Loadtest.Client`
+# connected to the node's own listener as admin, so the log checks below go over the wire, on the stream
+# and group keys, as any client does. The container below serves plain TCP (MALACHI_REQUIRE_TLS=false),
+# which is what the client speaks. The snippet ($2) gets $1 seconds, the time a check may take.
+client_rpc() {
+    timeout "$1" docker exec "$CONTAINER_NAME" bin/malachi rpc "
+  alias Malachi.Loadtest.Client
+  alias Malachi.Log.Record
+  {:ok, client} = Client.connect(host: \"127.0.0.1\", port: Malachi.TCPAcceptorPool.port(), user: \"admin\", pass: System.fetch_env!(\"MALACHI_ADMIN_PASS\"))
+  $2"
+}
+
 # Test helper function
 run_test() {
     local test_name=$1
@@ -52,7 +64,8 @@ PRODUCER_PASS="regression_producer_$(date +%s)"
 CONSUMER_PASS="regression_consumer_$(date +%s)"
 APP_PASS="regression_app_$(date +%s)"
 
-# Start container
+# Start container. Every check below is a client of its own that authenticates over the wire, more than
+# the default auth limit of 10 a minute from one address takes, so the limit is raised for this container.
 echo "Starting container: $IMAGE_NAME"
 docker run -d --name "$CONTAINER_NAME" \
     -p ${TCP_PORT}:4040 \
@@ -61,6 +74,9 @@ docker run -d --name "$CONTAINER_NAME" \
     -e MALACHI_PRODUCER_PASS="$PRODUCER_PASS" \
     -e MALACHI_CONSUMER_PASS="$CONSUMER_PASS" \
     -e MALACHI_APP_PASS="$APP_PASS" \
+    -e MALACHI_REQUIRE_TLS=false \
+    -e MALACHI_ENABLE_TLS=false \
+    -e MALACHI_AUTH_RATE_LIMIT=1000 \
     "$IMAGE_NAME" > /dev/null
 
 # Wait for startup
@@ -113,14 +129,14 @@ run_test "TCP server listening" "nc -zv localhost ${TCP_PORT}"
 # Test 5: Container process running
 run_test "Container process health" "docker exec $CONTAINER_NAME bin/malachi pid"
 
-# Test 6: Basic log produce/fetch workflow (produce by key -> fetch by opaque cursor)
-echo -n "Testing: Log produce/fetch workflow... "
-WORKFLOW_RESULT=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
+# Test 6: Basic log produce/read workflow (append by key on a producer stream -> read the topic back)
+echo -n "Testing: Log produce/read workflow... "
+WORKFLOW_RESULT=$(client_rpc 60 '
   topic = "regression_topic"
-  _ = Malachi.LogApi.create_topic(Malachi.LogBroker, topic)
-  {:ok, 1} = Malachi.LogApi.produce_records(Malachi.LogBroker, topic, [%Malachi.Log.Record{key: "rk", value: "test payload"}])
-  {:ok, records, _cursor} = Malachi.LogApi.fetch(Malachi.LogBroker, topic, :start, 10)
-  if "test payload" in Enum.map(records, & &1.value), do: IO.puts("PASS"), else: IO.puts("FAIL")
+  _ = Client.create_topic(client, topic, 8)
+  {:ok, 1} = Client.produce(client, topic, [Record.new("test payload", key: "rk")], 10_000)
+  {:ok, %{values: values}} = Client.read(client, topic)
+  if "test payload" in values, do: IO.puts("PASS"), else: IO.puts("FAIL")
 ' 2>&1 | grep -E "^PASS$|^FAIL$" | tail -1)
 
 if [ "$WORKFLOW_RESULT" = "PASS" ]; then
@@ -130,15 +146,18 @@ else
     echo -e "${RED}FAIL${NC} (got: $WORKFLOW_RESULT)"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
-# Test 6.5: Consumer group resume workflow (fetch by group -> commit -> resume empty, at-least-once)
+# Test 6.5: Consumer group resume workflow (join -> read from the checkpoint -> commit -> resume empty,
+# at-least-once)
 echo -n "Testing: Consumer group resume workflow... "
-GROUP_RESULT=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
+GROUP_RESULT=$(client_rpc 60 '
   topic = "regression_group_topic"
-  _ = Malachi.LogApi.create_topic(Malachi.LogBroker, topic)
-  {:ok, _} = Malachi.LogApi.produce_records(Malachi.LogBroker, topic, [%Malachi.Log.Record{key: "g", value: "gm"}])
-  {:ok, first, cursor} = Malachi.LogApi.fetch_group(Malachi.LogBroker, topic, "rg", 10)
-  :ok = Malachi.LogApi.commit(Malachi.LogBroker, topic, "rg", cursor)
-  {:ok, second, _cursor} = Malachi.LogApi.fetch_group(Malachi.LogBroker, topic, "rg", 10)
+  _ = Client.create_topic(client, topic, 8)
+  {:ok, _} = Client.produce(client, topic, [Record.new("gm", key: "g")], 10_000)
+  {:ok, %{generation: generation, ranges: ranges}} = Client.join(client, topic, "rg", "m1")
+  {:ok, %{values: first, positions: positions}} = Client.read(client, topic, start_from: {:committed, "rg"}, ranges: ranges)
+  :ok = Client.commit(client, topic, "rg", "m1", generation, positions)
+  {:ok, %{values: second}} = Client.read(client, topic, start_from: {:committed, "rg"}, ranges: ranges)
+  :ok = Client.leave(client, topic, "rg", "m1")
   # after committing the position the group resumes with nothing left to read
   if length(first) >= 1 and second == [], do: IO.puts("PASS"), else: IO.puts("FAIL")
 ' 2>&1 | grep -E "^PASS$|^FAIL$" | tail -1)
@@ -152,11 +171,11 @@ else
 fi
 # Test 7: High-volume throughput
 echo -n "Testing: High-volume message throughput... "
-THROUGHPUT_TEST=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
+THROUGHPUT_TEST=$(client_rpc 60 '
   topic = "throughput_topic"
-  _ = Malachi.LogApi.create_topic(Malachi.LogBroker, topic)
-  records = for i <- 1..1000, do: %Malachi.Log.Record{key: "k#{rem(i, 8)}", value: "msg_#{i}"}
-  {:ok, count} = Malachi.LogApi.produce_records(Malachi.LogBroker, topic, records)
+  _ = Client.create_topic(client, topic, 8)
+  records = for i <- 1..1000, do: Record.new("msg_#{i}", key: "k#{rem(i, 8)}")
+  {:ok, count} = Client.produce(client, topic, records, 30_000)
   if count >= 1000, do: IO.puts("PASS"), else: IO.puts("FAIL:#{count}")
 ' 2>&1 | grep -E "^PASS$|^FAIL:" | tail -1)
 
@@ -170,39 +189,46 @@ fi
 
 # Test 8: Memory stability under load
 echo -n "Testing: Memory stability under load... "
+# The load runs inside the if: under set -e, a failing rpc on its own would end the script with no FAIL and
+# no summary.
 INITIAL_MEM=$(docker stats --no-stream --format "{{.MemUsage}}" "$CONTAINER_NAME" | cut -d'/' -f1)
-docker exec "$CONTAINER_NAME" bin/malachi rpc '
+if MEM_RESULT=$(client_rpc 60 '
   topic = "mem_topic"
-  _ = Malachi.LogApi.create_topic(Malachi.LogBroker, topic)
-  records = for i <- 1..5000, do: %Malachi.Log.Record{key: "k#{rem(i, 8)}", value: "msg_#{i}"}
-  {:ok, _count} = Malachi.LogApi.produce_records(Malachi.LogBroker, topic, records)
+  _ = Client.create_topic(client, topic, 8)
+  records = for i <- 1..5000, do: Record.new("msg_#{i}", key: "k#{rem(i, 8)}")
+  {:ok, _count} = Client.produce(client, topic, records, 30_000)
   :ok
-' > /dev/null 2>&1
-sleep 2
-FINAL_MEM=$(docker stats --no-stream --format "{{.MemUsage}}" "$CONTAINER_NAME" | cut -d'/' -f1)
-echo -e "${GREEN}PASS${NC} (${INITIAL_MEM} → ${FINAL_MEM})"
-TESTS_PASSED=$((TESTS_PASSED + 1))
+' 2>&1); then
+    sleep 2
+    FINAL_MEM=$(docker stats --no-stream --format "{{.MemUsage}}" "$CONTAINER_NAME" | cut -d'/' -f1)
+    echo -e "${GREEN}PASS${NC} (${INITIAL_MEM} → ${FINAL_MEM})"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    echo -e "${RED}FAIL${NC}"
+    echo "$MEM_RESULT"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
 
 # Test 9: Concurrent multi-topic operations
 echo -n "Testing: Concurrent multi-topic operations... "
-CONCURRENT_TEST=$(timeout 30 docker exec "$CONTAINER_NAME" bin/malachi rpc '
+CONCURRENT_TEST=$(client_rpc 30 '
   topics = for i <- 1..10, do: "concurrent_topic_#{i}"
-  Enum.each(topics, fn t -> _ = Malachi.LogApi.create_topic(Malachi.LogBroker, t) end)
+  Enum.each(topics, fn t -> _ = Client.create_topic(client, t, 8) end)
 
-  # Produce concurrently to all topics (100 records each)
+  # Produce concurrently to all topics (100 records each), each on producer streams of its own
   topics
   |> Enum.map(fn t ->
     Task.async(fn ->
-      records = for i <- 1..100, do: %Malachi.Log.Record{key: "k#{rem(i, 8)}", value: "msg_#{i}"}
-      Malachi.LogApi.produce_records(Malachi.LogBroker, t, records)
+      records = for i <- 1..100, do: Record.new("msg_#{i}", key: "k#{rem(i, 8)}")
+      Client.produce(client, t, records, 15_000)
     end)
   end)
   |> Task.await_many(20_000)
 
-  # Verify every topic drained at least its 100 records back
+  # Verify every topic reads at least its 100 records back
   all_ok = Enum.all?(topics, fn t ->
-    {:ok, records, _cursor} = Malachi.LogApi.fetch(Malachi.LogBroker, t, :start, 1000)
-    length(records) >= 100
+    {:ok, %{values: values}} = Client.read(client, t)
+    length(values) >= 100
   end)
 
   if all_ok, do: IO.puts("PASS"), else: IO.puts("FAIL")

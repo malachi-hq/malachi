@@ -26,6 +26,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.MetadataServer
+  alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.RingTopology
   alias Malachi.Metadata
 
@@ -44,7 +45,7 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
 
   @type t :: %__MODULE__{
           ring: HashRing.t(),
-          vnodes: %{vnode_id() => MetadataServer.server_id()}
+          vnodes: %{vnode_id() => RaCluster.location()}
         }
 
   defstruct ring: nil, vnodes: %{}
@@ -75,9 +76,9 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   Places `vnode_id` at `token` on the ring pointing at `server_id`, **without** starting its ra cluster:
   the routing-only counterpart of `add_vnode/4` for a node that is not the bootstrap orchestrator: the
   orchestrator started the cluster (across the placement nodes), and this node only routes to it.
-  `server_id` must address a real member of the vnode's placement. Propagates ring placement errors.
+  `server_id` must address real members of the vnode's placement. Propagates ring placement errors.
   """
-  @spec route_vnode(t(), vnode_id(), HashRing.token(), MetadataServer.server_id()) ::
+  @spec route_vnode(t(), vnode_id(), HashRing.token(), RaCluster.location()) ::
           {:ok, t()} | {:error, term()}
   def route_vnode(%__MODULE__{} = state, vnode_id, token, server_id) do
     with {:ok, ring} <- HashRing.add_vnode(state.ring, vnode_id, token) do
@@ -193,8 +194,8 @@ defmodule Malachi.Cluster.ReplicatedDSRSM do
   @spec vnode_for(t(), Metadata.topic_name()) :: {:ok, vnode_id()} | {:error, :empty}
   def vnode_for(%__MODULE__{} = state, topic_name), do: HashRing.route(state.ring, topic_name)
 
-  @doc "The ra server id of `vnode_id`: for routing a write to that vnode's cluster."
-  @spec server_for(t(), vnode_id()) :: MetadataServer.server_id()
+  @doc "How `vnode_id`'s cluster is reached: for routing a write to it."
+  @spec server_for(t(), vnode_id()) :: RaCluster.location()
   def server_for(%__MODULE__{} = state, vnode_id), do: Map.fetch!(state.vnodes, vnode_id)
 
   @doc """

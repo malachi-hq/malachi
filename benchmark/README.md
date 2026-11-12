@@ -92,7 +92,8 @@ Design-exploration benchmarks that compare mechanisms on the current log model.
 ### `throughput_1m.exs`
 
 1M-message end-to-end throughput and resource baseline on the real log stack (produce ->
-disk via `ReplicationServer` -> consume), measuring throughput, per-batch latency, BEAM
+disk via `ReplicationServer` -> consume, each range read a page at a time as `fetch_range` serves
+it), measuring throughput, per-batch latency, BEAM
 memory, on-disk bytes, and CPU (reductions). This is the system baseline the streaming
 alternatives are judged against.
 

@@ -40,8 +40,10 @@ defmodule Malachi.Cluster.MachineVersion do
   `Malachi.Metadata` introduced `{:bind_topic_policy, topic, name}`, and version 5 is where
   `Malachi.Auth.UserRegistry` introduced the console roles (`{:set_role, username, role}`, a five element
   `put_user` and `{:import_users_with_roles, entries}`), and version 6 is where `Malachi.Cluster.Policy`
-  introduced the `retention.segment_max_age_ms` field (#197), so each time the others moved with nothing
-  but that no-op.
+  introduced the `retention.segment_max_age_ms` field (#197), and version 7 is where `Malachi.Metadata`
+  made `{:set_segment_replicas, id, replica_set, expected}` a compare-and-swap, and version 8 is where
+  `Malachi.Metadata` introduced the group fence (`{:commit_offset, group, topic, offsets, generation}` and
+  `{:open_group, group, topic}`), so each time the others moved with nothing but that no-op.
 
   ## State that a command fills from the log entry
 
@@ -96,7 +98,9 @@ defmodule Malachi.Cluster.MachineVersion do
   # store and 2 the cluster flags; all are released, which is why the field takes the next version. 7
   # introduced the compare-and-swap form `{:set_segment_replicas, id, replica_set, expected}` in
   # `Malachi.Metadata`: a wider tuple is a new command, so it takes the next version.
-  @code_version 7
+  # 8 introduces the group fence in `Malachi.Metadata` (#275): `{:commit_offset, group, topic, offsets,
+  # generation}` and `{:open_group, group, topic}`, at the next version since 7 is released.
+  @code_version 8
 
   @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
   @type command_key :: {atom(), non_neg_integer()}

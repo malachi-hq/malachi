@@ -219,8 +219,124 @@ defmodule Malachi.Loadtest.Conn do
     end
   end
 
+  @doc """
+  `request/4` on a connection that also carries pushes (a producer's or a consumer's, its streams open):
+  the response is the frame under `correlation_id`, and every other frame read while waiting for it (an
+  `append_ack`, a `moved`, a page) stays in the buffer, in the order it came and ahead of anything read
+  after. The socket is passive for the round trip, what an activated one had already delivered to the
+  owner is taken into the buffer first, and its mode is put back after. The owner of an activated one, or
+  of one whose delivered message was taken, is sent `{tag, socket, ""}`, so its next look takes what the
+  buffer holds as it takes any message (`message/2`) and activates it again. A connection that closed while
+  waiting answers `{:error, reason}`, and, active again, reports the close to its owner as it reports any.
+  """
+  @spec request_beside(t(), non_neg_integer(), non_neg_integer(), iodata()) ::
+          {:ok, non_neg_integer(), binary(), t()} | {:error, term()}
+  def request_beside(%__MODULE__{} = conn, api_key, correlation_id, payload) do
+    with {:ok, active} <- active_mode(conn),
+         :ok <- passive(conn),
+         {:ok, conn, took?} <- take_delivered(conn, false) do
+      result =
+        with :ok <- send_frame(conn, api_key, correlation_id, payload),
+             do: await_response(conn, correlation_id, [])
+
+      # A socket that delivered a message reads `active: false` until its owner takes it and activates it
+      # again; one taken here is owed back, or the owner would wait for it with the socket never re-armed.
+      restore(result, conn, if(took?, do: :once, else: active))
+    end
+  end
+
+  defp active_mode(%__MODULE__{transport: :gen_tcp, socket: s}), do: ok_active(:inet.getopts(s, [:active]))
+  defp active_mode(%__MODULE__{transport: :ssl, socket: s}), do: ok_active(:ssl.getopts(s, [:active]))
+
+  defp ok_active({:ok, [active: active]}), do: {:ok, active}
+  defp ok_active({:error, _} = err), do: err
+
+  defp passive(%__MODULE__{transport: :gen_tcp, socket: s}), do: :inet.setopts(s, active: false)
+  defp passive(%__MODULE__{transport: :ssl, socket: s}), do: :ssl.setopts(s, active: false)
+
+  # The bytes an activated socket already sent the owner, before it went passive, are older than any the
+  # round trip reads, so they go into the buffer first. A close it already reported is handed back.
+  defp take_delivered(%__MODULE__{socket: s} = conn, took?) do
+    receive do
+      {tag, ^s, data} when tag in [:tcp, :ssl] -> take_delivered(%{conn | buffer: conn.buffer <> data}, true)
+      {tag, ^s} = closed when tag in [:tcp_closed, :ssl_closed] -> handed_back(closed, :closed)
+      {tag, ^s, reason} = failed when tag in [:tcp_error, :ssl_error] -> handed_back(failed, reason)
+    after
+      0 -> {:ok, conn, took?}
+    end
+  end
+
+  defp handed_back(message, reason) do
+    send(self(), message)
+    {:error, reason}
+  end
+
+  # Reads frames until the response under `correlation_id`; the others are kept, in order.
+  defp await_response(conn, correlation_id, kept) do
+    case recv_frame(conn) do
+      {:ok, <<^correlation_id::32, error_code::16, resp::binary>>, conn} ->
+        {:ok, error_code, resp, %{conn | buffer: IO.iodata_to_binary([Enum.reverse(kept), conn.buffer])}}
+
+      {:ok, other, conn} ->
+        await_response(conn, correlation_id, [Wire.encode_frame(other) | kept])
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp restore({:ok, _code, _resp, conn} = ok, _before, active) do
+    with :ok <- set_active(conn, active) do
+      if active != false, do: send(self(), {data_tag(conn), conn.socket, ""})
+      ok
+    end
+  end
+
+  # Active again, a socket that closed under the round trip reports it to its owner itself, as it reports any
+  # close.
+  defp restore({:error, _reason} = failed, conn, active) do
+    _ = set_active(conn, active)
+    failed
+  end
+
+  defp set_active(_conn, false), do: :ok
+  defp set_active(%__MODULE__{transport: :gen_tcp, socket: s}, active), do: :inet.setopts(s, active: active)
+  defp set_active(%__MODULE__{transport: :ssl, socket: s}, active), do: :ssl.setopts(s, active: active)
+
+  defp data_tag(%__MODULE__{transport: :gen_tcp}), do: :tcp
+  defp data_tag(%__MODULE__{transport: :ssl}), do: :ssl
+
   @spec close(t()) :: :ok
   def close(%__MODULE__{transport: t, socket: s}), do: tclose(t, s)
+
+  @doc """
+  Has the socket deliver its next bytes as a message to the owner (`active: :once`), for a client that
+  reads several connections at once (`Malachi.Loadtest.Producer`): a blocking `recv_frame/2` on one would
+  leave the others unread. Call it again after each message `message/2` takes.
+  """
+  @spec activate(t()) :: :ok | {:error, term()}
+  def activate(%__MODULE__{transport: :gen_tcp, socket: s}), do: :inet.setopts(s, active: :once)
+  def activate(%__MODULE__{transport: :ssl, socket: s}), do: :ssl.setopts(s, active: :once)
+
+  @doc """
+  Takes a socket message an activated connection sent its owner: `{:frames, bodies, conn}` with every
+  whole frame body its bytes completed (in order, the rest kept in the buffer), `{:closed, reason}` when
+  the connection is gone, or `:no` for a message about another socket.
+  """
+  @spec message(t(), term()) :: {:frames, [binary()], t()} | {:closed, term()} | :no
+  def message(%__MODULE__{socket: s} = conn, {tag, s, data}) when tag in [:tcp, :ssl],
+    do: frames(%{conn | buffer: conn.buffer <> data}, [])
+
+  def message(%__MODULE__{socket: s}, {tag, s}) when tag in [:tcp_closed, :ssl_closed], do: {:closed, :closed}
+  def message(%__MODULE__{socket: s}, {tag, s, reason}) when tag in [:tcp_error, :ssl_error], do: {:closed, reason}
+  def message(%__MODULE__{}, _other), do: :no
+
+  defp frames(conn, bodies) do
+    case Wire.decode_frame(conn.buffer) do
+      {:ok, body, rest} -> frames(%{conn | buffer: rest}, [body | bodies])
+      :incomplete -> {:frames, Enum.reverse(bodies), conn}
+    end
+  end
 
   # Transport dispatch (explicit, so the two socket backends are obvious and no `apply/3` is needed).
   defp tsend(:gen_tcp, socket, data), do: :gen_tcp.send(socket, data)
