@@ -29,9 +29,14 @@ APP_PASS="validation_app_pass_$(date +%s)"
 echo "Step 1: Validating runtime dependencies..."
 docker run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c "
     echo 'Checking argon2 NIF...'
-    find /app/lib -name 'argon2_nif.so' | grep -q argon2 || (echo 'ERROR: argon2 NIF not found' && exit 1)
-    echo 'Checking openssl...'
-    which openssl || (echo 'ERROR: openssl not found' && exit 1)
+    find /app/lib -name 'argon2_nif.so' | grep -q argon2 || { echo 'ERROR: argon2 NIF not found'; exit 1; }
+    # The image ships libssl/libcrypto, not the openssl CLI (no Alpine base has it), so what is checked is
+    # that OTP's crypto NIF loads them, which is what the Dockerfile copies them from the builder for.
+    # The exit status decides, not the output: when the NIF fails to load, OTP logs a line that also
+    # names OpenSSL, and :crypto.info_lib() raises, so the eval exits non-zero.
+    echo 'Checking the crypto NIF loads libcrypto...'
+    bin/malachi eval 'match?([{\"OpenSSL\", _, _}], :crypto.info_lib()) or System.halt(1)' > /dev/null 2>&1 \
+        || { echo 'ERROR: crypto NIF could not load libcrypto'; exit 1; }
     echo 'All runtime dependencies present'
 " || { echo -e "${RED}✗ Runtime dependency check failed${NC}"; exit 1; }
 echo -e "${GREEN}✓ Runtime dependencies validated${NC}"
