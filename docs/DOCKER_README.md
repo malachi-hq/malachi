@@ -364,7 +364,7 @@ make docker-validate
 ```
 
 Checks:
-- ✅ Runtime dependencies (argon2 NIF, openssl)
+- ✅ Runtime dependencies (argon2 NIF, crypto NIF loading libcrypto)
 - ✅ ERL_FLAGS configuration with JIT
 - ✅ Service availability (TCP + Dashboard)
 - ✅ Performance benchmarks with throughput metrics

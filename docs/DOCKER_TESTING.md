@@ -33,7 +33,7 @@ make docker-validate
 
 `validate-docker-build.sh` checks:
 
-- **Runtime dependencies** present: the `argon2_nif.so` NIF and `openssl`.
+- **Runtime dependencies** present: the `argon2_nif.so` NIF, and the crypto NIF loading `libcrypto` (the image ships no `openssl` CLI).
 - **JIT**: `:erlang.system_info(:emu_flavor)` reports `jit`.
 - **Service comes up**: the container starts with seeded users (`MALACHI_DEFAULT_USERS`) and the dashboard
   authenticates and answers.
