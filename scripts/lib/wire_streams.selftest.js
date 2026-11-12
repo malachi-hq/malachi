@@ -151,6 +151,11 @@ function main(args) {
   const reserved = Buffer.from(wire.encodeBatch([RECORDS[0]], 'none'));
   reserved[13] = 2;
   assert.throws(() => wire.decodeBatch(reserved, { maxInflatedBytes: 1000 }), /reserved flags 2/);
+  // A request frame: its length, api key and correlation id, then the payload byte for byte.
+  const append = wire.encodeAppendReq(7, 3, wire.encodeBatch(RECORDS, 'none'));
+  const frame = wire.encodeRequest(wire.API.append, 0x01020304, append);
+  const header = Buffer.concat([u32(6 + append.length), Buffer.from([0, wire.API.append, 1, 2, 3, 4])]);
+  assert.strictEqual(frame.toString('hex'), Buffer.concat([header, append]).toString('hex'));
   const consume = { topic: 't', range: 0, routes_version: 0, window: 1, max: 1, max_bytes: 1, accept: ['none'] };
   assert.throws(() => wire.encodeOpenConsumeReq({ ...consume, start: 'newest' }), /unknown start/);
   // A window is an integer from 1 to 2^32 - 1, checked before encoding: writeUInt32BE turns its argument

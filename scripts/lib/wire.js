@@ -161,8 +161,14 @@ function decodeFrame(buffer) {
   return { body: buffer.subarray(4, 4 + len), rest: buffer.subarray(4 + len) };
 }
 
+// One buffer for the whole frame, so the payload is copied once: an append's payload is its batch.
 function encodeRequest(apiKey, correlationId, payload) {
-  return encodeFrame(Buffer.concat([u16(apiKey), u32(correlationId), payload]));
+  const buf = Buffer.allocUnsafe(10 + payload.length);
+  buf.writeUInt32BE(6 + payload.length, 0);
+  buf.writeUInt16BE(apiKey, 4);
+  buf.writeUInt32BE(correlationId, 6);
+  payload.copy(buf, 10);
+  return buf;
 }
 
 function decodeResponse(body) {
@@ -189,19 +195,46 @@ function encodeCreateTopicReq(topic, keyspaceBits) {
 
 // records: [{ key?, value, headers?: {k:v}, timestamp? }]
 function encodeRecord(record) {
+  const part = recordPart(record);
+  const buf = Buffer.allocUnsafe(part.size);
+  writeRecordPart(buf, 0, part);
+  return buf;
+}
+
+// A record's fields as encodeRecord lays them out, with the bytes it takes: what a batch writes, record by
+// record, into one buffer rather than into a buffer per field and per record.
+function recordPart(record) {
+  const key = record.key ?? null;
+  const keyBytes = key === null ? null : Buffer.isBuffer(key) ? key : Buffer.from(key, 'utf8');
   const value = Buffer.isBuffer(record.value) ? record.value : Buffer.from(String(record.value), 'utf8');
-  const ts = record.timestamp !== undefined ? record.timestamp : Date.now();
-  const headers = record.headers || {};
-  const entries = Object.entries(headers);
-  const headerBody = Buffer.concat(entries.map(([k, v]) => Buffer.concat([putStr(k), putStr(String(v))])));
-  return Buffer.concat([
-    putStr(record.key ?? null),
-    u32(value.length),
-    value,
-    u64(ts),
-    u32(entries.length),
-    headerBody,
-  ]);
+  const headers = Object.entries(record.headers || {});
+  const headerBody = Buffer.concat(headers.map(([k, v]) => Buffer.concat([putStr(k), putStr(String(v))])));
+  const timestamp = record.timestamp !== undefined ? record.timestamp : Date.now();
+  const size = (keyBytes === null ? 1 : 5 + keyBytes.length) + 4 + value.length + 8 + 4 + headerBody.length;
+  return { keyBytes, value, timestamp, headerCount: headers.length, headerBody, size };
+}
+
+// Writes `part` (recordPart/1) into `buf` at `off`; returns the offset past it.
+function writeRecordPart(buf, off, { keyBytes, value, timestamp, headerCount, headerBody }) {
+  if (keyBytes === null) {
+    buf[off] = 0;
+    off += 1;
+  } else {
+    buf[off] = 1;
+    buf.writeUInt32BE(keyBytes.length, off + 1);
+    off += 5 + keyBytes.copy(buf, off + 5);
+  }
+  buf.writeUInt32BE(value.length, off);
+  off += 4 + value.copy(buf, off + 4);
+  // a millisecond count is a safe integer, written as two halves rather than through a BigInt per record
+  if (Number.isSafeInteger(timestamp) && timestamp >= 0) {
+    buf.writeUInt32BE(Math.floor(timestamp / 0x100000000), off);
+    buf.writeUInt32BE(timestamp % 0x100000000, off + 4);
+  } else {
+    buf.writeBigUInt64BE(BigInt(timestamp), off);
+  }
+  buf.writeUInt32BE(headerCount, off + 8);
+  return off + 12 + headerBody.copy(buf, off + 12);
 }
 
 function decodeRecord(r) {
@@ -719,12 +752,37 @@ function flagged(entry) {
 // A batch of { record, tombstone } entries for an append, or of { position, record, tombstone } ones as a
 // consume carries them (layout 'positioned').
 function encodeBatch(entries, codec, layout = 'plain') {
+  if (layout === 'plain') return encodePlainBatch(entries, codec);
   const encoded = entries.map((entry) =>
     layout === 'plain' ? flagged(entry) : Buffer.concat([putPosition(entry.position), flagged(entry)]),
   );
   const inflated = Buffer.concat(encoded);
   const payload = codec === 'zstd' ? zlib.zstdCompressSync(inflated) : inflated;
   return Buffer.concat([u8(codeIn(CODECS, codec)), u32(entries.length), u32(inflated.length), u32(payload.length), payload]);
+}
+
+// A batch's header: codec (1), record count (4), inflated size (4), payload size (4).
+const BATCH_HEADER_BYTES = 13;
+
+// The plain layout, an append's, written once into one buffer behind room for its header: every record
+// sent pays for this, so it copies each record once instead of once per field, per record and per batch.
+function encodePlainBatch(entries, codec) {
+  const code = codeIn(CODECS, codec);
+  const parts = entries.map(({ record }) => recordPart(record));
+  const inflatedSize = parts.reduce((acc, part) => acc + 1 + part.size, 0);
+  const buf = Buffer.allocUnsafe(BATCH_HEADER_BYTES + inflatedSize);
+  let off = BATCH_HEADER_BYTES;
+  entries.forEach((entry, i) => {
+    buf[off] = entry.tombstone ? 1 : 0;
+    off = writeRecordPart(buf, off + 1, parts[i]);
+  });
+  const payload = codec === 'zstd' ? zlib.zstdCompressSync(buf.subarray(BATCH_HEADER_BYTES)) : null;
+  const header = payload === null ? buf : Buffer.allocUnsafe(BATCH_HEADER_BYTES);
+  header[0] = code;
+  header.writeUInt32BE(entries.length, 1);
+  header.writeUInt32BE(inflatedSize, 5);
+  header.writeUInt32BE(payload === null ? inflatedSize : payload.length, 9);
+  return payload === null ? buf : Buffer.concat([header, payload]);
 }
 
 // A batch's header, read without inflating it: its codec, record count, inflated size and payload size, as

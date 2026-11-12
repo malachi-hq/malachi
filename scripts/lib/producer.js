@@ -330,7 +330,8 @@ class Producer {
     for (const entry of entries) {
       const { range, error } = this.router.rangeOf(topic, entry.record.key ?? null);
       if (error) unrouted.push(entry);
-      else routed.set(range, [...(routed.get(range) || []), entry]);
+      else if (routed.has(range)) routed.get(range).push(entry);
+      else routed.set(range, [entry]);
     }
     for (const [range, ranged] of routed) this._buffer(topic, range, ranged, now, where);
     if (unrouted.length === 0) return;
