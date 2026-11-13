@@ -175,18 +175,26 @@ jobs:
           }
           trap cleanup_container EXIT
 
-          # Generate passwords using openssl for better entropy
+          # Generate passwords using openssl for better entropy. No password and no session token is ever a
+          # process argument (#180), where any process on the runner reads it from /proc/<pid>/cmdline: the
+          # users reach the container by name (`-e NAME`), and the dashboard login and the bearer reach curl
+          # on stdin through the harnesses' shared transport.
           ADMIN_PASS="ci_admin_$(openssl rand -hex 8)"
           PRODUCER_PASS="ci_producer_$(openssl rand -hex 8)"
           CONSUMER_PASS="ci_consumer_$(openssl rand -hex 8)"
           APP_PASS="ci_app_$(openssl rand -hex 8)"
+          MALACHI_DEFAULT_USERS="admin:${ADMIN_PASS}:admin;producer:${PRODUCER_PASS}:produce;consumer:${CONSUMER_PASS}:consume;app:${APP_PASS}:produce,consume"
+          export MALACHI_DEFAULT_USERS
+          DASHBOARD_URL=http://localhost:4041
+          source scripts/metrics_scrape_lib.sh
+          source scripts/lib/dashboard_curl.sh
 
           echo "🚀 Starting container..."
           docker run -d --name malachi-test \
             -e MALACHI_CONFIG_ENV=test \
             -e MALACHI_TCP_PORT=4040 \
             -e MALACHI_DASHBOARD_PORT=4041 \
-            -e MALACHI_DEFAULT_USERS="admin:${ADMIN_PASS}:admin;producer:${PRODUCER_PASS}:produce;consumer:${CONSUMER_PASS}:consume;app:${APP_PASS}:produce,consume" \
+            -e MALACHI_DEFAULT_USERS \
             -e MALACHI_REQUIRE_TLS=false \
             -p 4040:4040 \
             -p 4041:4041 \
@@ -245,20 +253,8 @@ jobs:
 
           # Authenticate and get token
           echo "🔐 Authenticating with dashboard..."
-          if ! LOGIN_RESPONSE=$(curl -sf -X POST http://localhost:4041/login \
-            -H "Content-Type: application/json" \
-            -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PASS\"}" 2>&1); then
-            echo "❌ Authentication request failed!"
-            echo "Response: $LOGIN_RESPONSE"
-            docker logs malachi-test
-            docker stop malachi-test
-            exit 1
-          fi
-
-          # Extract token
-          if ! TOKEN=$(echo "$LOGIN_RESPONSE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['token'])" 2>&1); then
-            echo "❌ Failed to extract token!"
-            echo "Login response: $LOGIN_RESPONSE"
+          if ! TOKEN="$(ms_login admin "$ADMIN_PASS")"; then
+            echo "❌ Authentication failed: $TOKEN"
             docker logs malachi-test
             docker stop malachi-test
             exit 1
@@ -268,8 +264,7 @@ jobs:
 
           # Check metrics endpoint
           echo "📊 Fetching metrics..."
-          if ! METRICS_RESPONSE=$(curl -sf http://localhost:4041/metrics \
-            -H "Authorization: Bearer $TOKEN" 2>&1); then
+          if ! METRICS_RESPONSE="$(ms_http_get /metrics "$TOKEN" '*/*')"; then
             echo "❌ Failed to fetch metrics!"
             echo "Response: $METRICS_RESPONSE"
             docker logs malachi-test
