@@ -18,16 +18,14 @@ env:
 
 jobs:
   test:
-    name: Test (Elixir ${{matrix.elixir}} / OTP ${{matrix.otp}})
+    name: Test
     runs-on: ubuntu-latest
     
     strategy:
       fail-fast: false
       matrix:
         include:
-          - elixir: '1.19.4'
-            otp: '28.1'
-            lint: true
+          - lint: true
             coverage: true
     
     steps:
@@ -41,10 +39,11 @@ jobs:
           persist-credentials: false
       
       - name: 🔧 Setup Elixir
+        id: beam
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
-          elixir-version: ${{ matrix.elixir }}
-          otp-version: ${{ matrix.otp }}
+          version-file: .github/beam-versions
+          version-type: strict
 
       # The load generator tests drive scripts/loadtest.js against the test server, so the suite needs
       # Node. Set up explicitly rather than trusting whatever the runner image happens to ship: those
@@ -61,9 +60,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-mix-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-
+            ${{ runner.os }}-mix-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
       
       - name: 🔨 Install dependencies
         run: |
@@ -324,10 +323,11 @@ jobs:
           persist-credentials: false
       
       - name: 🔧 Setup Elixir
+        id: beam
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
-          elixir-version: '1.19.4'
-          otp-version: '28.1'
+          version-file: .github/beam-versions
+          version-type: strict
       
       - name: 📦 Cache dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -335,9 +335,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-quality-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-mix-quality-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-quality-
+            ${{ runner.os }}-mix-quality-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
       
       - name: 🔨 Install dependencies
         run: |
@@ -400,10 +400,11 @@ jobs:
           persist-credentials: false
 
       - name: 🔧 Setup Elixir
+        id: beam
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
-          elixir-version: '1.19.4'
-          otp-version: '28.1'
+          version-file: .github/beam-versions
+          version-type: strict
 
       - name: 📦 Cache dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -411,9 +412,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-multinode-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-mix-multinode-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-multinode-
+            ${{ runner.os }}-mix-multinode-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
       - name: 🔨 Install dependencies
         run: |
@@ -455,8 +456,8 @@ jobs:
         id: beam
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
-          elixir-version: '1.19.4'
-          otp-version: '28.1'
+          version-file: .github/beam-versions
+          version-type: strict
 
       # The PLTs take minutes to build and change only with the toolchain and the dependencies, so they are
       # cached on exactly those. dialyxir keeps the core PLTs under the mix home and the project PLT in _build.

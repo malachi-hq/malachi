@@ -72,10 +72,11 @@ jobs:
           persist-credentials: false
 
       - name: 🔧 Set up Elixir
+        id: beam
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
-          elixir-version: '1.19.4'
-          otp-version: '28.1'
+          version-file: .github/beam-versions
+          version-type: strict
 
       # Only the node leg needs a Node runtime: it is the generator there. The elixir leg's harness uses
       # bash and jq alone, and Elixir is set up in both legs because the SERVER under test is an Elixir
@@ -93,9 +94,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-results-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-mix-results-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-results-
+            ${{ runner.os }}-mix-results-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
       - name: 🔨 Install dependencies
         run: |
