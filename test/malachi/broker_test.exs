@@ -22,7 +22,7 @@ defmodule Malachi.BrokerTest do
   defp record(value, key), do: Record.new(value, key: key)
 
   defp replicate_fun(store),
-    do: fn ref, seg, rs, base, recs -> FakeSegmentStore.replicate(store, ref, seg, rs, base, recs) end
+    do: fn ref, seg, rs, base, recs, _format -> FakeSegmentStore.replicate(store, ref, seg, rs, base, recs) end
 
   defp read_fun(store), do: fn ref, seg, offset, max -> FakeSegmentStore.read(store, ref, seg, offset, max) end
 
@@ -2769,6 +2769,57 @@ defmodule Malachi.BrokerTest do
                broker |> segments(root_id) |> Enum.sort_by(&elem(&1.id, 1))
 
       assert {[%{value: "v0"}], _cursor} = consume(broker, store, root_id, :start)
+    end
+  end
+
+  describe "the segment format" do
+    test "a broker set to batch registers batch segments and hands the format to every write", %{store: store} do
+      {broker, root} = broker_with_topic("events", 4, brokers: [:a, :b], replication_factor: 2, segment_format: :batch)
+      records = [record("a", "k1"), record("b", "k2")]
+
+      assert {_broker, {:ok, _ranges, [%{segment_id: segment_id, format: :batch}]}} =
+               Broker.produce_plan(broker, "events", records)
+
+      parent = self()
+
+      replicate = fn ref, seg, rs, base, recs, format ->
+        send(parent, {:format, format})
+        FakeSegmentStore.replicate(store, ref, seg, rs, base, recs)
+      end
+
+      {broker, {:ok, _}} = Broker.produce(broker, "events", records, replicate)
+      assert_received {:format, :batch}
+      assert [%{format: :batch, stored_bytes: nil}] = segments(broker, root)
+      assert elem(segment_id, 0) == root
+    end
+
+    test "a produce roll seals a batch segment with its stored size beside its logical one", %{store: store} do
+      {broker, root} = broker_with_topic("events", 4, brokers: [:a], segment_format: :batch)
+      {broker, {:ok, _}} = produce_only(broker, store, "events", [record("a", "k")])
+      roll = Broker.active_roll(broker, root)
+
+      {broker, :ok} = Broker.record_seal(broker, roll, 1, %{logical: 300, stored: 77}, 1_000)
+
+      assert [%{state: :sealed, format: :batch, byte_size: 300, stored_bytes: 77}] = segments(broker, root)
+    end
+
+    test "a frontend that adopts another's batch segment writes to it as batch", %{store: store} do
+      {broker, root} = broker_with_topic("events", 4, brokers: [:a], segment_format: :batch)
+      {broker, {:ok, _}} = produce_only(broker, store, "events", [record("a", "k")])
+
+      # Another frontend, set to record, knows the segment only from the control plane.
+      adopter = %{broker | segments: %{}, segment_format: :record}
+
+      assert {_broker, {:ok, _ranges, [%{segment_id: {^root, 0}, format: :batch}]}} =
+               Broker.produce_plan(adopter, "events", [record("b", "k")])
+    end
+
+    test "the default registers record segments, with the shape every release applies", %{store: store} do
+      {broker, root} = broker_with_topic("events", 4, brokers: [:a])
+      {broker, {:ok, _}} = produce_only(broker, store, "events", [record("a", "k")])
+      [segment] = segments(broker, root)
+      refute Map.has_key?(segment, :format)
+      assert {_broker, {:ok, _ranges, [%{format: :record}]}} = Broker.produce_plan(broker, "events", [record("b", "k")])
     end
   end
 end

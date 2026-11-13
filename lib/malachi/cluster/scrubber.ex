@@ -365,9 +365,14 @@ defmodule Malachi.Cluster.Scrubber do
   # repair source. One predicate for both on purpose: a peer we would call damaged if it were ours is
   # not a copy worth deleting ours for. `length` and `byte_size` are only set at seal time, so an
   # unset one simply does not constrain (`register_segment` leaves them nil until the seal lands).
+  #
+  # `byte_size` is the segment's logical size, so it is compared with the copy's logical bytes, which are the
+  # same on every copy that holds the same records whatever the format stores them in. A peer on a release
+  # that predates the batch format reports no logical bytes, and only holds record segments, whose logical
+  # size is their size on disk.
   defp short_copy?(segment, counts) do
     (is_integer(segment.length) and counts.records < segment.length) or
-      (is_integer(segment.byte_size) and counts.bytes < segment.byte_size)
+      (is_integer(segment.byte_size) and Map.get(counts, :logical_bytes, counts.bytes) < segment.byte_size)
   end
 
   defp report_damage(segment, verdict, acc, state) do
@@ -387,6 +392,9 @@ defmodule Malachi.Cluster.Scrubber do
   # this node does not already hold. That makes it the one damage shape with no peer, no demotion and
   # no deletion, which is also why it must never be confused with damage to the segment itself.
   defp repair(segment, %{reason: :bad_index}, acc, state), do: rebuild_index(segment, acc, state)
+
+  # The manifest is derived from the records the same way, and the same rebuild rewrites it.
+  defp repair(segment, %{reason: :bad_manifest}, acc, state), do: rebuild_index(segment, acc, state)
 
   # A repair from a peer deletes this copy before refetching it, which is only safe on a copy known not to
   # be latched: a latched one is SelfHealing's to replace, and refetching it onto the disk that failed is the
@@ -639,7 +647,10 @@ defmodule Malachi.Cluster.Scrubber do
     # recorded, so the verify only has to confirm the frames landed readable.
     # A rebuilt copy comes back without its seal marker, so it is sealed again here, at the length the control
     # plane recorded: the marker is what fences the copy, and a copy that is not fenced takes writes it must refuse.
-    with {:ok, ^to_offset} <- Catchup.run(state.resolved_ref, peer, segment.id, segment.start_offset, to_offset),
+    format = Malachi.Metadata.segment_format(segment)
+
+    with {:ok, ^to_offset} <-
+           Catchup.run(state.resolved_ref, peer, segment.id, segment.start_offset, to_offset, format: format),
          {:ok, _counts} <- verify(state, segment.id) do
       case seal_rebuilt(state, segment, to_offset) do
         :ok ->

@@ -121,7 +121,7 @@ defmodule Malachi.Log.Record do
           {:ok, t(), pos_integer(), binary()} | :incomplete | :blank | {:error, atom()}
   def decode_one(binary) do
     case split_frame(binary) do
-      {:ok, payload, frame_size, rest} ->
+      {:ok, payload, _checksum, frame_size, rest} ->
         case decode_payload(payload) do
           {:ok, record} -> {:ok, record, frame_size, rest}
           :error -> {:error, :bad_payload}
@@ -144,23 +144,74 @@ defmodule Malachi.Log.Record do
   @spec check_one(binary()) :: {:ok, pos_integer(), binary()} | :incomplete | :blank | {:error, atom()}
   def check_one(binary) do
     case split_frame(binary) do
-      {:ok, _payload, frame_size, rest} -> {:ok, frame_size, rest}
+      {:ok, _payload, _checksum, frame_size, rest} -> {:ok, frame_size, rest}
       incomplete_or_error -> incomplete_or_error
     end
   end
 
-  # The single source of truth for framing and checksum verification, shared by decode_one/1 and
-  # check_one/1 so the two can never disagree about what a valid frame is.
+  @doc """
+  Checks the frame at the front of `binary` like `check_one/1` and answers what a scan needs to know about
+  it without building the record: its offset, that it holds one record, what it weighs (the frame size,
+  which is the logical size of a record), and its CRC with the payload length it covers, which chain into a
+  segment's logical hash (`:erlang.crc32_combine/3`). The same shape `Malachi.Log.BatchFrame` frames are
+  summarized to, so a scan walks either format the same way.
+  """
+  @spec summarize_one(binary()) ::
+          {:ok,
+           %{
+             base_offset: non_neg_integer(),
+             count: 1,
+             logical_bytes: pos_integer(),
+             crc: non_neg_integer(),
+             crc_size: non_neg_integer()
+           }, pos_integer(), binary()}
+          | :incomplete
+          | :blank
+          | {:error, atom()}
+  def summarize_one(binary) do
+    case split_frame(binary) do
+      {:ok, <<offset::64, _rest::binary>> = payload, checksum, frame_size, rest} ->
+        summary = %{
+          base_offset: offset,
+          count: 1,
+          logical_bytes: frame_size,
+          crc: checksum,
+          crc_size: byte_size(payload)
+        }
+
+        {:ok, summary, frame_size, rest}
+
+      incomplete_or_error ->
+        incomplete_or_error
+    end
+  end
+
+  @doc """
+  How many bytes the frame starting at `bytes` claims, from its header alone, or `0` when `bytes` does not
+  start a record frame. Recovery uses it to tell a write cut inside a frame from damage.
+  """
+  @spec claimed_size(binary()) :: non_neg_integer()
+  def claimed_size(<<@magic::16, payload_length::32, _checksum::32, _rest::binary>>),
+    do: @frame_header_size + payload_length
+
+  def claimed_size(_bytes), do: 0
+
+  @doc "The magic number that opens every record frame."
+  @spec magic() :: non_neg_integer()
+  def magic, do: @magic
+
+  # The single source of truth for framing and checksum verification, shared by decode_one/1,
+  # check_one/1 and summarize_one/1 so they can never disagree about what a valid frame is.
   #
   # Note the CRC covers the PAYLOAD only: corruption inside the 10-byte header surfaces as
   # :bad_magic, or as :incomplete when a mangled length field claims more bytes than exist. Every
   # single-byte corruption is still caught, only the reported reason differs.
   @spec split_frame(binary()) ::
-          {:ok, binary(), pos_integer(), binary()} | :incomplete | :blank | {:error, atom()}
+          {:ok, binary(), non_neg_integer(), pos_integer(), binary()} | :incomplete | :blank | {:error, atom()}
   defp split_frame(<<@magic::16, payload_length::32, checksum::32, payload::binary-size(payload_length), rest::binary>>)
        when payload_length >= @fixed_payload_size do
     if :erlang.crc32(payload) == checksum do
-      {:ok, payload, @frame_header_size + payload_length, rest}
+      {:ok, payload, checksum, @frame_header_size + payload_length, rest}
     else
       {:error, :bad_crc}
     end

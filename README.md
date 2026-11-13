@@ -385,6 +385,7 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | `MALACHI_LOG_SPREAD_BY` | _(unset)_ | Broker attribute to spread replicas over (e.g. `rack`), rack/DC-aware placement |
 | `MALACHI_LOG_MIN_DOMAINS` | _(unset)_ | Min distinct `spread_by` domains a segment's replicas must span |
 | `MALACHI_LOG_PLACEMENT_POLICY` | soft | `hard` fails a produce that cannot meet `min_domains`; `soft` places best-effort |
+| `MALACHI_SEGMENT_FORMAT` | record | How new segments frame their records on disk: `record` (one frame per record) or `batch` (one frame per batch, one CRC per batch). For development and the chaos drills; not supported in production. Set it only when every node runs this release and the control plane runs machine version 9 (no pin below 9): under such a pin a frontend set to `batch` cannot open a segment |
 | `MALACHI_AUTO_REBALANCE` | false | Auto-commit vnode rebalancing on membership change (else operator-driven) |
 | `MALACHI_AUTO_REBALANCE_INTERVAL_MS` | 30000 | Reconcile interval for auto-rebalancing |
 | `MALACHI_AUTO_REBALANCE_STABILIZATION` | 3 | Consecutive stable reconciles before an auto-commit (absorbs flaps) |

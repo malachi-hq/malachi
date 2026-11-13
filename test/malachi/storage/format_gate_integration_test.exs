@@ -34,7 +34,7 @@ defmodule Malachi.Storage.FormatGateIntegrationTest do
 
     segment = Path.join([root, "shard_0", "segment-0.log"])
     File.write!(segment, unknown_frame(), [:append])
-    File.write!(FormatMarker.path(root), FormatMarker.render(%{format: 2, written_by: "0.13.0", requires: "0.13.0"}))
+    File.write!(FormatMarker.path(root), FormatMarker.render(%{format: 3, written_by: "0.25.0", requires: "0.25.0"}))
     segment
   end
 
@@ -71,9 +71,9 @@ defmodule Malachi.Storage.FormatGateIntegrationTest do
 
     assert_received {:halted, 78}
     assert stderr =~ "REFUSING TO START (exit 78):"
-    assert stderr =~ "format 2"
-    assert stderr =~ "at most format 1"
-    assert stderr =~ "Start release 0.13.0 or newer"
+    assert stderr =~ "format 3"
+    assert stderr =~ "at most format 2"
+    assert stderr =~ "Start release 0.25.0 or newer"
     assert hashes(root) == before
   end
 

@@ -50,7 +50,15 @@ defmodule Malachi.Storage.ElixirStore do
 
   @behaviour Malachi.Storage.SegmentStore
 
-  alias Malachi.Log.{Record, Segment}
+  alias Malachi.BatchCodec
+  alias Malachi.BatchCodec.Validated
+  alias Malachi.Log.BatchFrame
+  alias Malachi.Log.Frames
+  alias Malachi.Log.Manifest
+  alias Malachi.Log.Record
+  alias Malachi.Log.Segment
+  alias Malachi.Log.SegmentFiles
+  alias Malachi.Storage.Directory
   alias Malachi.Storage.Preallocation
   alias Malachi.Telemetry
 
@@ -87,11 +95,18 @@ defmodule Malachi.Storage.ElixirStore do
   @typedoc "One sparse-index entry: a logical offset and the byte position where it starts."
   @type index_entry :: {offset :: non_neg_integer(), file_position :: non_neg_integer()}
 
-  @typedoc "One buffered, not-yet-flushed record: its offset, encoded frame, and frame size."
-  @type pending_frame :: {offset :: non_neg_integer(), frame :: iodata(), frame_size :: pos_integer()}
+  @typedoc """
+  One buffered, not-yet-flushed frame: the offset of its first record, its bytes, its size on disk, and
+  its summary (`t:Malachi.Log.Frames.summary/0`: how many records, their logical size and CRC).
+  """
+  @type pending_frame ::
+          {offset :: non_neg_integer(), frame :: iodata(), frame_size :: pos_integer(), Frames.summary()}
 
   @type t :: %__MODULE__{
           segment: Segment.t(),
+          format: Frames.format() | nil,
+          logical_bytes: non_neg_integer(),
+          logical_hash: non_neg_integer(),
           file_descriptor: :file.fd(),
           write_position: non_neg_integer(),
           next_offset: non_neg_integer(),
@@ -125,6 +140,12 @@ defmodule Malachi.Storage.ElixirStore do
   defstruct [
     :segment,
     :file_descriptor,
+    # How this segment's records are framed (`Malachi.Log.Frames`): fixed for the segment's life.
+    format: :record,
+    # What the committed records weigh in the record frame, and the CRC of their logical content: the
+    # numbers every replica comparison uses, whatever the format (`Malachi.Log.Frames`).
+    logical_bytes: 0,
+    logical_hash: 0,
     write_position: 0,
     next_offset: 0,
     pending: [],
@@ -159,7 +180,8 @@ defmodule Malachi.Storage.ElixirStore do
     index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
     prealloc_bytes = Keyword.get(opts, :prealloc_bytes, @default_prealloc_bytes)
 
-    with :ok <- File.mkdir_p(directory),
+    with {:ok, format} <- requested_format(opts),
+         :ok <- File.mkdir_p(directory),
          :ok <- absent(path),
          :ok <- File.touch(path),
          {:ok, file_descriptor} <- :file.open(path, [:read, :write, :raw, :binary]),
@@ -168,6 +190,8 @@ defmodule Malachi.Storage.ElixirStore do
        %__MODULE__{
          segment: segment,
          file_descriptor: file_descriptor,
+         format: format,
+         logical_hash: Frames.empty_hash(),
          next_offset: segment.base_offset,
          index: empty_index(),
          index_interval: index_interval,
@@ -182,6 +206,46 @@ defmodule Malachi.Storage.ElixirStore do
   end
 
   defp absent(path), do: if(File.exists?(path), do: {:error, :already_exists}, else: :ok)
+
+  # The format a caller asks for (`:format`, `:record` by default), refused when it is not one: a typo here
+  # must not quietly write the wrong frames into a segment registered as the other format.
+  defp requested_format(opts) do
+    format = Keyword.get(opts, :format) || :record
+    if format in Frames.formats(), do: {:ok, format}, else: {:error, {:unknown_format, format}}
+  end
+
+  # The format a file holds, from the magic of its first frame, checked against the one the caller expects.
+  # A file that opens with neither magic (empty, blank, or damaged right at the start) holds whatever the
+  # caller says, and its scan will report the damage if there is any. A file that holds the OTHER format is
+  # refused: the control plane registered the segment as one format, and writing or trusting the other
+  # would make this copy differ from its peers.
+  #
+  # A file that holds no frame yet, opened by a caller that did not say which format it expects (a read or a
+  # probe that reaches a segment before its first write, after a crash left the file empty or blank), has no
+  # format: `nil`, decided by the first write (`adopt_format/2`). Calling it record would make the next batch
+  # write a mismatch and fail a healthy copy.
+  defp file_format(file_descriptor, opts) do
+    expected = Keyword.get(opts, :format)
+
+    with {:ok, requested} <- requested_format(opts),
+         {:ok, head} <- head_bytes(file_descriptor) do
+      case {Frames.detect(head), expected} do
+        {nil, nil} -> {:ok, nil}
+        {nil, _expected} -> {:ok, requested}
+        {^requested, _expected} -> {:ok, requested}
+        {found, nil} -> {:ok, found}
+        {found, _expected} -> {:error, {:format_mismatch, found, requested}}
+      end
+    end
+  end
+
+  defp head_bytes(file_descriptor) do
+    case :file.pread(file_descriptor, 0, 2) do
+      {:ok, bytes} -> {:ok, bytes}
+      :eof -> {:ok, <<>>}
+      {:error, _reason} = error -> error
+    end
+  end
 
   # A handle whose preallocation could not be undone is not handed out, so nothing else would ever close its
   # descriptor.
@@ -202,7 +266,8 @@ defmodule Malachi.Storage.ElixirStore do
     path = Segment.path(segment)
 
     if File.exists?(path) do
-      with {:ok, file_descriptor} <- :file.open(path, [:read, :write, :raw, :binary]) do
+      with :ok <- remove_orphan_rewrite(segment),
+           {:ok, file_descriptor} <- :file.open(path, [:read, :write, :raw, :binary]) do
         # A recovery that fails hands back no handle, so nothing else could ever close this descriptor.
         case recover_from(segment, path, file_descriptor, opts) do
           {:ok, _store} = recovered ->
@@ -218,13 +283,35 @@ defmodule Malachi.Storage.ElixirStore do
     end
   end
 
+  # A rewrite the process died in the middle of (`truncate_to/2` cutting inside a batch) left its temporary
+  # file behind. The rename is the commit point, so whatever `.log` is there is the segment, old or new, and
+  # the temporary file is garbage.
+  defp remove_orphan_rewrite(%Segment{} = segment) do
+    case File.rm(rewrite_path(segment)) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp rewrite_path(%Segment{directory: directory, id: id}), do: SegmentFiles.path(directory, to_string(id), :rewrite)
+
   defp recover_from(%Segment{} = segment, path, file_descriptor, opts) do
+    with {:ok, format} <- file_format(file_descriptor, opts) do
+      recover_from(segment, path, file_descriptor, opts, format)
+    end
+  end
+
+  defp recover_from(%Segment{} = segment, path, file_descriptor, opts, format) do
     index_interval = Keyword.get(opts, :index_interval, @default_index_interval)
     prealloc_bytes = Keyword.get(opts, :prealloc_bytes, @default_prealloc_bytes)
 
     # Scan the file in bounded chunks (never loading it whole), counting records and
     # building the sparse index. `valid_bytes` is where valid frames end.
-    {record_count, valid_bytes, index_entries, halt} = scan_segment(file_descriptor, index_interval)
+    {scanned, valid_bytes, index_entries, halt} =
+      scan_segment(file_descriptor, format, segment.base_offset, index_interval)
+
+    record_count = scanned.records
     sealed? = File.exists?(Segment.seal_marker_path(segment))
 
     # A scan stopped by a read error is not a finding about the bytes, it is the device failing, and it is
@@ -254,6 +341,9 @@ defmodule Malachi.Storage.ElixirStore do
        %__MODULE__{
          segment: segment,
          file_descriptor: file_descriptor,
+         format: format,
+         logical_bytes: scanned.logical_bytes,
+         logical_hash: scanned.logical_hash,
          write_position: valid_bytes,
          next_offset: segment.base_offset + record_count,
          index: index,
@@ -439,7 +529,7 @@ defmodule Malachi.Storage.ElixirStore do
       trailing_bytes: trailing_bytes,
       written_bytes: written_bytes,
       blank_tail_bytes: if(ends_in_zeros?, do: trailing_bytes - written_bytes, else: 0),
-      zeros_start_inside_frame?: written_bytes < claimed_frame_size(bytes),
+      zeros_start_inside_frame?: written_bytes < claimed_frame_size(bytes, written_bytes),
       zeros_reach_the_end?: ends_in_zeros?
     }
   end
@@ -480,10 +570,7 @@ defmodule Malachi.Storage.ElixirStore do
   # How long the damaged frame says it is, from its own header. Zero when the header is not a frame
   # header at all, which makes `zeros_start_inside_frame?` false: with no claimed extent there is
   # nothing to say the write stopped short, so the bytes are treated as rot.
-  defp claimed_frame_size(<<0x4D51::16, payload_length::32, _checksum::32, _rest::binary>>),
-    do: 10 + payload_length
-
-  defp claimed_frame_size(_bytes), do: 0
+  defp claimed_frame_size(bytes, written_bytes), do: Frames.claimed_size(bytes, written_bytes)
 
   # Drops the bytes a torn write left behind. Without preallocation that means truncating the file,
   # which is what has always happened. With it, truncating would throw away the preallocated region
@@ -576,13 +663,7 @@ defmodule Malachi.Storage.ElixirStore do
           preallocated? = Keyword.get(opts, :prealloc_bytes, @default_prealloc_bytes) > 0
 
           try do
-            {record_count, valid_bytes, halt} = check_scan(file_descriptor)
-
-            # Frames first: with the segment itself damaged the sidecar's verdict is moot, and
-            # rebuilding an index over damaged frames would only bake the damage in.
-            with {:ok, counts} <- verdict(file_descriptor, path, record_count, valid_bytes, halt, preallocated?) do
-              verify_index(segment, file_descriptor, valid_bytes, counts)
-            end
+            verify_open(segment, path, file_descriptor, opts, preallocated?)
           after
             :file.close(file_descriptor)
           end
@@ -592,6 +673,27 @@ defmodule Malachi.Storage.ElixirStore do
       end
     else
       {:error, :enoent}
+    end
+  end
+
+  defp verify_open(segment, path, file_descriptor, opts, preallocated?) do
+    case file_format(file_descriptor, opts) do
+      {:ok, format} ->
+        {scanned, valid_bytes, halt} = check_scan(file_descriptor, format, segment.base_offset)
+
+        # Frames first: with the segment itself damaged the sidecar's verdict is moot, and
+        # rebuilding an index over damaged frames would only bake the damage in.
+        with {:ok, counts} <- verdict(file_descriptor, path, scanned, valid_bytes, halt, preallocated?),
+             counts = Map.put(counts, :format, format),
+             {:ok, counts} <- verify_index(segment, format, file_descriptor, valid_bytes, counts) do
+          verify_manifest(segment, counts)
+        end
+
+      {:error, {:format_mismatch, _found, _requested} = reason} ->
+        {:error, %{position: 0, reason: reason, unreadable_bytes: 0, file: path}}
+
+      {:error, reason} ->
+        unreadable(path, reason)
     end
   end
 
@@ -609,7 +711,7 @@ defmodule Malachi.Storage.ElixirStore do
   # offset the entry claims. An absent sidecar is not damage (reads simply scan from the start), and
   # a rotted one is repairable locally by `rebuild_index/3`, since the index is derived from the
   # segment and never holds anything the segment does not.
-  defp verify_index(segment, file_descriptor, valid_bytes, counts) do
+  defp verify_index(segment, format, file_descriptor, valid_bytes, counts) do
     index_path = Segment.index_path(segment)
 
     case File.read(index_path) do
@@ -623,7 +725,7 @@ defmodule Malachi.Storage.ElixirStore do
           rem(byte_size(binary), @index_entry_bytes) != 0 ->
             {:error, index_damage(index_path, valid_bytes, :trailing_bytes)}
 
-          bad = Enum.find(entries, &bad_index_entry?(&1, file_descriptor, valid_bytes)) ->
+          bad = Enum.find(entries, &bad_index_entry?(&1, format, file_descriptor, valid_bytes)) ->
             {:error, index_damage(index_path, elem(bad, 1), :entry)}
 
           true ->
@@ -638,19 +740,73 @@ defmodule Malachi.Storage.ElixirStore do
     end
   end
 
+  # The manifest is derived from the file like the index, so it is checked the same way: against a scan.
+  # Absent is fine (a file sealed before manifests, or not sealed at all); present, every number it
+  # carries must be what the scan just found, or it is reported for a local rewrite.
+  defp verify_manifest(segment, counts) do
+    manifest_path = manifest_path(segment)
+
+    case Manifest.read(manifest_path) do
+      {:ok, manifest} ->
+        if manifest == manifest_of(counts),
+          do: {:ok, counts},
+          else: {:error, manifest_damage(manifest_path, counts, :mismatch)}
+
+      {:error, :enoent} ->
+        {:ok, counts}
+
+      {:error, reason} ->
+        {:error, manifest_damage(manifest_path, counts, reason)}
+    end
+  end
+
+  defp manifest_of(counts) do
+    %Manifest{
+      format: counts.format,
+      record_count: counts.records,
+      logical_bytes: counts.logical_bytes,
+      logical_hash: counts.logical_hash,
+      stored_bytes: counts.bytes
+    }
+  end
+
+  defp manifest_damage(manifest_path, counts, detail) do
+    %{position: counts.bytes, reason: :bad_manifest, unreadable_bytes: 0, file: manifest_path, detail: detail}
+  end
+
+  defp manifest_path(%Segment{directory: directory, id: id}), do: SegmentFiles.path(directory, to_string(id), :manifest)
+
+  defp persist_manifest(%__MODULE__{} = store) do
+    Manifest.write(manifest_path(store.segment), %Manifest{
+      format: store.format,
+      record_count: store.segment.record_count,
+      logical_bytes: store.logical_bytes,
+      logical_hash: store.logical_hash,
+      stored_bytes: store.write_position
+    })
+  end
+
+  defp remove_manifest(%__MODULE__{} = store) do
+    case File.rm(manifest_path(store.segment)) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
   defp index_damage(index_path, position, detail) do
     %{position: position, reason: :bad_index, unreadable_bytes: 0, file: index_path, detail: detail}
   end
 
-  # An entry is good when a frame starts exactly at its position and that frame's record carries the
-  # entry's offset. Reading one frame header plus a bounded window is enough: a frame that needs more
-  # than the window is decoded as incomplete, which is itself a mismatch worth reporting.
-  defp bad_index_entry?({offset, position}, file_descriptor, valid_bytes) do
+  # An entry is good when a frame starts exactly at its position and that frame's first record carries the
+  # entry's offset. The whole frame is read, so its CRC is checked: a batch frame can be larger than the read
+  # window, and it is bounded by `Malachi.Log.BatchFrame.max_frame_size/1` like every other read of one.
+  defp bad_index_entry?({offset, position}, format, file_descriptor, valid_bytes) do
     if position < 0 or position >= valid_bytes do
       true
     else
-      case :file.pread(file_descriptor, position, @read_window_bytes) do
-        {:ok, chunk} -> not match?({:ok, %Record{offset: ^offset}, _size, _rest}, Record.decode_one(chunk))
+      case read_frame_at(file_descriptor, position, valid_bytes) do
+        {:ok, chunk} -> not match?({:ok, %{base_offset: ^offset}, _size, _rest}, Frames.summarize_one(format, chunk))
         :eof -> true
         # An entry whose frame cannot be read is not an entry a read can trust, whatever the reason.
         # Reporting it as a bad entry is also the safe verdict: the repair for a bad index is a local
@@ -665,21 +821,27 @@ defmodule Malachi.Storage.ElixirStore do
   # checksum mismatch (an active segment's torn tail is normal and is handled by `recover/3`).
   # The damage map carries the same keys `recover/3` reports, so a caller (and the telemetry event)
   # handles findings from either path identically.
-  defp verdict(file_descriptor, path, record_count, valid_bytes, halt, preallocated?) do
+  defp verdict(file_descriptor, path, scanned, valid_bytes, halt, preallocated?) do
     with {:ok, %{size: file_size}} <- File.stat(path),
          {:ok, shape} <- tail_shape(file_descriptor, valid_bytes, file_size) do
-      classified_verdict(classify_tail(halt, shape), path, record_count, valid_bytes, halt, shape, preallocated?)
+      classified_verdict(classify_tail(halt, shape), path, scanned, valid_bytes, halt, shape, preallocated?)
     else
       {:error, reason} -> unreadable(path, reason)
     end
   end
 
-  defp classified_verdict(classification, _path, record_count, valid_bytes, _halt, _shape, _preallocated?)
+  defp classified_verdict(classification, _path, scanned, valid_bytes, _halt, _shape, _preallocated?)
        when classification in [:clean, :blank] do
-    {:ok, %{records: record_count, bytes: valid_bytes}}
+    {:ok,
+     %{
+       records: scanned.records,
+       bytes: valid_bytes,
+       logical_bytes: scanned.logical_bytes,
+       logical_hash: scanned.logical_hash
+     }}
   end
 
-  defp classified_verdict(classification, path, _record_count, valid_bytes, halt, shape, preallocated?) do
+  defp classified_verdict(classification, path, _scanned, valid_bytes, halt, shape, preallocated?) do
     damage = integrity_verdict(verdict_key(classification, halt), valid_bytes, shape, true, preallocated?)
     {:error, damage |> Map.delete(:sealed?) |> Map.put(:file, path)}
   end
@@ -689,30 +851,35 @@ defmodule Malachi.Storage.ElixirStore do
   defp verdict_key(:rot, {:error, reason}), do: {:rot, reason}
   defp verdict_key(classification, _halt), do: classification
 
-  # The verification scan: `walk/4` driven by `Malachi.Log.Record.check_one/1`, which verifies the
-  # checksum without building a record struct, and an accumulator that is just a count. A scrub
-  # walks whole segments only to confirm their checksums, so the per-record allocation the recovery
-  # scan needs would dominate its cost, which is why the two share the LOOP but not the callback.
-  defp check_scan(file_descriptor) do
-    {valid_bytes, record_count, halt} =
-      walk(file_descriptor, &check_frame/1, fn _frame, _position, count -> count + 1 end, 0)
+  # The verification scan: `walk/5` with an accumulator that only totals the summaries, which verify the
+  # checksum without building a record (`Malachi.Log.Frames.summarize_one/2`). A scrub walks whole segments
+  # only to confirm their checksums and count what they hold.
+  defp check_scan(file_descriptor, format, base_offset) do
+    {valid_bytes, scanned, halt} =
+      walk(
+        file_descriptor,
+        format,
+        base_offset,
+        fn summary, _position, totals -> total(totals, summary) end,
+        empty_totals()
+      )
 
     # Unlike recovery, a scrub reports a copy it cannot read as damage, carrying the POSIX reason: to the
     # scrub a copy nobody can read IS damaged, and the replication server is not the one asking.
-    {record_count, valid_bytes, as_damage(halt)}
+    {scanned, valid_bytes, as_damage(halt)}
   end
 
   defp as_damage({:read_error, reason}), do: {:error, reason}
   defp as_damage(halt), do: halt
 
-  # `check_one/1` answers without a decoded frame, so it is padded to the walker's shape. One
-  # four-element tuple per frame is nothing next to the `Record` struct (with its key, value and
-  # header binaries) that using `decode_one/1` here would allocate instead.
-  defp check_frame(binary) do
-    case Record.check_one(binary) do
-      {:ok, frame_size, rest} -> {:ok, nil, frame_size, rest}
-      incomplete_or_error -> incomplete_or_error
-    end
+  defp empty_totals, do: %{records: 0, logical_bytes: 0, logical_hash: Frames.empty_hash()}
+
+  defp total(totals, summary) do
+    %{
+      records: totals.records + summary.count,
+      logical_bytes: totals.logical_bytes + summary.logical_bytes,
+      logical_hash: Frames.chain(totals.logical_hash, summary)
+    }
   end
 
   @impl true
@@ -725,17 +892,38 @@ defmodule Malachi.Storage.ElixirStore do
 
       with {:ok, file_descriptor} <- :file.open(path, [:read, :raw, :binary]) do
         try do
-          {_record_count, _valid_bytes, entries, halt} = scan_segment(file_descriptor, index_interval)
+          with {:ok, format} <- file_format(file_descriptor, opts) do
+            {scanned, valid_bytes, entries, halt} =
+              scan_segment(file_descriptor, format, segment.base_offset, index_interval)
 
-          # A scan cut short by a read error only indexed what it reached, and writing that would replace
-          # the sidecar with a partial one while reporting success.
-          with :ok <- readable(halt), do: write_index(Segment.index_path(segment), entries)
+            # A scan cut short by a read error only indexed what it reached, and writing that would replace
+            # the sidecar with a partial one while reporting success.
+            with :ok <- readable(halt),
+                 :ok <- write_index(Segment.index_path(segment), entries) do
+              rebuild_manifest(segment, format, scanned, valid_bytes)
+            end
+          end
         after
           :file.close(file_descriptor)
         end
       end
     else
       {:error, :enoent}
+    end
+  end
+
+  # The manifest is rewritten from the same scan when the segment has one to replace, or carries its seal
+  # marker: both say the file is sealed, which is the only kind a manifest describes.
+  defp rebuild_manifest(segment, format, scanned, valid_bytes) do
+    path = manifest_path(segment)
+
+    if File.exists?(path) or File.exists?(Segment.seal_marker_path(segment)) do
+      Manifest.write(
+        path,
+        manifest_of(Map.merge(scanned, %{format: format, bytes: valid_bytes}))
+      )
+    else
+      :ok
     end
   end
 
@@ -751,7 +939,8 @@ defmodule Malachi.Storage.ElixirStore do
       # Measured before opening, so a failure to measure cannot strand a descriptor. A sealed segment
       # is immutable, so the size cannot change between the two.
       with {:ok, %{size: file_size}} <- File.stat(path),
-           {:ok, file_descriptor} <- :file.open(path, [:read, :raw, :binary]) do
+           {:ok, file_descriptor} <- :file.open(path, [:read, :raw, :binary]),
+           {:ok, format} <- format_or_close(file_descriptor, opts) do
         index = load_index_file(Segment.index_path(segment))
 
         segment = %Segment{segment | state: :sealed, byte_size: file_size, record_count: record_count}
@@ -760,6 +949,7 @@ defmodule Malachi.Storage.ElixirStore do
          %__MODULE__{
            segment: segment,
            file_descriptor: file_descriptor,
+           format: format,
            write_position: file_size,
            next_offset: segment.base_offset + record_count,
            index: index,
@@ -772,20 +962,36 @@ defmodule Malachi.Storage.ElixirStore do
     end
   end
 
+  defp format_or_close(file_descriptor, opts) do
+    case file_format(file_descriptor, opts) do
+      {:ok, _format} = ok ->
+        ok
+
+      {:error, _reason} = error ->
+        _ = :file.close(file_descriptor)
+        error
+    end
+  end
+
   @impl true
   def append(%__MODULE__{segment: %Segment{state: :sealed}}, _records), do: {:error, :sealed}
   def append(%__MODULE__{append_refusal: reason}, [_ | _]) when reason != nil, do: {:error, reason}
 
-  def append(%__MODULE__{} = store, records) when is_list(records) and records != [] do
+  # A segment with no frame and no format yet takes the format of its first write: records sent without a
+  # format are record frames, as they always were.
+  def append(%__MODULE__{format: nil} = store, records), do: append(%{store | format: :record}, records)
+
+  def append(%__MODULE__{format: :record} = store, records) when is_list(records) and records != [] do
     first_offset = store.next_offset
 
     {framed_records, batch_bytes, batch_count, next_offset} =
       Enum.reduce(records, {[], 0, 0, store.next_offset}, fn
         %Record{} = record, {frames, bytes_so_far, count_so_far, offset} ->
-          frame = Record.encode(%Record{record | offset: offset})
+          frame = Record.encode(%{record | offset: offset})
           frame_size = byte_size(frame)
 
-          {[{offset, frame, frame_size} | frames], bytes_so_far + frame_size, count_so_far + 1, offset + 1}
+          {[{offset, frame, frame_size, record_summary(offset, frame)} | frames], bytes_so_far + frame_size,
+           count_so_far + 1, offset + 1}
       end)
 
     store = %{
@@ -799,7 +1005,96 @@ defmodule Malachi.Storage.ElixirStore do
     flush_if_full(store, first_offset, next_offset - 1)
   end
 
+  # A batch segment frames the records of one call as one batch, uncompressed: compressing belongs where
+  # the producer's batch is read (the connection process), never in the single process that appends, so a
+  # compressed batch only ever arrives whole, through `append_encoded/2`. A call larger than one batch may
+  # inflate to is cut into several.
+  def append(%__MODULE__{format: :batch} = store, records) when is_list(records) and records != [] do
+    first_offset = store.next_offset
+
+    store =
+      records
+      |> Enum.map(&{&1, false})
+      |> batches(BatchCodec.max_inflated_bytes())
+      |> Enum.reduce(store, &buffer_batch(&2, &1))
+
+    flush_if_full(store, first_offset, store.next_offset - 1)
+  end
+
   def append(%__MODULE__{} = store, []), do: {:ok, store, store.next_offset, store.next_offset - 1}
+
+  @doc """
+  Appends one batch that was already read and checked (`Malachi.BatchCodec.validate/5` or
+  `Malachi.BatchCodec.build/2`), stamping it at the next offset without computing its CRC again. Only a
+  batch segment takes one, and only a batch that fits in one frame (`Malachi.BatchCodec.max_inflated_bytes/0`).
+
+  Same answers as `append/2`: `{:ok, store, first_offset, last_offset}`, or an error.
+  """
+  @impl true
+  def append_encoded(%__MODULE__{segment: %Segment{state: :sealed}}, %Validated{}), do: {:error, :sealed}
+  def append_encoded(%__MODULE__{append_refusal: reason}, %Validated{}) when reason != nil, do: {:error, reason}
+  def append_encoded(%__MODULE__{format: :record}, %Validated{}), do: {:error, {:wrong_format, :record}}
+
+  def append_encoded(%__MODULE__{format: nil} = store, %Validated{} = v),
+    do: append_encoded(%{store | format: :batch}, v)
+
+  def append_encoded(%__MODULE__{} = store, %Validated{} = validated) do
+    first_offset = store.next_offset
+
+    if validated.inflated_size > BatchCodec.max_inflated_bytes() do
+      {:error, :batch_too_large}
+    else
+      store = buffer_batch(store, validated)
+      flush_if_full(store, first_offset, store.next_offset - 1)
+    end
+  end
+
+  defp buffer_batch(%__MODULE__{} = store, %Validated{} = validated) do
+    offset = store.next_offset
+    frame = BatchFrame.encode(validated, offset)
+    frame_size = byte_size(frame)
+
+    summary = %{
+      base_offset: offset,
+      count: validated.count,
+      logical_bytes: validated.logical_bytes,
+      crc: validated.entries_crc,
+      crc_size: validated.inflated_size
+    }
+
+    %{
+      store
+      | pending: [{offset, frame, frame_size, summary} | store.pending],
+        pending_bytes: store.pending_bytes + frame_size,
+        pending_count: store.pending_count + validated.count,
+        next_offset: offset + validated.count
+    }
+  end
+
+  # The records cut into batches that each fit `max_inflated`, in order. Halving until each half fits keeps
+  # the batches as large as the bound allows without measuring every record twice.
+  defp batches(entries, max_inflated) do
+    validated = BatchCodec.build(entries, :none)
+
+    cond do
+      validated.inflated_size <= max_inflated ->
+        [validated]
+
+      match?([_], entries) ->
+        # One record past the bound can never be stored as a batch; the wire refuses one before it gets here.
+        [validated]
+
+      true ->
+        {first, second} = Enum.split(entries, div(length(entries), 2))
+        batches(first, max_inflated) ++ batches(second, max_inflated)
+    end
+  end
+
+  # A record frame's summary, read off the frame it just encoded: its CRC and the payload length it covers
+  # are in the header, so nothing is computed twice.
+  defp record_summary(offset, <<_magic::16, payload_length::32, crc::32, _payload::binary>> = frame) do
+    %{base_offset: offset, count: 1, logical_bytes: byte_size(frame), crc: crc, crc_size: payload_length}
+  end
 
   # NorthGuard's size and count triggers: once the buffer reaches `:flush_bytes` or
   # `:flush_count` records, flush+fsync it automatically without waiting for `sync/1`.
@@ -840,9 +1135,12 @@ defmodule Malachi.Storage.ElixirStore do
 
     # Write the frames and, in the same pass, compute each frame's file position so we can
     # add a sparse-index entry roughly every `index_interval` bytes.
-    {frames_iodata, new_index_entries, end_position, last_indexed_position} =
-      Enum.reduce(frames_in_order, {[], [], store.write_position, store.last_indexed_position}, fn
-        {offset, frame, frame_size}, {iodata, index_entries, position, last_indexed_position} ->
+    {frames_iodata, new_index_entries, end_position, last_indexed_position, totals} =
+      Enum.reduce(
+        frames_in_order,
+        {[], [], store.write_position, store.last_indexed_position,
+         %{records: 0, logical_bytes: store.logical_bytes, logical_hash: store.logical_hash}},
+        fn {offset, frame, frame_size, summary}, {iodata, index_entries, position, last_indexed_position, totals} ->
           {index_entries, last_indexed_position} =
             if position - last_indexed_position >= store.index_interval do
               {[{offset, position} | index_entries], position}
@@ -850,8 +1148,9 @@ defmodule Malachi.Storage.ElixirStore do
               {index_entries, last_indexed_position}
             end
 
-          {[frame | iodata], index_entries, position + frame_size, last_indexed_position}
-      end)
+          {[frame | iodata], index_entries, position + frame_size, last_indexed_position, total(totals, summary)}
+        end
+      )
 
     # On either failure the handle is returned untouched, still describing the file as it was before
     # this sync, which may no longer be true: the write can have landed and only its sync failed. That
@@ -885,6 +1184,8 @@ defmodule Malachi.Storage.ElixirStore do
        %{
          store
          | segment: segment,
+           logical_bytes: totals.logical_bytes,
+           logical_hash: totals.logical_hash,
            write_position: end_position,
            pending: [],
            pending_bytes: 0,
@@ -933,6 +1234,7 @@ defmodule Malachi.Storage.ElixirStore do
     with {:ok, store} <- sync(store),
          :ok <- trim_tail(store),
          :ok <- persist_index(store),
+         :ok <- persist_manifest(store),
          :ok <- File.touch(Segment.seal_marker_path(store.segment)) do
       %Segment{} = current_segment = store.segment
       segment = %Segment{current_segment | state: :sealed, sealed_at: System.system_time(:millisecond)}
@@ -960,55 +1262,164 @@ defmodule Malachi.Storage.ElixirStore do
   end
 
   defp cut_to(%__MODULE__{} = store, keep) do
-    with {:ok, cut_position, entries} <- scan_to(store.file_descriptor, store.index_interval, keep),
-         {:ok, _position} <- :file.position(store.file_descriptor, cut_position),
-         :ok <- :file.truncate(store.file_descriptor),
-         :ok <- :file.sync(store.file_descriptor) do
-      index = :array.from_list(entries)
-      %Segment{} = current_segment = store.segment
-
-      segment = %Segment{current_segment | byte_size: cut_position, record_count: keep}
-
-      # `preallocated_to` goes back to nil because the file no longer HAS a preallocated tail: the
-      # truncation gave every byte past the cut back at once, and leaving the claim standing would let
-      # a later `seal/1` or `close/1` truncate a file it did not size.
-      store = %{
-        store
-        | segment: segment,
-          write_position: cut_position,
-          next_offset: segment.base_offset + keep,
-          index: index,
-          last_indexed_position: last_indexed_position(index, store.index_interval),
-          preallocated_to: nil
-      }
-
-      # The sidecar is rewritten AFTER the data is durable, never before: an index describing records
-      # the file no longer has is the one ordering a reader cannot recover from, while an index that is
-      # merely stale is rejected entry by entry (`bad_index_entry?/3`) and rebuilt by the scrub.
-      with :ok <- persist_index(store), do: {:ok, store}
+    with {:ok, cut, entries, totals} <-
+           scan_to(store.file_descriptor, store.format, store.segment.base_offset, store.index_interval, keep) do
+      case cut do
+        {:at, cut_position} -> cut_at(store, keep, cut_position, entries, totals)
+        {:inside, position, prefix} -> cut_inside(store, keep, position, prefix, entries, totals)
+      end
     end
   end
 
-  # Where record `keep` of this segment starts, plus the sparse index of everything below it.
-  defp scan_to(file_descriptor, index_interval, keep) do
-    on_frame = fn record, position, {count, cut, entries, last_indexed_position} ->
+  # The cut falls between two frames: the file is truncated there, in place, as it always was.
+  defp cut_at(%__MODULE__{} = store, keep, cut_position, entries, totals) do
+    with {:ok, _position} <- :file.position(store.file_descriptor, cut_position),
+         :ok <- :file.truncate(store.file_descriptor),
+         :ok <- :file.sync(store.file_descriptor) do
+      cut_done(store, store.file_descriptor, keep, cut_position, entries, totals)
+    end
+  end
+
+  # The cut falls inside a batch, so the batch's prefix has to be framed again, with the same codec, where
+  # the batch was. Doing that in place would leave a window where a crash destroys the records the cut
+  # keeps: the old batch overwritten, the new one not yet whole. So the segment is rewritten beside itself,
+  # in `<id>.log.rewrite` (everything below the batch, then the new frame), fsynced, and renamed over the
+  # original, with the directory fsynced after. The rename is the commit point: a crash before it leaves the
+  # old segment and an orphan that `recover/3` deletes, and a crash after it leaves the new one.
+  defp cut_inside(%__MODULE__{} = store, keep, position, prefix, entries, totals) do
+    segment = store.segment
+    path = Segment.path(segment)
+    tmp = rewrite_path(segment)
+
+    with {:ok, frame} <- read_frame_at(store.file_descriptor, position, store.write_position),
+         {:ok, header, batch} <- Frames.batch_entries(frame),
+         validated = BatchCodec.build(Enum.take(batch, prefix), header.codec),
+         new_frame = BatchFrame.encode(validated, header.base_offset),
+         :ok <- write_rewrite(store.file_descriptor, tmp, position, new_frame),
+         :ok <- File.rename(tmp, path),
+         :ok <- Directory.sync(segment.directory),
+         {:ok, file_descriptor} <- :file.open(path, [:read, :write, :raw, :binary]) do
+      _ = :file.close(store.file_descriptor)
+
+      summary = %{
+        base_offset: header.base_offset,
+        count: validated.count,
+        logical_bytes: validated.logical_bytes,
+        crc: validated.entries_crc,
+        crc_size: validated.inflated_size
+      }
+
+      entries = index_with(entries, header.base_offset, position, store.index_interval)
+      cut_done(store, file_descriptor, keep, position + byte_size(new_frame), entries, total(totals, summary))
+    else
+      {:error, _reason} = error ->
+        _ = File.rm(tmp)
+        error
+
+      other ->
+        _ = File.rm(tmp)
+        {:error, other}
+    end
+  end
+
+  # The index of the frames below the cut, plus the rewritten batch when it is due an entry.
+  defp index_with(entries, offset, position, index_interval) do
+    last = if entries == [], do: -index_interval, else: elem(List.last(entries), 1)
+    if position - last >= index_interval, do: entries ++ [{offset, position}], else: entries
+  end
+
+  # Copies the bytes below `position` and appends `new_frame`, then fsyncs, into a file of its own.
+  defp write_rewrite(source, tmp, position, new_frame) do
+    with {:ok, target} <- :file.open(tmp, [:write, :raw, :binary, :exclusive]) do
+      try do
+        with :ok <- copy_prefix(source, target, 0, position),
+             :ok <- :file.write(target, new_frame) do
+          :file.sync(target)
+        end
+      after
+        :file.close(target)
+      end
+    end
+  end
+
+  defp copy_prefix(_source, _target, from, to) when from >= to, do: :ok
+
+  defp copy_prefix(source, target, from, to) do
+    case :file.pread(source, from, min(@read_window_bytes, to - from)) do
+      {:ok, chunk} ->
+        with :ok <- :file.write(target, chunk), do: copy_prefix(source, target, from + byte_size(chunk), to)
+
+      :eof ->
+        {:error, :short_segment}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp cut_done(%__MODULE__{} = store, file_descriptor, keep, cut_position, entries, totals) do
+    index = :array.from_list(entries)
+    %Segment{} = current_segment = store.segment
+
+    segment = %{current_segment | byte_size: cut_position, record_count: keep}
+
+    # `preallocated_to` goes back to nil because the file no longer HAS a preallocated tail: the
+    # truncation gave every byte past the cut back at once, and leaving the claim standing would let
+    # a later `seal/1` or `close/1` truncate a file it did not size.
+    store = %{
+      store
+      | segment: segment,
+        file_descriptor: file_descriptor,
+        logical_bytes: totals.logical_bytes,
+        logical_hash: totals.logical_hash,
+        write_position: cut_position,
+        next_offset: segment.base_offset + keep,
+        index: index,
+        last_indexed_position: last_indexed_position(index, store.index_interval),
+        preallocated_to: nil
+    }
+
+    # The sidecar is rewritten AFTER the data is durable, never before: an index describing records
+    # the file no longer has is the one ordering a reader cannot recover from, while an index that is
+    # merely stale is rejected entry by entry (`bad_index_entry?/4`) and rebuilt by the scrub.
+    #
+    # The manifest described the file before the cut, so it goes too; a sealed segment is given a new one,
+    # since it is the one kind of file a manifest is for.
+    with :ok <- persist_index(store),
+         :ok <- remove_manifest(store),
+         :ok <- if(Segment.sealed?(store.segment), do: persist_manifest(store), else: :ok) do
+      {:ok, store}
+    end
+  end
+
+  # Where record `keep` of this segment falls: `{:at, position}` when a frame starts with it, or
+  # `{:inside, position, prefix}` when it is inside the batch at `position`, of which the first `prefix`
+  # records stay. Also the sparse index and the logical totals of every frame wholly below it.
+  defp scan_to(file_descriptor, format, base_offset, index_interval, keep) do
+    on_frame = fn summary, position, {count, cut, entries, last_indexed_position, totals} ->
+      first = count
+      next = count + summary.count
+
       cond do
-        count < keep and position - last_indexed_position >= index_interval ->
-          {count + 1, cut, [{record.offset, position} | entries], position}
+        next <= keep and position - last_indexed_position >= index_interval ->
+          {next, cut, [{summary.base_offset, position} | entries], position, total(totals, summary)}
 
-        count < keep ->
-          {count + 1, cut, entries, last_indexed_position}
+        next <= keep ->
+          {next, cut, entries, last_indexed_position, total(totals, summary)}
 
-        count == keep ->
-          {count + 1, position, entries, last_indexed_position}
+        first == keep ->
+          {next, {:at, position}, entries, last_indexed_position, totals}
+
+        first < keep ->
+          {next, {:inside, position, keep - first}, entries, last_indexed_position, totals}
 
         true ->
-          {count + 1, cut, entries, last_indexed_position}
+          {next, cut, entries, last_indexed_position, totals}
       end
     end
 
-    {valid_bytes, {count, cut, entries, _last_indexed_position}, halt} =
-      walk(file_descriptor, &Record.decode_one/1, on_frame, {0, nil, [], -index_interval})
+    {valid_bytes, {count, cut, entries, _last_indexed_position, totals}, halt} =
+      walk(file_descriptor, format, base_offset, on_frame, {0, nil, [], -index_interval, empty_totals()})
 
     cond do
       # A device that would not give the bytes up says nothing about where the cut belongs, and
@@ -1016,8 +1427,8 @@ defmodule Malachi.Storage.ElixirStore do
       match?({:read_error, _reason}, halt) -> {:error, elem(halt, 1)}
       count < keep -> {:error, :short_segment}
       # No frame at `keep`: the file already ends at or below the cut, so its own end is the answer.
-      cut == nil -> {:ok, valid_bytes, Enum.reverse(entries)}
-      true -> {:ok, cut, Enum.reverse(entries)}
+      cut == nil -> {:ok, {:at, valid_bytes}, Enum.reverse(entries), totals}
+      true -> {:ok, cut, Enum.reverse(entries), totals}
     end
   end
 
@@ -1025,7 +1436,26 @@ defmodule Malachi.Storage.ElixirStore do
   def next_offset(%__MODULE__{next_offset: next_offset}), do: next_offset
 
   @impl true
-  def logical_bytes(%__MODULE__{segment: segment}), do: segment.byte_size
+  def logical_bytes(%__MODULE__{logical_bytes: logical_bytes}), do: logical_bytes
+
+  @impl true
+  def logical_hash(%__MODULE__{logical_hash: logical_hash}), do: logical_hash
+
+  @impl true
+  def stored_bytes(%__MODULE__{segment: segment}), do: segment.byte_size
+
+  @impl true
+  def format(%__MODULE__{format: format}), do: format
+
+  @doc """
+  The handle with `format` as its format when it has none yet (a segment with no frame, recovered without a
+  format), and unchanged otherwise: a segment's format never changes once it holds a frame or was given one.
+  """
+  @impl true
+  def adopt_format(%__MODULE__{format: nil} = store, format) when format in [:record, :batch],
+    do: %{store | format: format}
+
+  def adopt_format(%__MODULE__{} = store, _format), do: store
 
   @impl true
   def sealed?(%__MODULE__{segment: segment}), do: Segment.sealed?(segment)
@@ -1112,10 +1542,9 @@ defmodule Malachi.Storage.ElixirStore do
 
           {:ok, chunk} ->
             buffer = leftover_bytes <> chunk
-            {records_with_positions, consumed_bytes} = Record.decode_all(buffer)
+            {records, consumed_bytes} = Frames.decode_all(store.format, buffer)
 
-            {collected, remaining_records} =
-              take_matching(records_with_positions, target_offset, remaining_records, collected)
+            {collected, remaining_records} = take_matching(records, target_offset, remaining_records, collected)
 
             unconsumed_bytes = binary_part(buffer, consumed_bytes, byte_size(buffer) - consumed_bytes)
 
@@ -1126,15 +1555,28 @@ defmodule Malachi.Storage.ElixirStore do
 
   # Prepends records with offset >= target_offset to `collected`, decrementing the
   # remaining budget; stops once it reaches zero.
-  defp take_matching(records_with_positions, target_offset, remaining_records, collected) do
-    Enum.reduce_while(records_with_positions, {collected, remaining_records}, fn
-      {record, _position}, {collected, remaining_records} ->
+  defp take_matching(records, target_offset, remaining_records, collected) do
+    Enum.reduce_while(records, {collected, remaining_records}, fn
+      record, {collected, remaining_records} ->
         cond do
           remaining_records <= 0 -> {:halt, {collected, remaining_records}}
           record.offset >= target_offset -> {:cont, {[record | collected], remaining_records - 1}}
           true -> {:cont, {collected, remaining_records}}
         end
     end)
+  end
+
+  # The whole frame that starts at `position`: one window, or as much as its header claims when that is
+  # more, never past the valid end and never past the largest frame (`Malachi.Log.Frames.claimed_size/1`
+  # answers 0 for a claim beyond it).
+  defp read_frame_at(file_descriptor, position, valid_bytes) do
+    with {:ok, head} <- read_chunk(file_descriptor, position, min(@read_window_bytes, valid_bytes - position)) do
+      claimed = Frames.claimed_size(head)
+
+      if claimed > byte_size(head) and position + claimed <= valid_bytes,
+        do: read_chunk(file_descriptor, position, claimed),
+        else: {:ok, head}
+    end
   end
 
   defp read_chunk(_file_descriptor, _position, 0), do: :eof
@@ -1186,20 +1628,20 @@ defmodule Malachi.Storage.ElixirStore do
   # last two are kept apart because they mean different things: a bad frame is a finding about the bytes,
   # which recovery classifies, while a failed read says nothing about them and recovery answers it as a
   # storage failure. Never loads the whole file.
-  defp scan_segment(file_descriptor, index_interval) do
-    on_frame = fn record, position, {count, entries, last_indexed_position} ->
+  defp scan_segment(file_descriptor, format, base_offset, index_interval) do
+    on_frame = fn summary, position, {totals, entries, last_indexed_position} ->
       if position - last_indexed_position >= index_interval do
-        {count + 1, [{record.offset, position} | entries], position}
+        {total(totals, summary), [{summary.base_offset, position} | entries], position}
       else
-        {count + 1, entries, last_indexed_position}
+        {total(totals, summary), entries, last_indexed_position}
       end
     end
 
-    # Start "behind" by one interval so the segment's first record is always indexed.
-    {valid_bytes, {record_count, entries, _last_indexed_position}, halt} =
-      walk(file_descriptor, &Record.decode_one/1, on_frame, {0, [], -index_interval})
+    # Start "behind" by one interval so the segment's first frame is always indexed.
+    {valid_bytes, {totals, entries, _last_indexed_position}, halt} =
+      walk(file_descriptor, format, base_offset, on_frame, {empty_totals(), [], -index_interval})
 
-    {record_count, valid_bytes, Enum.reverse(entries), halt}
+    {totals, valid_bytes, Enum.reverse(entries), halt}
   end
 
   # The one loop both scans run. It reads the file in bounded windows, hands every complete frame to
@@ -1212,19 +1654,26 @@ defmodule Malachi.Storage.ElixirStore do
   # a decoder answers. The detector must not die of the condition it was built to report, and it must not
   # mistake it for another one either: recovery refuses a copy it cannot read (`readable/1`), and the
   # verification scan reports it as damage (`as_damage/1`).
-  defp walk(file_descriptor, decode, on_frame, accumulator) do
-    do_walk(file_descriptor, decode, on_frame, 0, <<>>, accumulator)
+  #
+  # Every frame must start at the offset the previous one ended at, the first one at the segment's base
+  # offset. A batch frame's base offset is outside its CRC (`Malachi.Log.BatchFrame`), so this is the check
+  # that catches a flip there; a frame that fails it is damage like any other (`{:error, :bad_offset}`).
+  defp walk(file_descriptor, format, base_offset, on_frame, accumulator) do
+    do_walk(file_descriptor, {format, on_frame}, base_offset, 0, <<>>, accumulator)
   end
 
-  defp do_walk(file_descriptor, decode, on_frame, valid_bytes, carry, accumulator) do
-    case decode.(carry) do
-      {:ok, frame, frame_size, rest} ->
-        accumulator = on_frame.(frame, valid_bytes, accumulator)
-        do_walk(file_descriptor, decode, on_frame, valid_bytes + frame_size, rest, accumulator)
+  defp do_walk(file_descriptor, {format, on_frame} = scan, expected, valid_bytes, carry, accumulator) do
+    case Frames.summarize_one(format, carry) do
+      {:ok, %{base_offset: ^expected} = summary, frame_size, rest} ->
+        accumulator = on_frame.(summary, valid_bytes, accumulator)
+        do_walk(file_descriptor, scan, expected + summary.count, valid_bytes + frame_size, rest, accumulator)
+
+      {:ok, _out_of_place, _frame_size, _rest} ->
+        {valid_bytes, accumulator, {:error, :bad_offset}}
 
       :incomplete ->
         case :file.pread(file_descriptor, valid_bytes + byte_size(carry), @read_window_bytes) do
-          {:ok, chunk} -> do_walk(file_descriptor, decode, on_frame, valid_bytes, carry <> chunk, accumulator)
+          {:ok, chunk} -> do_walk(file_descriptor, scan, expected, valid_bytes, carry <> chunk, accumulator)
           :eof -> {valid_bytes, accumulator, :eof}
           {:error, reason} -> {valid_bytes, accumulator, {:read_error, reason}}
         end

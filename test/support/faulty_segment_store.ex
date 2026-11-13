@@ -129,6 +129,10 @@ defmodule Malachi.Test.FaultySegmentStore do
     do: intercept(directory_of(handle), :append, fn -> ElixirStore.append(handle, records) end)
 
   @impl true
+  def append_encoded(handle, validated),
+    do: intercept(directory_of(handle), :append, fn -> ElixirStore.append_encoded(handle, validated) end)
+
+  @impl true
   def sync(handle) do
     directory = directory_of(handle)
     if ElixirStore.pending?(handle), do: bump(directory, :flushing_sync)
@@ -186,6 +190,18 @@ defmodule Malachi.Test.FaultySegmentStore do
 
   @impl true
   def logical_bytes(handle), do: ElixirStore.logical_bytes(handle)
+
+  @impl true
+  def logical_hash(handle), do: ElixirStore.logical_hash(handle)
+
+  @impl true
+  def stored_bytes(handle), do: ElixirStore.stored_bytes(handle)
+
+  @impl true
+  def format(handle), do: ElixirStore.format(handle)
+
+  @impl true
+  def adopt_format(handle, format), do: ElixirStore.adopt_format(handle, format)
 
   @impl true
   def sealed?(handle), do: ElixirStore.sealed?(handle)

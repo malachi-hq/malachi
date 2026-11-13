@@ -64,14 +64,22 @@ defmodule Malachi.Storage.FormatMarker do
   # higher level here would refuse a rollback that is still free and label old bytes as new ones. Only
   # `raise_to/3`, called when the flag flips, moves a directory above it.
   @baseline_format 1
+  # The level of a directory that holds batch segments (`Malachi.Log.BatchFrame`, #202): raised before the
+  # first byte of one is written, so a binary that would read it as damage refuses the directory instead.
+  @batch_format 2
   # The highest level this release can read.
-  @supported_format 1
+  @supported_format @batch_format
 
   # The oldest release that understands each format. The bridge release is the first that reads the
-  # marker at all, so it is the floor for format 1 as far as the marker can express one.
-  @first_release %{1 => "0.12.0"}
+  # marker at all, so it is the floor for format 1 as far as the marker can express one; format 2 is read
+  # from the release that ships the batch frame.
+  @first_release %{1 => "0.12.0", 2 => "0.24.0"}
 
   @required_keys ["format", "written_by", "requires"]
+
+  @doc "The level a directory is raised to before it holds a batch segment."
+  @spec batch_format() :: pos_integer()
+  def batch_format, do: @batch_format
 
   for format <- @baseline_format..@supported_format do
     unless Map.has_key?(@first_release, format),
@@ -277,8 +285,7 @@ defmodule Malachi.Storage.FormatMarker do
 
   Must return `:ok` BEFORE the first byte of the new format is written.
 
-  Options (for tests, since this release reads only format 1 and so has nothing to raise to):
-  `:supported` (default `supported_format/0`), `:requires` (default the recorded first release of
+  Options (for tests): `:supported` (default `supported_format/0`), `:requires` (default the recorded first release of
   `format`) and `:version` (default this release's version).
   """
   @spec raise_to(Path.t(), pos_integer(), keyword()) ::

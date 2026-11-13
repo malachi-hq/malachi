@@ -142,7 +142,7 @@ defmodule UpgradeChaosTest do
       assert output =~ "the ring has 5 vnodes"
       assert output =~ "the control plane moved to machine version 4"
       assert output =~ "the canary command applies at machine version 4"
-      assert output =~ "node 3 on OLD refused the format 2 directory with exit 78"
+      assert output =~ "node 3 on OLD refused the format 3 directory with exit 78"
       assert output =~ "node 3's data directory is byte for byte what it was (2 files)"
       assert output =~ "UPGRADE AND ROLLBACK CERTIFICATION PASSED"
 
@@ -619,9 +619,9 @@ defmodule UpgradeChaosTest do
   end
 
   describe "the refused rollback" do
-    test "fails when OLD starts on the format 2 directory", ctx do
+    test "fails when OLD starts on the format 3 directory", ctx do
       assert {output, 1} = run_drill(ctx, [{"STUB_REFUSAL", "healthy"}])
-      assert output =~ "FAIL: node 3 on OLD did not exit 78 on a format 2 directory (last state: running 0 healthy)"
+      assert output =~ "FAIL: node 3 on OLD did not exit 78 on a format 3 directory (last state: running 0 healthy)"
     end
 
     test "fails when OLD exits 78 for another reason than the format marker", ctx do
@@ -652,9 +652,9 @@ defmodule UpgradeChaosTest do
       assert output =~ "FAIL: the control plane did not move to machine version 4 after the pin was removed (at '3')"
     end
 
-    test "fails when a data directory never reaches format 2 after the flip", ctx do
+    test "fails when a data directory never reaches format 3 after the flip", ctx do
       assert {output, 1} = run_drill(ctx, [{"STUB_FORMAT", "1"}])
-      assert output =~ "FAIL: node 1's data directory did not reach format 2 after the flip (at '1')"
+      assert output =~ "FAIL: node 1's data directory did not reach format 3 after the flip (at '1')"
     end
   end
 
@@ -940,7 +940,7 @@ defmodule UpgradeChaosTest do
   #   STUB_EFFECTIVE      the effective machine version after the pin is removed (default 4); also the
   #                       version the phase 1 refusal names the canary as introduced at, so a test that
   #                       raises NEW's version in its patch sets this to the same number
-  #   STUB_FORMAT         the format the markers report after the flip (default 2)
+  #   STUB_FORMAT         the format the markers report after the flip (default 3)
   #   STUB_REFUSAL        healthy: OLD starts on the directory; flag: it exits 78 for the flag, not the marker
   #   STUB_MD5_CHANGES    1: the data directory's digest differs after the refused start
   #   STUB_CRASH          1: node 2's first log (its OLD container, replaced in phase 1) carries a crash report
@@ -1073,14 +1073,14 @@ defmodule UpgradeChaosTest do
             count=0
             [ "$3" = malachi-cluster-1 ] && count=${STUB_UNKNOWN_CASTS:-7}
             echo "malachi_unexpected_messages_total{server=\"replication\",kind=\"cast\"} $count" ;;
-          *malachi.format*) printf 'format=%s\nwritten_by=x\nrequires=x\n' "${STUB_FORMAT:-2}" ;;
+          *malachi.format*) printf 'format=%s\nwritten_by=x\nrequires=x\n' "${STUB_FORMAT:-3}" ;;
         esac ;;
       logs)
         echo "log line of $2"
         if [ "$2" = malachi-cluster-3 ]; then
           case "${STUB_REFUSAL:-}" in
             flag) echo "REFUSING TO START (exit 78): the cluster flag upgrade_canary is on" ;;
-            *) echo "REFUSING TO START (exit 78): the format marker /data/malachi_log/malachi.format records format 2, written by release x" ;;
+            *) echo "REFUSING TO START (exit 78): the format marker /data/malachi_log/malachi.format records format 3, written by release x" ;;
           esac
         fi
         if [ "${STUB_CRASH:-}" = 1 ] && [ "$2" = malachi-cluster-2 ] && [ ! -f "$STUB_LOG.crashed" ]; then

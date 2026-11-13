@@ -63,6 +63,15 @@ defmodule Malachi.Storage.SegmentStore do
               | {:error, term()}
 
   @doc """
+  Buffers one batch that was already read and checked (`t:Malachi.BatchCodec.Validated.t/0`), stamping it at
+  the next offset as it is, compressed or not. Only a segment whose format is `:batch` takes one; a record
+  segment answers `{:error, {:wrong_format, :record}}`. Same answers as `append/2`.
+  """
+  @callback append_encoded(handle(), Malachi.BatchCodec.Validated.t()) ::
+              {:ok, handle(), first :: non_neg_integer(), last :: non_neg_integer()}
+              | {:error, term()}
+
+  @doc """
   Flushes buffered records and makes them durable. After this, appended records are committed and
   readable. An implementation may skip the sync when nothing is buffered, so callers must not use
   this as a barrier for writes made through anything but `append/2`.
@@ -108,15 +117,34 @@ defmodule Malachi.Storage.SegmentStore do
   @callback next_offset(handle()) :: non_neg_integer()
 
   @doc """
-  How many bytes of committed records the segment holds, which is not necessarily how large its
-  file is.
+  What the committed records weigh in the record frame (`Malachi.Log.Record.encoded_size/1`), whatever
+  the format they are stored in: the segment's LENGTH, as every replica comparison and the sealed
+  `byte_size` count it.
 
-  An implementation may size a segment's file ahead of its contents (`Malachi.Storage.Preallocation`),
-  so an active segment's file can be far larger than the log it carries. Anything that needs the
-  segment's LENGTH must ask here; `File.stat` answers a different question and, for a segment being
-  written, answers it wrongly.
+  It is not how large the file is, for two reasons. An implementation may size a segment's file ahead of
+  its contents (`Malachi.Storage.Preallocation`), and a batch segment may store its records compressed. For
+  the bytes actually stored, ask `c:stored_bytes/1`; `File.stat` answers a third question and, for a segment
+  being written, answers it wrongly.
   """
   @callback logical_bytes(handle()) :: non_neg_integer()
+
+  @doc """
+  The CRC of the committed records' logical content, chained frame by frame (`Malachi.Log.Frames`): two
+  copies of a segment in the same format that hold the same records answer the same hash.
+  """
+  @callback logical_hash(handle()) :: non_neg_integer()
+
+  @doc "How many bytes of committed frames the segment's file holds: what retention counts against the disk."
+  @callback stored_bytes(handle()) :: non_neg_integer()
+
+  @doc """
+  How the segment's records are framed on disk (`t:Malachi.Log.Frames.format/0`), or `nil` while that is not
+  decided: a segment with no frame, recovered without a format.
+  """
+  @callback format(handle()) :: Malachi.Log.Frames.format() | nil
+
+  @doc "The handle with `format` as its format when it has none yet, and unchanged otherwise."
+  @callback adopt_format(handle(), Malachi.Log.Frames.format()) :: handle()
 
   @doc "Whether the segment is sealed (immutable)."
   @callback sealed?(handle()) :: boolean()

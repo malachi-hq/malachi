@@ -485,6 +485,10 @@ defmodule Malachi.BrokerServer do
       |> maybe_put(:spread_by, spread_by)
       |> maybe_put(:min_domains, min_domains)
       |> maybe_put(:placement_policy, placement_policy)
+      |> Keyword.put(
+        :segment_format,
+        Keyword.get(opts, :segment_format, Application.get_env(:malachi, :segment_format, :record))
+      )
       |> with_metadata_authority(
         metadata_cluster,
         metadata_nodes,
@@ -1972,7 +1976,8 @@ defmodule Malachi.BrokerServer do
         d.base_offset,
         d.records,
         self(),
-        {ref, tag}
+        {ref, tag},
+        d.format
       )
 
       parts = if behind_fence?, do: Map.put(parts, tag, d.records), else: parts
@@ -2061,7 +2066,7 @@ defmodule Malachi.BrokerServer do
       # out and crashing its connection; the client sees an `:overloaded` error and backs off.
       {:reply, {:error, :overloaded}, state}
     else
-      case Broker.produce(state.broker, topic, records, &ReplicationServer.append/5) do
+      case Broker.produce(state.broker, topic, records, &ReplicationServer.append/6) do
         {broker, {:ok, _placements} = reply} ->
           waiter = %{from: from, reply: reply, topic: topic}
           pending_records = state.pending_records + length(records)

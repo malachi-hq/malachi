@@ -41,11 +41,13 @@ defmodule Malachi.Log do
   handle (no GenServer). Time-based flushing and concurrency belong in a layer on top.
   """
 
+  alias Malachi.Log.Frames
+  alias Malachi.Log.Manifest
+  alias Malachi.Log.SegmentFiles
   alias Malachi.Storage.Directory
   alias Malachi.Storage.ElixirStore
 
   @default_store ElixirStore
-  @segment_id_width 20
 
   @type t :: %__MODULE__{
           directory: Path.t(),
@@ -244,6 +246,29 @@ defmodule Malachi.Log do
     end
   end
 
+  @doc """
+  How the log's records are framed on disk (`t:Malachi.Log.Frames.format/0`), or `nil` while that is not
+  decided: a log that holds no segment file yet and was opened without a format (by a read or a probe that
+  reaches a segment before its first write). The first write decides it (`with_format/2`). A log recovered
+  from files takes the format they hold.
+  """
+  @spec format(t()) :: Frames.format() | nil
+  def format(%__MODULE__{segment_opts: segment_opts}), do: Keyword.get(segment_opts, :format)
+
+  @doc """
+  The log with `format` as the format of the segments it creates, when it has none yet. A log that already
+  holds a format keeps it, and the caller compares (`format/1`): formats never mix inside a log.
+  """
+  @spec with_format(t(), Frames.format()) :: t()
+  def with_format(%__MODULE__{} = log, format) do
+    if format(log) == nil do
+      active = if log.active, do: log.store.adopt_format(log.active, format), else: nil
+      %{log | active: active, segment_opts: Keyword.put(log.segment_opts, :format, format)}
+    else
+      log
+    end
+  end
+
   @doc "Whether the log as a whole is sealed (no further append will ever be accepted for it)."
   @spec sealed?(t()) :: boolean()
   def sealed?(%__MODULE__{sealed?: sealed?}), do: sealed?
@@ -313,53 +338,181 @@ defmodule Malachi.Log do
   end
 
   @doc """
-  How many bytes this log holds on disk, counting committed records and not preallocated space.
+  What this log's committed records weigh in the record frame, whatever format they are stored in: its
+  logical length (`c:Malachi.Storage.SegmentStore.logical_bytes/1`). `0` when it cannot be measured.
 
-  Sealed segment files are measured with `File.stat/1`, because a sealed file is exactly its
-  contents. The ACTIVE segment is asked instead (`c:Malachi.Storage.SegmentStore.logical_bytes/1`),
-  because a store may size its file ahead of what it has written, and stat would then report the
-  room rather than the log.
-
-  This is the number anything downstream wants: it is what gets recorded as a segment's
-  `byte_size` when it is sealed, and from there it drives size-based retention and the lost-copy
-  probe that compares replicas byte for byte.
+  This is the number anything that compares replicas wants: it is what gets recorded as a segment's
+  `byte_size` when it is sealed, and from there it drives the lost-copy probe that compares replicas. Two
+  copies that hold the same records answer the same number, however each stores them.
   """
-  @spec bytes_on_disk(t()) :: non_neg_integer()
-  def bytes_on_disk(%__MODULE__{} = log) do
-    case listed_bytes(log) do
+  @spec logical_bytes(t()) :: non_neg_integer()
+  def logical_bytes(%__MODULE__{} = log) do
+    case listed_logical_bytes(log) do
       {:ok, bytes} -> bytes
       {:error, _reason} -> 0
     end
   end
 
   @doc """
-  `bytes_on_disk/1`, but a directory that cannot be listed, or a file that cannot be stat'ed, is an error rather than
-  zero bytes. A directory that does not exist holds no sealed files, so only the active segment counts.
+  `logical_bytes/1`, but a directory that cannot be listed, or a file that cannot be measured, is an error
+  rather than zero bytes. A directory that does not exist holds no sealed files, so only the active segment
+  counts.
+
+  The ACTIVE segment is asked (its store keeps the count as it writes). Every other file answers from its
+  manifest while the manifest still describes it (`Malachi.Log.Manifest.trusted/2`), and from a scan
+  otherwise, so a file cut short after it sealed is measured as what it holds now.
   """
-  @spec listed_bytes(t()) :: {:ok, non_neg_integer()} | {:error, term()}
-  def listed_bytes(%__MODULE__{} = log) do
-    active_path = if log.active_base_offset, do: segment_path(log, log.active_base_offset)
+  @spec listed_logical_bytes(t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def listed_logical_bytes(%__MODULE__{} = log) do
     active_bytes = if log.active, do: log.store.logical_bytes(log.active), else: 0
+    sum_files(log.directory, log.active_base_offset, active_bytes, &file_logical_bytes(log.directory, &1, log))
+  end
 
-    case File.ls(log.directory) do
-      {:error, :enoent} ->
-        {:ok, active_bytes}
+  @doc """
+  `listed_logical_bytes/1` for a log nobody has open: every file in `directory` answers from its manifest
+  or a scan. `opts` are the log's options (`:store` and the segment options).
+  """
+  @spec directory_logical_bytes(Path.t(), keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def directory_logical_bytes(directory, opts \\ []) do
+    log = %__MODULE__{
+      directory: directory,
+      store: Keyword.get(opts, :store, @default_store),
+      segment_opts: Keyword.drop(opts, [:store, :base_offset])
+    }
 
+    sum_files(directory, nil, 0, &file_logical_bytes(directory, &1, log))
+  end
+
+  @doc """
+  How many bytes this log's committed frames take on disk: what retention counts against the disk, and
+  what `seal_segment` records as `stored_bytes`. Sealed files are measured with `File.stat/1`; the ACTIVE
+  segment is asked, because a store may size its file ahead of what it has written
+  (`Malachi.Storage.Preallocation`) and stat would then report the room rather than the log.
+  """
+  @spec stored_bytes(t()) :: non_neg_integer()
+  def stored_bytes(%__MODULE__{} = log) do
+    active_bytes = if log.active, do: log.store.stored_bytes(log.active), else: 0
+
+    case sum_files(log.directory, log.active_base_offset, active_bytes, &file_size(log.directory, &1)) do
+      {:ok, bytes} -> bytes
+      {:error, _reason} -> 0
+    end
+  end
+
+  @doc "`stored_bytes/1` for a log nobody has open: the size of every segment file in `directory`."
+  @spec directory_stored_bytes(Path.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def directory_stored_bytes(directory), do: sum_files(directory, nil, 0, &file_size(directory, &1))
+
+  @doc """
+  The format of the segment files in `directory`, from the magic of the first one that has a frame, or `nil`
+  when none does (no file, or files that hold nothing yet). Formats never mix inside a log.
+  """
+  @spec directory_format(Path.t()) :: Frames.format() | nil
+  def directory_format(directory) do
+    case SegmentFiles.log_paths(directory) do
+      {:ok, paths} ->
+        Enum.find_value(paths, fn path ->
+          case head_of(path) do
+            {:ok, head} -> Frames.detect(head)
+            {:error, _reason} -> nil
+          end
+        end)
+
+      {:error, _reason} ->
+        nil
+    end
+  end
+
+  defp sum_files(directory, skip_base_offset, initial, measure) do
+    case SegmentFiles.list(directory) do
       {:error, reason} ->
         {:error, reason}
 
-      {:ok, names} ->
-        names
-        |> Enum.filter(&(String.ends_with?(&1, ".log") and not String.starts_with?(&1, ".")))
-        |> Enum.map(&Path.join(log.directory, &1))
-        |> Enum.reject(&(&1 == active_path))
-        |> Enum.reduce_while({:ok, active_bytes}, fn path, {:ok, sum} ->
-          case File.stat(path) do
-            {:ok, %{size: size}} -> {:cont, {:ok, sum + size}}
-            {:error, :enoent} -> {:cont, {:ok, sum}}
+      {:ok, base_offsets} ->
+        base_offsets
+        |> Enum.reject(&(&1 == skip_base_offset))
+        |> Enum.reduce_while({:ok, initial}, fn base_offset, {:ok, sum} ->
+          case measure.(base_offset) do
+            {:ok, bytes} -> {:cont, {:ok, sum + bytes}}
             {:error, reason} -> {:halt, {:error, reason}}
           end
         end)
+    end
+  end
+
+  defp file_size(directory, base_offset) do
+    case File.stat(SegmentFiles.log_path(directory, base_offset)) do
+      {:ok, %{size: size}} -> {:ok, size}
+      # removed between the listing and the stat (retention, a truncation): it holds nothing now
+      {:error, :enoent} -> {:ok, 0}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp file_logical_bytes(directory, base_offset, %__MODULE__{} = log) do
+    id = segment_id_for(base_offset)
+    log_path = SegmentFiles.path(directory, id, :log)
+
+    case Manifest.trusted(SegmentFiles.path(directory, id, :manifest), log_path) do
+      {:ok, manifest} -> {:ok, manifest.logical_bytes}
+      :untrusted -> scanned_logical_bytes(directory, base_offset, log, log_path)
+    end
+  end
+
+  # A record file weighs what it holds, frame for frame, so its size is its logical length, as it has always
+  # been measured. A batch file is scanned; one the scan reports damaged counts for nothing, so the copy reads
+  # as short and is repaired rather than vouched for.
+  defp scanned_logical_bytes(directory, base_offset, log, log_path) do
+    with {:ok, head} <- head_of(log_path) do
+      case Frames.detect(head) do
+        :batch ->
+          opts = [base_offset: base_offset] ++ Keyword.delete(log.segment_opts, :format)
+
+          case log.store.verify(directory, segment_id_for(base_offset), opts) do
+            {:ok, %{logical_bytes: bytes} = counts} ->
+              _ = cache_manifest(directory, base_offset, log_path, counts)
+              {:ok, bytes}
+
+            {:error, :enoent} ->
+              {:ok, 0}
+
+            {:error, _damage} ->
+              {:ok, 0}
+          end
+
+        _record_or_unknown ->
+          file_size(directory, base_offset)
+      end
+    end
+  end
+
+  # A clean scan's numbers, kept as the file's manifest so the next question about it is a stat instead of a
+  # scan: a follower's copy is never sealed by its own store, so without this every probe of it after a restart
+  # would scan the whole file again, inside the replication server's loop. Only for a file that ends exactly
+  # where its frames do (a preallocated tail would never match `stored_bytes`), and without an fsync: it is
+  # derived, believed only while the file keeps that size (`Malachi.Log.Manifest.trusted/2`), and rewritten by
+  # the next scan when it is lost. A failure to write it costs only the next scan.
+  defp cache_manifest(directory, base_offset, log_path, counts) do
+    with {:ok, %{size: size}} when size == counts.bytes <- File.stat(log_path) do
+      manifest = %Manifest{
+        format: counts.format,
+        record_count: counts.records,
+        logical_bytes: counts.logical_bytes,
+        logical_hash: counts.logical_hash,
+        stored_bytes: counts.bytes
+      }
+
+      File.write(SegmentFiles.path(directory, segment_id_for(base_offset), :manifest), Manifest.encode(manifest))
+    end
+  end
+
+  defp head_of(path) do
+    case File.open(path, [:read, :binary], &IO.binread(&1, 2)) do
+      {:ok, :eof} -> {:ok, <<>>}
+      {:ok, bytes} when is_binary(bytes) -> {:ok, bytes}
+      {:ok, {:error, reason}} -> {:error, reason}
+      {:error, :enoent} -> {:ok, <<>>}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -399,7 +552,13 @@ defmodule Malachi.Log do
     * `:store` - `SegmentStore` implementation (default `Malachi.Storage.ElixirStore`)
   """
   @spec verify(Path.t(), keyword()) ::
-          {:ok, %{records: non_neg_integer(), bytes: non_neg_integer(), files: non_neg_integer()}}
+          {:ok,
+           %{
+             records: non_neg_integer(),
+             bytes: non_neg_integer(),
+             logical_bytes: non_neg_integer(),
+             files: non_neg_integer()
+           }}
           | {:error, map() | :enoent}
   def verify(directory, opts \\ []) do
     store = Keyword.get(opts, :store, @default_store)
@@ -410,12 +569,20 @@ defmodule Malachi.Log do
         {:error, :enoent}
 
       base_offsets ->
-        Enum.reduce_while(base_offsets, {:ok, %{records: 0, bytes: 0, files: 0}}, fn base_offset, {:ok, totals} ->
+        initial = {:ok, %{records: 0, bytes: 0, logical_bytes: 0, files: 0}}
+
+        Enum.reduce_while(base_offsets, initial, fn base_offset, {:ok, totals} ->
           case store.verify(directory, segment_id_for(base_offset), [base_offset: base_offset] ++ segment_opts) do
-            {:ok, %{records: records, bytes: bytes}} ->
+            {:ok, %{records: records, bytes: bytes, logical_bytes: logical}} ->
               {:cont,
                {:ok,
-                %{totals | records: totals.records + records, bytes: totals.bytes + bytes, files: totals.files + 1}}}
+                %{
+                  totals
+                  | records: totals.records + records,
+                    bytes: totals.bytes + bytes,
+                    logical_bytes: totals.logical_bytes + logical,
+                    files: totals.files + 1
+                }}}
 
             {:error, _details} = error ->
               {:halt, error}
@@ -487,12 +654,12 @@ defmodule Malachi.Log do
       # loaded by the next reader of a file that no longer matches it.
       #
       # The data file goes LAST, and that order is the only thing that makes a failure here recoverable.
-      # `base_offsets_in/1` finds a segment through its `.log` and nothing else, so removing that first
-      # and then failing on a sidecar takes the segment out of every later pass's view while its
+      # `Malachi.Log.SegmentFiles.list/1` finds a segment through its `.log` and nothing else, so removing that
+      # first and then failing on a sidecar takes the segment out of every later pass's view while its
       # leftovers stay on disk. While the `.log` is still there, a retried truncation finds the segment
-      # again and finishes the job.
-      [".sealed", ".idx", ".log"]
-      |> Enum.map(&Path.join(log.directory, id <> &1))
+      # again and finishes the job. `SegmentFiles.removal_order/0` is that order.
+      SegmentFiles.removal_order()
+      |> Enum.map(&SegmentFiles.path(log.directory, id, &1))
       |> Enum.find_value(&removal_error/1)
       |> case do
         nil -> {:cont, :ok}
@@ -532,28 +699,15 @@ defmodule Malachi.Log do
   end
 
   @doc """
-  The base offsets of the segment files in `directory`, sorted. A directory that does not exist (or whose
-  parent is a file) holds no segments, so `{:ok, []}`; one that cannot be listed is an error, never an empty
-  list. Lists with `File.ls/1` rather than a wildcard, which answers `[]` for a directory it cannot read.
-  The names match `Path.wildcard/1`'s `*.log`, which skips dotfiles.
+  The base offsets of the segment files in `directory`, sorted, as `Malachi.Log.SegmentFiles.list/1` finds them.
+  A directory that does not exist (or whose parent is a file) holds no segments, so `{:ok, []}`; one that cannot be
+  listed is an error, never an empty list.
   """
   @spec segment_offsets(Path.t()) :: {:ok, [non_neg_integer()]} | {:error, {:segments_unreadable, term()}}
   def segment_offsets(directory) do
-    case File.ls(directory) do
-      {:ok, names} ->
-        offsets =
-          names
-          |> Enum.filter(&(String.ends_with?(&1, ".log") and not String.starts_with?(&1, ".")))
-          |> Enum.map(&base_offset_from_path/1)
-          |> Enum.sort()
-
-        {:ok, offsets}
-
-      {:error, reason} when reason in [:enoent, :enotdir] ->
-        {:ok, []}
-
-      {:error, reason} ->
-        {:error, {:segments_unreadable, reason}}
+    case SegmentFiles.list(directory) do
+      {:ok, offsets} -> {:ok, offsets}
+      {:error, reason} -> {:error, {:segments_unreadable, reason}}
     end
   end
 
@@ -579,10 +733,18 @@ defmodule Malachi.Log do
     last_base_offset = List.last(base_offsets)
     next_offset = store.next_offset(handle)
 
+    # The files say which format the log holds, and a segment it rolls to next takes the same one: formats
+    # never mix inside a log, which is one control-plane segment.
+    # The last file's own frames say which format the log holds; a last file with none yet (a crash left it
+    # empty or blank) takes the format of the files before it, and a log with no frame anywhere stays
+    # undecided until its first write (`with_format/2`).
+    format = store.format(handle) || directory_format(directory) || Keyword.get(segment_opts, :format)
+    handle = if format, do: store.adopt_format(handle, format), else: handle
+
     log = %__MODULE__{
       directory: directory,
       store: store,
-      segment_opts: segment_opts,
+      segment_opts: Keyword.put(segment_opts, :format, format),
       next_offset: next_offset,
       sealed?: sealed?,
       integrity: store.integrity(handle)
@@ -672,13 +834,5 @@ defmodule Malachi.Log do
     end
   end
 
-  defp segment_path(log, base_offset) do
-    Path.join(log.directory, segment_id_for(base_offset) <> ".log")
-  end
-
-  defp segment_id_for(base_offset) do
-    base_offset |> Integer.to_string() |> String.pad_leading(@segment_id_width, "0")
-  end
-
-  defp base_offset_from_path(path), do: path |> Path.basename(".log") |> String.to_integer()
+  defp segment_id_for(base_offset), do: SegmentFiles.id(base_offset)
 end

@@ -69,8 +69,33 @@ flowchart LR
   A -->|"a new one rolls"| A2["new active segment"]
 ```
 
-Every record frame carries a CRC32 of its payload, which the store checks whenever it decodes a
-record. That is only a *passive* guarantee: a sealed segment is immutable and nothing re-reads it, so
+A segment frames its records in one of two formats, decided once when the control plane registers it and
+never mixed inside it (`Malachi.Log.Frames`):
+
+- **record**: one frame per record, each with a CRC32 of its payload (`Malachi.Log.Record`);
+- **batch**: one frame per batch, with one CRC32 over the batch (`Malachi.Log.BatchFrame`). The payload is
+  the same entries a producer sends on the wire (`Malachi.BatchCodec`), uncompressed or zstd, so a batch can
+  be stored, replicated and served as it came. The base offset sits outside the CRC so the primary stamps it
+  without computing the checksum again, and every scan checks that each batch starts where the previous one
+  ended, which is what catches a flipped bit there.
+
+The format travels with every write: the frontend that registers a segment records its format in the control
+plane, passes it to the primary, and the primary's push carries it to the followers, so every replica writes
+the frames the control plane named. A reader takes the format from the magic of a file's first frame.
+
+What replicas are compared by is the **logical** size: what the records weigh in the record frame, whatever
+format stores them. Two copies that hold the same records answer the same number however each stores them,
+which is what lets a compressed copy be checked against the size recorded at seal time. The bytes a segment
+takes on disk are recorded beside it at seal time for a batch segment, and that stored size is what a
+retention size limit counts, since the limit exists to bound the disk. When a segment seals, its store writes
+a manifest beside it (`Malachi.Log.Manifest`): record count, logical size, logical hash and stored size, so a
+sealed file answers its logical numbers without a scan. A copy whose own store never sealed it (a follower's,
+since a roll fences the primary) is scanned the first time it is measured, and the scan's numbers are kept as
+its manifest, so the next measure is a stat again. The manifest is believed only while the file still
+has the size it describes; the scrub always rescans and rewrites a manifest that disagrees with its file.
+
+Every frame carries a CRC32, which the store checks whenever it decodes a frame. That is only a *passive*
+guarantee: a sealed segment is immutable and nothing re-reads it, so
 corruption at rest stays invisible until a consumer happens to need that exact record, and then it does
 not surface as an error but as a short read (the read bound comes from the control plane's record count,
 so the damaged copy simply stops producing records). `Malachi.Cluster.Scrubber` closes that: on every
