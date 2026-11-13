@@ -107,6 +107,14 @@ defmodule Malachi.Console.TopicsViewTest do
              TopicsView.render_segment(sealed, all_healthy(["a@h", "b@h"]))
   end
 
+  test "with no way to know which nodes are alive, no segment is called under replicated, nor healthy for it" do
+    [sealed, _active] = TopicsView.segments(metadata(), "orders", :unknown, 3)
+    assert sealed.under_replicated == nil
+
+    assert %{"under_replicated" => nil, "health" => %{"label" => "sealed", "severity" => "ok"}} =
+             TopicsView.render_segment(sealed, all_healthy(["a@h", "b@h"]))
+  end
+
   test "a single node's replicas are pids, named by the node, and count as live" do
     {state, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "solo", 4})
     state = apply!(state, {:register_segment, root, {root, 0}, [self()], 0})

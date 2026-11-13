@@ -205,4 +205,23 @@ defmodule Malachi.Console.ReadsTest do
     SamplerHelper.seed!(:membership, view)
     assert Enum.sort(Fanout.alive_nodes()) == Enum.sort([node(), :sampled@h])
   end
+
+  test "a membership that could not be read leaves this node alone, and the fan-out says it is partial" do
+    Sampler.clear()
+    Application.put_env(:malachi, :console_sample_ms, 60_000)
+
+    on_exit(fn ->
+      Application.delete_env(:malachi, :console_sample_ms)
+      Sampler.clear()
+    end)
+
+    # a first read that fails leaves no sample, and none is tried again within the interval
+    assert Sampler.fetch(:membership, fn -> {:error, :down} end, interval_ms: 0) == {:error, :unavailable}
+
+    assert Fanout.nodes_to_ask() == {[node()], true}
+    result = Fanout.call(:node_info, [])
+    assert result.membership_unavailable
+    assert Fanout.partial?(result)
+    assert Fanout.members(result)["membership"] == "unavailable"
+  end
 end

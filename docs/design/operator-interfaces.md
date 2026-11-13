@@ -1211,7 +1211,8 @@ Two more members recur, and the client renders both (#230):
 - **A read that each node holds for itself is gathered from every alive node** (`Malachi.Console.Fanout`),
   the way NorthGuard's metadata layer gives "a unified view" of what is beneath it. A node that did not
   answer is named in `unanswered_nodes` and one whose release lacks the read (a rolling upgrade) in
-  `unsupported_nodes`; either makes a total `gte` and a walk `complete: false`.
+  `unsupported_nodes`; either makes a total `gte` and a walk `complete: false`. So does a membership view
+  that could not be read (`"membership": "unavailable"`), since the nodes it would have named were not asked.
 - **A read of a process that serves clients is sampled** (`Malachi.Console.Sampler`): the broker's
   metadata, the membership's gossip loop, the ring and lease leaders, the scrubber, the replication
   server's failure latch, the group coordinators and the lockout store are read at most once per

@@ -26,7 +26,9 @@ defmodule Malachi.Console.FanoutTest do
     assert Fanout.call(:thing, [:x], nodes: [:b@h, :a@h], rpc: rpc(behaviours)) == %{
              answers: [{:a@h, {:a@h, :thing, [:x], 1}}, {:b@h, {:b@h, :thing, [:x], 2}}],
              unanswered: [],
-             unsupported: []
+             unsupported: [],
+             asked: [:a@h, :b@h],
+             membership_unavailable: false
            }
   end
 
@@ -57,8 +59,17 @@ defmodule Malachi.Console.FanoutTest do
     behaviours = %{a@h: {:value, 1}}
     assert %{answers: [{:a@h, _}]} = Fanout.call(:thing, [], nodes: [:a@h, :a@h], rpc: rpc(behaviours))
     result = Fanout.call(:thing, [], nodes: [], rpc: rpc(%{}))
-    assert result == %{answers: [], unanswered: [], unsupported: []}
+    assert result == %{answers: [], unanswered: [], unsupported: [], asked: [], membership_unavailable: false}
     refute Fanout.partial?(result)
+  end
+
+  test "a result whose membership could not be read is partial and says so, though every node asked answered" do
+    result = %{answers: [{:a@h, 1}], unanswered: [], unsupported: [], asked: [:a@h], membership_unavailable: true}
+    assert Fanout.partial?(result)
+    assert Fanout.members(result)["membership"] == "unavailable"
+
+    refute Fanout.partial?(%{result | membership_unavailable: false})
+    refute Map.has_key?(Fanout.members(%{result | membership_unavailable: false}), "membership")
   end
 
   test "by default this node is asked through :erpc, and answers" do

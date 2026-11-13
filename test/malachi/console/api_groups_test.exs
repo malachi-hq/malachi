@@ -108,6 +108,26 @@ defmodule Malachi.Console.ApiGroupsTest do
     end
   end
 
+  describe "when the membership cannot be read" do
+    setup do
+      Application.put_env(:malachi, :console_sample_ms, 60_000)
+      on_exit(fn -> Application.delete_env(:malachi, :console_sample_ms) end)
+      Sampler.clear()
+      # a first read that failed: no sample, and none is tried again within the interval
+      {:error, :unavailable} = Sampler.fetch(:membership, fn -> {:error, :down} end, interval_ms: 0)
+      :ok
+    end
+
+    test "the listing is a lower bound and a missing group is unavailable, not missing",
+         %{topic: topic, token: token} do
+      assert %{status: 200, json: body} = get("/api/v1/groups?topic=#{topic}", token)
+      assert %{"total" => %{"relation" => "gte"}, "complete" => false, "membership" => "unavailable"} = body
+
+      assert %{status: 503, json: %{"type" => "errors.http.unavailable", "membership" => "unavailable"}} =
+               get("/api/v1/groups/nope?topic=#{topic}", token)
+    end
+  end
+
   test "the group routes take a viewer", %{topic: topic} do
     wire_only = AccessHelper.account!("groups_wire_only", [:consume], nil)
 

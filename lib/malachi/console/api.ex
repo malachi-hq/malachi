@@ -309,10 +309,10 @@ defmodule Malachi.Console.Api do
 
   defp serve(conn, ["topics", topic, "segments"], _subject) do
     with_topic(conn, topic, segments_listing(), fn metadata, name ->
-      # one list of nodes for both the replica count and the copies asked
-      opts = Keyword.put_new_lazy(fanout_opts(), :nodes, &Fanout.alive_nodes/0)
-      segments = TopicsView.segments(metadata, name, opts[:nodes], replication_factor())
-      fanout = Fanout.call(:copy_health, [], opts)
+      # one list of nodes for both the copies asked and the replica count
+      fanout = Fanout.call(:copy_health, [], fanout_opts())
+      alive = if fanout.membership_unavailable, do: :unknown, else: fanout.asked
+      segments = TopicsView.segments(metadata, name, alive, replication_factor())
       health = TopicsView.health(fanout)
 
       {:ok,

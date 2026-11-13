@@ -20,7 +20,8 @@ defmodule Malachi.Console.TopicsView do
   Each node answers for its own copies (`Malachi.Console.Reads.copy_health/0`, through
   `Malachi.Console.Fanout`). The segment as a whole is `under_replicated` when fewer of its replicas are on
   alive nodes than the replication factor asks, clamped to the alive nodes there are
-  (`Malachi.Cluster.Placement.under_replicated/3`).
+  (`Malachi.Cluster.Placement.under_replicated/3`), and `null` when the membership that says which nodes are
+  alive could not be read.
 
   `health` resolves those to a label and a severity: `error` when a copy failed or is damaged or the
   segment is under replicated, `warning` when a copy is unknown, `ok` otherwise. The label joins the
@@ -93,7 +94,7 @@ defmodule Malachi.Console.TopicsView do
   The segments of topic `name`, in `{range, segment}` order, each with the facts needed to render it. The
   copy health comes later, at render time, so only one page's copies are resolved.
   """
-  @spec segments(Metadata.t(), String.t(), [node()], pos_integer()) :: [map()]
+  @spec segments(Metadata.t(), String.t(), [node()] | :unknown, pos_integer()) :: [map()]
   def segments(%Metadata{} = metadata, name, alive_nodes, replication_factor) do
     ranges = Metadata.ranges_of_topic(metadata, name)
     segments = Enum.flat_map(ranges, &Metadata.segments_of_range(metadata, &1.id))
@@ -114,7 +115,7 @@ defmodule Malachi.Console.TopicsView do
         opened_at: Map.get(segment, :opened_at),
         sealed_at: Map.get(segment, :sealed_at),
         replicas: Enum.map(segment.replica_set, &Metadata.broker_ref_string/1),
-        under_replicated: Map.has_key?(under, segment.id)
+        under_replicated: if(under == :unknown, do: nil, else: Map.has_key?(under, segment.id))
       }
     end)
     |> Enum.sort_by(&{&1.range, &1.segment})
@@ -124,6 +125,9 @@ defmodule Malachi.Console.TopicsView do
   # topic's replicas use for that node (a single node's replicas are pids), or the replication server as a
   # cluster names it when none of them is there. So the target is clamped by the nodes there are, not by the
   # ones this topic happens to use, and a node is never counted twice.
+  # Which nodes are alive is not known when the membership could not be read: counting this node alone would
+  # call nearly every segment under replicated, so none is called either way.
+  defp under_replicated(_metadata, _segments, :unknown, _replication_factor), do: :unknown
   defp under_replicated(_metadata, [], _alive_nodes, _replication_factor), do: %{}
 
   defp under_replicated(metadata, segments, alive_nodes, replication_factor) do
@@ -200,11 +204,11 @@ defmodule Malachi.Console.TopicsView do
 
   defp resolve(conditions, under_replicated?) do
     present = Enum.filter(@order, &(&1 in conditions))
-    labels = if under_replicated?, do: present ++ ["under_replicated"], else: present
+    labels = if under_replicated? == true, do: present ++ ["under_replicated"], else: present
 
     severity =
       cond do
-        under_replicated? or "failed" in present or "damaged" in present -> "error"
+        under_replicated? == true or "failed" in present or "damaged" in present -> "error"
         "unknown" in present -> "warning"
         true -> "ok"
       end

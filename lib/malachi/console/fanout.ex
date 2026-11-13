@@ -34,8 +34,17 @@ defmodule Malachi.Console.Fanout do
   # node whose read is slow answers with its last sample instead of being counted as unanswered.
   @default_timeout_ms 2_500
 
-  @typedoc "What every node said."
-  @type result :: %{answers: [{node(), term()}], unanswered: [node()], unsupported: [node()]}
+  @typedoc """
+  What every node said, the nodes asked, and whether the membership that names them could not be read
+  (which makes the result partial however many of the nodes asked answered).
+  """
+  @type result :: %{
+          answers: [{node(), term()}],
+          unanswered: [node()],
+          unsupported: [node()],
+          asked: [node()],
+          membership_unavailable: boolean()
+        }
 
   @typedoc "How one node is called: `rpc.(node, module, function, args, timeout_ms)`, as `:erpc.call/5`."
   @type rpc :: (node(), module(), atom(), [term()], pos_integer() -> term())
@@ -47,11 +56,19 @@ defmodule Malachi.Console.Fanout do
     * `:timeout_ms`, the bound on each call, #{@default_timeout_ms} by default;
     * `:rpc`, how a node is called, `:erpc.call/5` by default (a test replaces it).
 
-  The answers come back in node name order, and so do the two lists.
+  The answers come back in node name order, and so do the two lists. When no `:nodes` are given and this
+  node's membership view could not be read, only this node is asked and the result says so
+  (`membership_unavailable`): the other nodes were not asked, so `partial?/1` is true.
   """
   @spec call(atom(), [term()], keyword()) :: result()
   def call(function, args, opts \\ []) when is_atom(function) and is_list(args) do
-    nodes = opts |> Keyword.get_lazy(:nodes, &alive_nodes/0) |> Enum.uniq() |> Enum.sort()
+    {nodes, membership_unavailable} =
+      case Keyword.fetch(opts, :nodes) do
+        {:ok, nodes} -> {nodes, false}
+        :error -> nodes_to_ask()
+      end
+
+    nodes = nodes |> Enum.uniq() |> Enum.sort()
     timeout = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
     rpc = Keyword.get(opts, :rpc, &:erpc.call/5)
 
@@ -63,6 +80,7 @@ defmodule Malachi.Console.Fanout do
       {node, :unanswered}, acc -> %{acc | unanswered: [node | acc.unanswered]}
     end)
     |> Map.new(fn {bucket, list} -> {bucket, Enum.reverse(list)} end)
+    |> Map.merge(%{asked: nodes, membership_unavailable: membership_unavailable})
   end
 
   defp ask(rpc, node, function, args, timeout) do
@@ -86,33 +104,57 @@ defmodule Malachi.Console.Fanout do
 
   @doc "The nodes a fan-out asks by default: the alive members of the membership view, or this node alone."
   @spec alive_nodes() :: [node()]
-  def alive_nodes do
+  def alive_nodes, do: nodes_to_ask() |> elem(0)
+
+  @doc """
+  The nodes a fan-out asks by default, and whether the membership view that names them could not be read.
+  A node that runs no membership is alone, which is complete; a view that could not be read leaves this
+  node alone too, but says so, since the other nodes exist and were not asked.
+  """
+  @spec nodes_to_ask() :: {[node()], boolean()}
+  def nodes_to_ask do
     case Samples.membership() do
       {:ok, %{value: view}} ->
-        view
-        |> Membership.alive_members()
-        |> Enum.map(fn {_name, node} -> node end)
-        # the node answering is always asked, whatever its own view says of itself
-        |> then(&Enum.uniq([node() | &1]))
+        nodes =
+          view
+          |> Membership.alive_members()
+          |> Enum.map(fn {_name, node} -> node end)
+          # the node answering is always asked, whatever its own view says of itself
+          |> then(&Enum.uniq([node() | &1]))
 
-      _none_or_unavailable ->
-        [node()]
+        {nodes, false}
+
+      :none ->
+        {[node()], false}
+
+      {:error, :unavailable} ->
+        {[node()], true}
     end
   end
 
   @doc """
   The members a route adds when its data came from a fan-out: the nodes that did not answer and those that
-  do not support the read, by name.
+  do not support the read, by name, and `"membership": "unavailable"` when the membership naming the nodes
+  could not be read.
   """
   @spec members(result()) :: map()
-  def members(%{unanswered: unanswered, unsupported: unsupported}) do
-    %{
+  def members(%{unanswered: unanswered, unsupported: unsupported} = result) do
+    members = %{
       "unanswered_nodes" => Enum.map(unanswered, &Atom.to_string/1),
       "unsupported_nodes" => Enum.map(unsupported, &Atom.to_string/1)
     }
+
+    if membership_unavailable?(result), do: Map.put(members, "membership", "unavailable"), else: members
   end
 
-  @doc "Whether some node did not contribute its data, which makes a total a lower bound."
+  @doc """
+  Whether some node did not contribute its data, or the nodes to ask could not be known, which makes a
+  total a lower bound.
+  """
   @spec partial?(result()) :: boolean()
-  def partial?(%{unanswered: unanswered, unsupported: unsupported}), do: unanswered != [] or unsupported != []
+  def partial?(%{unanswered: unanswered, unsupported: unsupported} = result),
+    do: unanswered != [] or unsupported != [] or membership_unavailable?(result)
+
+  # A result built by hand (a test, a view) may not carry the flag; it then names the nodes it asked.
+  defp membership_unavailable?(result), do: Map.get(result, :membership_unavailable, false)
 end
