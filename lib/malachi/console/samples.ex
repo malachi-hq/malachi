@@ -113,14 +113,36 @@ defmodule Malachi.Console.Samples do
   The segments whose copy on this node failed in storage and will never be written again
   (`Malachi.Cluster.ReplicationServer.failed_segments/3`, a lookup in the failure latch with no disk
   access), asked of each replication server of this node about the segments it holds by the metadata.
+
+  The list is only as current as the metadata it asked about: a segment registered after that metadata was
+  never asked about, and a copy of it that failed would be missing from the list. So the list is taken
+  again whenever the metadata sample is newer than the one it was built from, and it is `stale` whenever
+  the metadata is, which the console shows as a copy whose state is unknown rather than as a healthy one.
   """
   @spec failed() :: result()
   def failed do
     case metadata() do
-      {:ok, %{value: %Metadata{} = metadata}} -> Sampler.fetch(:failed, fn -> read_failed(metadata) end, @sample_opts)
-      other -> other
+      {:ok, %{value: %Metadata{} = metadata, sampled_at: basis, stale: metadata_stale}} ->
+        read = fn ->
+          with {:ok, failed} <- read_failed(metadata), do: {:ok, {failed, basis}}
+        end
+
+        with {:ok, %{value: {_failed, built_from}}} when built_from != basis <-
+               Sampler.fetch(:failed, read, @sample_opts) do
+          # built from older metadata: take it again from this one
+          Sampler.fetch(:failed, read, Keyword.put(@sample_opts, :interval_ms, 0))
+        end
+        |> current_as_of(metadata_stale)
+
+      other ->
+        other
     end
   end
+
+  defp current_as_of({:ok, %{value: {failed, _basis}} = sample}, metadata_stale),
+    do: {:ok, %{sample | value: failed, stale: sample.stale or metadata_stale}}
+
+  defp current_as_of({:error, :unavailable} = unavailable, _metadata_stale), do: unavailable
 
   defp read_failed(metadata) do
     metadata.segments

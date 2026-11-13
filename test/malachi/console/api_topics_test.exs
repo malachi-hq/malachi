@@ -39,7 +39,7 @@ defmodule Malachi.Console.ApiTopicsTest do
     Application.put_env(:malachi, :console_sample_ms, 600_000)
     Sampler.clear()
     SamplerHelper.seed!(:metadata, metadata)
-    SamplerHelper.seed!(:failed, failed)
+    SamplerHelper.seed_failed!(failed)
     SamplerHelper.seed!(:damaged, [])
   end
 

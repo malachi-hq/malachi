@@ -31,4 +31,14 @@ defmodule Malachi.Test.SamplerHelper do
         seed!(key, value, attempts - 1)
     end
   end
+
+  @doc """
+  Seeds the failure latch sample (`Malachi.Console.Samples.failed/0`) with `failed`, built from the
+  metadata sample already seeded, as the real read records it.
+  """
+  @spec seed_failed!(Enumerable.t()) :: :ok
+  def seed_failed!(failed) do
+    {:ok, %{sampled_at: basis}} = Sampler.fetch(:metadata, fn -> {:error, :not_seeded} end, interval_ms: 600_000)
+    seed!(:failed, {MapSet.new(failed), basis})
+  end
 end

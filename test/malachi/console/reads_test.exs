@@ -82,7 +82,7 @@ defmodule Malachi.Console.ReadsTest do
 
     test "the failed and damaged copies this node holds, from their samples" do
       SamplerHelper.seed!(:metadata, Metadata.new())
-      SamplerHelper.seed!(:failed, MapSet.new([:seg]))
+      SamplerHelper.seed_failed!(MapSet.new([:seg]))
       SamplerHelper.seed!(:damaged, [:other])
 
       health = Reads.copy_health()
@@ -106,12 +106,66 @@ defmodule Malachi.Console.ReadsTest do
       ref = {:no_such_replication_server, node()}
       {state, :ok} = Metadata.apply(state, {:register_segment, root, {root, 0}, [ref], 0})
       SamplerHelper.seed!(:metadata, state)
-      SamplerHelper.seed!(:failed, MapSet.new())
+      SamplerHelper.seed_failed!(MapSet.new())
       Process.sleep(60)
       SamplerHelper.seed!(:metadata, state)
 
       # the latch read now fails (its server does not exist): the empty list from before is not current
       assert Reads.copy_health().failed == :unknown
+    end
+
+    # A replication server stand-in that answers every failure latch question with all of them failed.
+    defp all_failed_server do
+      pid =
+        spawn(fn ->
+          receive_loop = fn loop ->
+            receive do
+              {:"$gen_call", from, {:failed_segments, ids}} ->
+                GenServer.reply(from, {:ok, MapSet.new(ids)})
+                loop.(loop)
+            end
+          end
+
+          receive_loop.(receive_loop)
+        end)
+
+      on_exit(fn -> Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp metadata_with_segment_on(ref) do
+      {state, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "newer", 4})
+      {state, :ok} = Metadata.apply(state, {:register_segment, root, {root, 0}, [ref], 0})
+      {state, {root, 0}}
+    end
+
+    test "a list built from older metadata is taken again once the metadata is newer" do
+      # the list was taken over metadata that knew no segment
+      SamplerHelper.seed!(:metadata, Metadata.new())
+      SamplerHelper.seed_failed!([])
+
+      # then a segment is registered, its copy here has failed, and the metadata sample is taken again
+      Process.sleep(2)
+      {metadata, segment} = metadata_with_segment_on(all_failed_server())
+      SamplerHelper.seed!(:metadata, metadata)
+
+      assert Reads.copy_health().failed == [segment]
+    end
+
+    test "a list taken over stale metadata is not current either" do
+      Application.put_env(:malachi, :console_sample_ms, 50)
+      {metadata, _segment} = metadata_with_segment_on(all_failed_server())
+      SamplerHelper.seed!(:metadata, metadata)
+      Process.sleep(60)
+      # the broker does not answer: the metadata sample is kept, and stale
+      :ok = :sys.suspend(Malachi.LogBroker)
+
+      try do
+        assert {:ok, %{stale: true}} = Samples.failed()
+        assert Reads.copy_health().failed == :unknown
+      after
+        :sys.resume(Malachi.LogBroker)
+      end
     end
 
     test "a failure latch that cannot be read is unknown, not empty" do
