@@ -1,6 +1,8 @@
 defmodule Malachi.Cluster.ReplicationServerTest do
   use ExUnit.Case, async: true
 
+  alias Malachi.Test.SegmentFilesHelper
+
   alias Malachi.Cluster.Catchup
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
@@ -385,7 +387,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
     # Zero from the third frame to the end of the file, leaving the frames before it intact. Not
     # sealed: this is the segment still being written to.
-    [log_file] = directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+    [log_file] = directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
     {pairs, _valid} = Record.decode_all(File.read!(log_file))
     {_record, position} = Enum.at(pairs, 2)
     bytes = File.read!(log_file)
@@ -422,7 +424,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
     # seal it (the scrub's subject: an immutable copy nothing re-scans) and rot a byte in the middle
     segment_directory = Layout.segment_directory(directory, @segment)
-    [log_file] = Path.wildcard(Path.join(segment_directory, "*.log"))
+    [log_file] = SegmentFilesHelper.log_files(segment_directory)
     File.touch!(String.replace_suffix(log_file, ".log", ".sealed"))
 
     {pairs, _valid} = Record.decode_all(File.read!(log_file))
@@ -1128,6 +1130,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
                ReplicationServer.durable_stats(plain, @segment, 0)
 
       {:ok, _end_offset, active_bytes} = ReplicationServer.durable_stats(preallocated, @segment, 0)
+
       assert active_bytes > 0 and active_bytes < @prealloc
 
       # And a SEALED one, which is the shape retention and the lost-copy probe actually measure.
@@ -1138,8 +1141,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     defp active_segment_file_size(directory) do
       directory
       |> Layout.segment_directory(@segment)
-      |> Path.join("*.log")
-      |> Path.wildcard()
+      |> SegmentFilesHelper.log_files()
       |> Enum.map(&File.stat!(&1).size)
       |> Enum.max(fn -> 0 end)
     end
@@ -1573,7 +1575,7 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     test "a refused cut on a directory with no segment files reports nothing" do
       {server, directory} = start_broker_at([])
       {:ok, 14} = ReplicationServer.append(server, @segment, [server], 10, records(["a", "b", "c", "d", "e"]))
-      for file <- Path.wildcard(Path.join(storage_dir(directory, @segment), "*.log")), do: File.rm!(file)
+      for file <- SegmentFilesHelper.log_files(storage_dir(directory, @segment)), do: File.rm!(file)
       watch_trims(server)
 
       ExUnit.CaptureLog.capture_log(fn ->

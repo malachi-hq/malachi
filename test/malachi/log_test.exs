@@ -1,6 +1,8 @@
 defmodule Malachi.LogTest do
   use ExUnit.Case, async: true
 
+  alias Malachi.Test.SegmentFilesHelper
+
   alias Malachi.Log
   alias Malachi.Log.{Record, Segment}
   alias Malachi.Test.FaultySegmentStore
@@ -37,7 +39,7 @@ defmodule Malachi.LogTest do
       log = Enum.reduce(0..9, log, fn i, acc -> append_sync(acc, rec("value-#{i}")) end)
 
       assert log.sealed_base_offsets != [], "expected at least one roll"
-      assert length(Path.wildcard(Path.join(directory, "*.log"))) >= 2
+      assert length(SegmentFilesHelper.log_files(directory)) >= 2
 
       values = log |> read_all() |> Enum.map(& &1.value)
       assert values == for(i <- 0..9, do: "value-#{i}")
@@ -51,7 +53,7 @@ defmodule Malachi.LogTest do
     test "delete closes the log and removes its directory and all data", %{tmp_dir: directory} do
       {:ok, log} = open(directory)
       log = Enum.reduce(0..9, log, fn i, acc -> append_sync(acc, rec("value-#{i}")) end)
-      assert Path.wildcard(Path.join(directory, "*.log")) != []
+      assert SegmentFilesHelper.log_files(directory) != []
 
       assert Log.delete(log) == :ok
       refute File.exists?(directory)
@@ -215,7 +217,7 @@ defmodule Malachi.LogTest do
     end
 
     defp segment_ids(directory) do
-      directory |> Path.join("*.log") |> Path.wildcard() |> Enum.map(&Path.basename(&1, ".log")) |> Enum.sort()
+      directory |> SegmentFilesHelper.log_files() |> Enum.map(&Path.basename(&1, ".log")) |> Enum.sort()
     end
 
     defp id_for(base_offset), do: base_offset |> Integer.to_string() |> String.pad_leading(20, "0")
@@ -480,7 +482,7 @@ defmodule Malachi.LogTest do
 
       # corrupt the tail of the active (last) segment file
       active_path =
-        directory |> Path.join("*.log") |> Path.wildcard() |> Enum.sort() |> List.last()
+        directory |> SegmentFilesHelper.log_files() |> Enum.sort() |> List.last()
 
       size = File.stat!(active_path).size
       {:ok, file_descriptor} = :file.open(active_path, [:read, :write, :raw, :binary])
@@ -502,7 +504,7 @@ defmodule Malachi.LogTest do
       log = Enum.reduce(0..9, log, fn i, acc -> append_sync(acc, rec("value-#{i}")) end)
       :ok = Log.close(log)
 
-      files = directory |> Path.join("*.log") |> Path.wildcard() |> length()
+      files = directory |> SegmentFilesHelper.log_files() |> length()
       assert files > 1, "this fixture is meant to roll into several segments"
 
       assert {:ok, %{records: 10, files: ^files, bytes: bytes}} = Log.verify(directory)
@@ -517,7 +519,7 @@ defmodule Malachi.LogTest do
       log = Enum.reduce(0..9, log, fn i, acc -> append_sync(acc, rec("value-#{i}")) end)
       :ok = Log.close(log)
 
-      [first_file | _] = directory |> Path.join("*.log") |> Path.wildcard() |> Enum.sort()
+      [first_file | _] = directory |> SegmentFilesHelper.log_files() |> Enum.sort()
       {pairs, _valid} = Record.decode_all(File.read!(first_file))
       {_record, position} = hd(pairs)
       <<head::binary-size(position + 12), byte, tail::binary>> = File.read!(first_file)

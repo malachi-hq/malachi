@@ -9,6 +9,8 @@ defmodule Malachi.Cluster.ReplicationServerDamagedTailTest do
   """
   use ExUnit.Case, async: true
 
+  alias Malachi.Test.SegmentFilesHelper
+
   import ExUnit.CaptureLog
 
   alias Malachi.Cluster.ReplicationServer
@@ -38,7 +40,7 @@ defmodule Malachi.Cluster.ReplicationServerDamagedTailTest do
 
     :ok = stop_supervised(name)
 
-    [log_file] = Path.wildcard(Path.join(Layout.segment_directory(directory, @segment), "*.log"))
+    [log_file] = SegmentFilesHelper.log_files(Layout.segment_directory(directory, @segment))
     {frames, _valid_bytes} = Record.decode_all(File.read!(log_file))
     {_record, third} = Enum.at(frames, 2)
     flip_byte(log_file, third + 12)
