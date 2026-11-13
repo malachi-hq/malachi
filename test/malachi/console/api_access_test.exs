@@ -36,6 +36,11 @@ defmodule Malachi.Console.ApiAccessTest do
   end
 
   test "sessions are paged in the order they were created", %{token: token} do
+    # The walk reads every session the node holds, a few per request, and a node that ran the whole suite
+    # holds hundreds: the session's own API budget (300 a minute) would refuse it partway, which is not what
+    # this test is about (api_me_test covers the budget). A limit of 0 turns the budget off.
+    Application.put_env(:malachi, :dashboard_api_rate_limit, 0)
+    on_exit(fn -> Application.delete_env(:malachi, :dashboard_api_rate_limit) end)
     _other = AccessHelper.account!("sessions_other", [], :viewer)
 
     walk = fn walk, query, acc ->
@@ -44,11 +49,11 @@ defmodule Malachi.Console.ApiAccessTest do
 
       case body["next_page_token"] do
         "" -> acc
-        next -> walk.(walk, "page_size=1&page_token=" <> next, acc)
+        next -> walk.(walk, "page_size=2&page_token=" <> next, acc)
       end
     end
 
-    sessions = walk.(walk, "page_size=1", [])
+    sessions = walk.(walk, "page_size=2", [])
     assert length(sessions) >= 2
     assert sessions == Enum.uniq(sessions)
     created = Enum.map(sessions, & &1["created_at"])
