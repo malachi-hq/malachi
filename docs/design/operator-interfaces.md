@@ -511,8 +511,9 @@ topic as a treemap; and the signal summary.
 SOURCE (#230): `GET /api/v1/cluster` gives the nodes alive of total; `GET /api/v1/topics` the topic,
 range and segment totals and bytes; `GET /api/v1/metrics/history` the produce and consume counters and the
 flush p50, p99 and p999 over the last five minutes per node, from which the rates are the differences
-between points; and `GET /api/v1/stream` the same series and topic totals as deltas. GAP: the health score
-and the signal summary.
+between points, with the flush count for the panel's footer; and `GET /api/v1/stream` the same series and
+topic totals as deltas. GAP: the failure tolerance under the node count, the health score, the signal
+summary, and the flush panel's maximum.
 
 ### 6.3 Topics
 
@@ -773,9 +774,10 @@ format marker and the effective and supported machine version of every member it
 (version, fence, vnode count, pending split) and the lease (holder, fence, renewal) on a sharded control
 plane, each with the time it was sampled. `GET /api/v1/ring/vnodes` pages the vnodes with the nodes
 holding each. A node that does not answer, or runs a release without the read, is named rather than left
-out. GAP: vnodes and segments held and disk per node, the compatibility page's feature flag states, the
-upgrade status and failure tolerance, and the rollback floor sentence, which needs the oldest binary the
-format markers still allow.
+out. GAP: segments held and disk per node (vnodes per node the client counts from `/ring/vnodes`), the
+leader, term, commit index and unreachable members of each state machine (the API serves only its
+versions), the compatibility page's feature flag states, the upgrade status and failure tolerance, and
+the rollback floor sentence, which needs the oldest binary the format markers still allow.
 
 ### 6.8.1 Producers
 
@@ -796,7 +798,9 @@ node's listing), paged with a page token, each naming the node its producer is c
 that is a lower bound when a node or a connection did not answer within its bound and `complete: false`
 on a walk that may have missed streams for that reason; and the Prometheus series
 `malachi_producer_streams_total{event}` and `malachi_producer_streams_open`. GAP: per-stream rates, which
-the connection would have to count.
+the connection would have to count; the stream's principal, codec and compression ratio; rejects by
+reason; the granted window against the requested one and why it shrank; and the per node panel the
+design system shows (group commit queue, parked records, replication lag).
 
 ### 6.9 Signals
 
@@ -875,7 +879,8 @@ SOURCE: `GET /users` (with each user's console role), `PUT /users/:u/role`, `GET
 counters, and, at the `admin` role (#230), `GET /api/v1/sessions` (every node's active sessions, each
 named by its digest and never by any part of its token) and `GET /api/v1/lockouts` (the cluster's locked
 accounts). GAP: `AclStore.list_all/0` has no surface, revoking a session and clearing a lockout are
-mutations (#234), and a user's `created_at` and `updated_at` are never returned by any of the three
+mutations (#234), a lockout serves when it ends but not when it began, a user's MFA state and last seen
+time are not recorded, and a user's `created_at` and `updated_at` are never returned by any of the three
 existing surfaces.
 
 ### 6.11 States
@@ -1236,6 +1241,26 @@ Two more members recur, and the client renders both (#230):
 | 12 | `GET /api/v1/i18n?locale=` | 12.2 | |
 | 13 | Per range load signal | 6.4's heatmap | #29. The hardest one: the measurement does not exist |
 | 14 | `GET /api/v1/producers` | 6.8.1 | The open producer streams. **Delivered (#275)**, across the cluster since #230 |
+
+#### The design system's screens against the read API
+
+Every field the console prototype in the design system shows (page Malachi Console Prototype) was checked
+against the routes above for #230. The screens of other issues are left out: Records (#232), the mutation
+dialogs (#234), Settings and the shell's controls (#231), and Users, ACLs and Audit, which have their own
+routes. A field the client derives from what a route returns counts as served.
+
+| Screen | Served | GAP |
+|---|---|---|
+| Shell | Cluster name, colour and icon, user, role, locale (`/me`); node count and release (`/cluster`); live state (`/stream`) | |
+| Overview | Nodes alive of total; topics, ranges, segments and bytes; produce and consume rates (from the counters); flush p50, p99, p999 and count; disk by topic | Failure tolerance, health score, signal summary, flush maximum |
+| Topics | Name, state, policy, ranges and segments active of total, bytes, groups, keyspace | Domain violations, the activity sparkline, retention in force, its source and last sweep (#194) |
+| Ranges | Key slice, state, lineage | Blocked ranges (#91), split and merge history, the keyspace map (#29) |
+| Segments | Seg, range, records, bytes, copies, primary by node name, age (from `opened_at` and `sealed_at`), composite health, under replicated and damaged counts, scrub verified per hour (from its counter) | `behind`; per copy records, bytes, tail, digest and the authoritative copy; rebuild progress; explain placement |
+| Consumers | Group, topic, members, generation, a restarted coordinator, positions per range | The cursor token the cursor chip shows (#232), time lag, records behind, headroom |
+| Producers | Open streams; per stream label, topic, node, client address, opened at, sequences, window, in flight | Principal, codec, accepted rate, rejects by reason, shrunk and idle states, the per node window panel |
+| Cluster | Members and SWIM status, attributes, uptime, binary and machine versions, vnodes per node (from `/ring/vnodes`), lease, format marker, effective version | Failure tolerance, leader, term and commit per state machine, segments and disk per node, compatibility, upgrade status |
+| Signals | | The whole screen: no signal route yet |
+| Access (sessions, lockouts) | Principal, address, started, last request; locked principal, reason (from the attempt count), expiry | When a lockout began; MFA and last seen; strict ACL impact |
 
 ### 10.4 Mutations
 
