@@ -813,12 +813,24 @@ defmodule Malachi.Metadata do
   The display form of a replica reference. The primary is the replica set's head (the same convention
   the broker and replication servers use), so exposing the set exposes ownership: an operator, the chaos
   harness or a routing client can see which node serves a segment. `{name, node}` collapses to the node,
-  which is what identifies a broker; pids and bare atoms are single-node shapes where ownership is
-  trivially local.
+  which is what identifies a broker. A pid, the shape of a single node's unnamed replication server,
+  collapses to the node it runs on: an inspected pid such as `#PID<0.807.0>` names nothing an operator or a
+  client can act on, and it would not match any node a client is routed to. A bare atom is a registered
+  name on this node.
+
+  ## Examples
+
+      iex> Malachi.Metadata.broker_ref_string({Malachi.LogReplication, :"malachi@10.0.0.1"})
+      "malachi@10.0.0.1"
+
+      iex> Malachi.Metadata.broker_ref_string(self()) == Atom.to_string(node())
+      true
+
   """
   @spec broker_ref_string(broker() | nil) :: String.t() | nil
   def broker_ref_string(nil), do: nil
   def broker_ref_string({_name, node}) when is_atom(node), do: Atom.to_string(node)
+  def broker_ref_string(ref) when is_pid(ref), do: Atom.to_string(node(ref))
   def broker_ref_string(ref) when is_atom(ref), do: Atom.to_string(ref)
   def broker_ref_string(ref), do: inspect(ref)
 
