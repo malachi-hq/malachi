@@ -101,10 +101,11 @@ jobs:
           persist-credentials: false
 
       - name: Set up Elixir
+        id: beam
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
-          elixir-version: '1.19.4'
-          otp-version: '28.1'
+          version-file: .github/beam-versions
+          version-type: strict
 
       - name: Cache dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -112,9 +113,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-bench-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-mix-bench-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-bench-
+            ${{ runner.os }}-mix-bench-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
       - name: Install dependencies
         run: |
@@ -339,10 +340,11 @@ jobs:
 
       # The same toolchain as the CI test job, which is where both occurrences were seen.
       - name: Set up Elixir
+        id: beam
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
-          elixir-version: '1.19.4'
-          otp-version: '28.1'
+          version-file: .github/beam-versions
+          version-type: strict
 
       # The load generator tests drive scripts/loadtest.js, as in the CI test job, on the same Node 22.
       - name: Set up Node
@@ -359,9 +361,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-1.19.4-28.1-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-mix-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-1.19.4-28.1-
+            ${{ runner.os }}-mix-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
       - name: Install dependencies
         run: |
@@ -424,10 +426,11 @@ jobs:
           persist-credentials: false
 
       - name: Set up Elixir
+        id: beam
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
-          elixir-version: '1.19.4'
-          otp-version: '28.1'
+          version-file: .github/beam-versions
+          version-type: strict
 
       - name: Run the publish quota check A/B
         env:

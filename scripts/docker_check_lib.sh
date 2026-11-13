@@ -1,10 +1,11 @@
 # shellcheck shell=bash
-# Shared by the checks that assert on a running Malachi container (scripts/docker-static-assets-check.sh,
-# scripts/docker-image-health-check.sh). Sourced, never run: it defines functions and runs nothing.
+# Shared by the checks that assert on a Malachi container or image (scripts/docker-static-assets-check.sh,
+# scripts/docker-image-health-check.sh, scripts/check-image-runtime.sh). Sourced, never run: it defines
+# functions and runs nothing.
 #
-# Both checks bound every call they make, and both read their limits from the environment, so both need
+# Every check bounds every call it makes, and each reads its limits from the environment, so all need
 # the same refusal of a limit that would mean no limit at all, and the same up front check for the
-# coreutils timeout that enforces them. Each failure here exits 2, the usage error of both checks.
+# coreutils timeout that enforces them. Each failure here exits 2, the usage error of every check.
 
 # Refuses anything but a whole number of seconds from 1 to 99999 written without leading zeros:
 #

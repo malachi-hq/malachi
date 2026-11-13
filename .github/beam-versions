@@ -1,0 +1,7 @@
+# Erlang/OTP and Elixir for every erlef/setup-beam step in .github/workflows (version-file, strict).
+# They match what the elixir base image pinned by digest in Dockerfile and benchmark/Dockerfile.loadtest
+# ships on linux/amd64, so the tests run the runtime that ships; scripts/check-image-runtime.sh fails the
+# Docker Build Test when a digest bump in either Dockerfile moves its image away from them. Not named
+# .tool-versions on purpose: asdf would read it and take over every local checkout.
+erlang 28.5.0.2
+elixir 1.19.5-otp-28

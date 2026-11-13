@@ -25,10 +25,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Elixir
+        id: beam
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
-          otp-version: '28.1'
-          elixir-version: '1.19.4'
+          version-file: .github/beam-versions
+          version-type: strict
 
       - name: Restore dependencies cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -36,8 +37,8 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-security-${{ hashFiles('**/mix.lock') }}
-          restore-keys: ${{ runner.os }}-mix-security-
+          key: ${{ runner.os }}-mix-security-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-security-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
       - name: Install dependencies
         run: |
@@ -78,10 +79,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Elixir
+        id: beam
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
-          otp-version: '28.1'
-          elixir-version: '1.19.4'
+          version-file: .github/beam-versions
+          version-type: strict
 
       - name: Restore dependencies cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -89,8 +91,8 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-security-${{ hashFiles('**/mix.lock') }}
-          restore-keys: ${{ runner.os }}-mix-security-
+          key: ${{ runner.os }}-mix-security-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-security-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
       - name: Install dependencies
         run: |
