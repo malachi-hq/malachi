@@ -14,6 +14,7 @@ defmodule Malachi.LoadtestTest do
   alias Malachi.ProducerDirectory
   alias Malachi.RateLimiter
   alias Malachi.TCPAcceptorPool
+  alias Malachi.Test.LoadtestEnv
   alias Malachi.Test.LoadtestProbes
   alias Malachi.Test.PollingHelper
   alias Malachi.Test.ReadBack
@@ -36,6 +37,10 @@ defmodule Malachi.LoadtestTest do
   # The generator speaks only the stream keys; the topic routing reads the consumer-group router's topology,
   # cleared for each case.
   setup {RouterTopology, :clear}
+
+  # The mix task reads the login from MALACHI_USER, MALACHI_PASS and MALACHI_TOKEN (#180): whatever the
+  # shell running the suite exports must not change who these runs log in as.
+  setup do: LoadtestEnv.isolate()
 
   describe "produce" do
     test "the report records the batch size and record size it ran with, as fields of their own" do
@@ -1425,7 +1430,7 @@ defmodule Malachi.LoadtestTest do
 
       argv =
         ~w(--scenario produce --connect-strategy all-at-once --payload json --payload-seed 3 --connections 1) ++
-          ~w(--duration 1 --warmup 0 --json --user admin --pass admin123 --port #{TCPAcceptorPool.port()} --topic #{t})
+          ~w(--duration 1 --warmup 0 --json --user admin --port #{TCPAcceptorPool.port()} --topic #{t})
 
       output = capture_io(fn -> Mix.Tasks.Malachi.Loadtest.run(argv) end)
       assert %{"payload" => "json", "payload_seed" => 3, "errors" => 0} = Jason.decode!(output)

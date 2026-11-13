@@ -771,4 +771,25 @@ defmodule LoadtestJsTest do
       assert length(LoadtestProbes.successful_auths()) == 1 + 2 + 2 * 2
     end
   end
+
+  # #180: the login comes from the environment in both generators, and an empty variable counts as unset
+  # in both (Mix.Tasks.Malachi.Loadtest.credentials/2 mirrors scripts/lib/cli.js). Exported empty inside a
+  # shell, since an empty value in System.cmd's env would unset the variable rather than empty it.
+  describe "credentials" do
+    test "an empty MALACHI_USER and MALACHI_PASS fall back to the role default instead of an empty login", ctx do
+      args = ~w(--scenario produce --json --connections 1 --batch 2 --duration 1 --topic) ++ [topic()]
+
+      assert {output, 0} =
+               System.cmd(
+                 "bash",
+                 ["-c", ~s(export MALACHI_USER= MALACHI_PASS=; exec "$0" "$@"), ctx.node, @script | args],
+                 env: [
+                   {"MALACHI_HOST", "127.0.0.1"},
+                   {"MALACHI_PORT", Integer.to_string(TCPAcceptorPool.port())}
+                 ]
+               )
+
+      assert {:ok, %{"errors" => 0}} = Jason.decode(output)
+    end
+  end
 end
