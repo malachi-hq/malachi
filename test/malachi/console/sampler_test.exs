@@ -173,6 +173,29 @@ defmodule Malachi.Console.SamplerTest do
     {read, fn -> Agent.get(counter, & &1) end}
   end
 
+  test "a young sample the caller says no longer answers its question is read again, and one it accepts is not" do
+    {read, calls} = counting_read()
+    assert {:ok, %{value: 1}} = Sampler.fetch(:asked, read, interval_ms: 60_000)
+
+    assert {:ok, %{value: 1}} = Sampler.fetch(:asked, read, interval_ms: 60_000, current?: &(&1 == 1))
+    assert calls.() == 1
+
+    assert {:ok, %{value: 2, stale: false}} = Sampler.fetch(:asked, read, interval_ms: 60_000, current?: &(&1 == 2))
+    assert calls.() == 2
+  end
+
+  test "a sample the caller rejects is not read again soon after a read that failed" do
+    assert {:ok, %{value: :old}} = Sampler.fetch(:rejected, fn -> {:ok, :old} end, interval_ms: 60_000)
+    {failing, calls} = counting(fn -> {:error, :down} end)
+    reject = [interval_ms: 60_000, current?: fn _value -> false end]
+
+    for _caller <- 1..5 do
+      assert {:ok, %{value: :old, stale: true}} = Sampler.fetch(:rejected, failing, reject)
+    end
+
+    assert calls.() == 1
+  end
+
   test "a key whose first read failed is unavailable until the interval is up, with no new read" do
     {failing_read, failing_calls} = counting_failure()
     assert Sampler.fetch(:never, failing_read, interval_ms: 60_000) == {:error, :unavailable}

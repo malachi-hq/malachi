@@ -114,10 +114,13 @@ defmodule Malachi.Console.Samples do
   (`Malachi.Cluster.ReplicationServer.failed_segments/3`, a lookup in the failure latch with no disk
   access), asked of each replication server of this node about the segments it holds by the metadata.
 
-  The list is only as current as the metadata it asked about: a segment registered after that metadata was
-  never asked about, and a copy of it that failed would be missing from the list. So the list is taken
-  again whenever the metadata sample is newer than the one it was built from, and it is `stale` whenever
-  the metadata is, which the console shows as a copy whose state is unknown rather than as a healthy one.
+  The list is only as current as this node's metadata it asked about: a segment registered after that
+  metadata was never asked about, and a copy of it that failed would be missing from the list. So a list built
+  from another metadata sample than this node's current one counts as old and is taken again, on the
+  sampler's usual terms (once per interval, not again soon after a read that failed), and a list that does
+  not match the current metadata, or a metadata sample that is stale, is answered stale, which the console
+  shows as a copy whose state is unknown rather than as a healthy one. A console on another node renders
+  segments from its own metadata, which this does not compare against.
   """
   @spec failed() :: result()
   def failed do
@@ -127,22 +130,23 @@ defmodule Malachi.Console.Samples do
           with {:ok, failed} <- read_failed(metadata), do: {:ok, {failed, basis}}
         end
 
-        with {:ok, %{value: {_failed, built_from}}} when built_from != basis <-
-               Sampler.fetch(:failed, read, @sample_opts) do
-          # built from older metadata: take it again from this one
-          Sampler.fetch(:failed, read, Keyword.put(@sample_opts, :interval_ms, 0))
-        end
-        |> current_as_of(metadata_stale)
+        current? = fn {_failed, built_from} -> built_from == basis end
+
+        :failed
+        |> Sampler.fetch(read, Keyword.put(@sample_opts, :current?, current?))
+        |> current_as_of(basis, metadata_stale)
 
       other ->
         other
     end
   end
 
-  defp current_as_of({:ok, %{value: {failed, _basis}} = sample}, metadata_stale),
-    do: {:ok, %{sample | value: failed, stale: sample.stale or metadata_stale}}
+  # A list built from other metadata than the caller's (an older sample, or a read another caller started
+  # and this one joined) does not answer about the caller's segments.
+  defp current_as_of({:ok, %{value: {failed, built_from}} = sample}, basis, metadata_stale),
+    do: {:ok, %{sample | value: failed, stale: sample.stale or metadata_stale or built_from != basis}}
 
-  defp current_as_of({:error, :unavailable} = unavailable, _metadata_stale), do: unavailable
+  defp current_as_of({:error, :unavailable} = unavailable, _basis, _metadata_stale), do: unavailable
 
   defp read_failed(metadata) do
     metadata.segments

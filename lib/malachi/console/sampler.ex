@@ -42,27 +42,41 @@ defmodule Malachi.Console.Sampler do
   @doc """
   The sample of `key`, taken by `read` (a zero arity function that returns `{:ok, value}` or
   `{:error, reason}`) when the last one is older than the interval. Options: `:timeout_ms`, how long a fresh
-  read may take (#{@default_timeout_ms} ms by default), and `:interval_ms`, in place of the configured one.
+  read may take (#{@default_timeout_ms} ms by default), `:interval_ms`, in place of the configured one, and
+  `:current?`, a function of a sample's value that says whether it still answers the caller's question (a
+  value built from inputs the caller has since replaced does not): a sample it rejects is old, however young,
+  and is read again on the same terms as any old sample, the failure latch included.
   """
   @spec fetch(term(), (-> {:ok, term()} | {:error, term()}), keyword()) :: {:ok, sample()} | {:error, :unavailable}
   def fetch(key, read, opts \\ []) when is_function(read, 0) do
     interval = Keyword.get_lazy(opts, :interval_ms, &interval_ms/0)
-
+    current? = Keyword.get(opts, :current?, fn _value -> true end)
     now = now()
 
     case lookup(key) do
-      {{value, sampled_at}, _failed_at} when now - sampled_at < interval ->
-        {:ok, %{value: value, sampled_at: sampled_at, stale: false}}
+      {{value, sampled_at}, failed_at} ->
+        cond do
+          now - sampled_at < interval and current?.(value) ->
+            {:ok, %{value: value, sampled_at: sampled_at, stale: false}}
 
-      # a read failed less than an interval ago: the next is not tried before the interval is up, so a
-      # failing read costs one per interval like a working one, not one per caller
-      {_sample, failed_at} when is_integer(failed_at) and now - failed_at < interval ->
-        current(key, true)
+          recently_failed?(failed_at, now, interval) ->
+            current(key, true)
 
-      _old_or_none ->
+          true ->
+            refresh(key, read, opts)
+        end
+
+      {nil, failed_at} ->
+        if recently_failed?(failed_at, now, interval), do: current(key, true), else: refresh(key, read, opts)
+
+      nil ->
         refresh(key, read, opts)
     end
   end
+
+  # A read failed less than an interval ago: the next is not tried before the interval is up, so a failing
+  # read costs one per interval like a working one, not one per caller.
+  defp recently_failed?(failed_at, now, interval), do: is_integer(failed_at) and now - failed_at < interval
 
   @doc """
   The sampling interval: `MALACHI_CONSOLE_SAMPLE_MS` (`:console_sample_ms`), 1000 ms by default. A value

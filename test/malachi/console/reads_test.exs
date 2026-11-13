@@ -168,6 +168,71 @@ defmodule Malachi.Console.ReadsTest do
       end
     end
 
+    # A replication server stand-in that never answers, counting the latch questions it receives.
+    defp silent_server do
+      pid = spawn(fn -> count_questions(0) end)
+      on_exit(fn -> Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp count_questions(count) do
+      receive do
+        {:"$gen_call", _from, {:failed_segments, _ids}} ->
+          count_questions(count + 1)
+
+        {:count, to} ->
+          send(to, {:count, count})
+          count_questions(count)
+      end
+    end
+
+    test "a stalled replication server is asked once per interval, not once per request, and the list stays unknown" do
+      Application.put_env(:malachi, :console_sample_ms, 60_000)
+      SamplerHelper.seed!(:metadata, Metadata.new())
+      SamplerHelper.seed_failed!([])
+
+      # newer metadata with a segment on a replication server that does not answer
+      Process.sleep(2)
+      server = silent_server()
+      {metadata, _segment} = metadata_with_segment_on(server)
+      SamplerHelper.seed!(:metadata, metadata)
+
+      for _request <- 1..5 do
+        assert {:ok, %{stale: true}} = Samples.failed()
+      end
+
+      send(server, {:count, self()})
+      assert_receive {:count, 1}
+      assert Reads.copy_health().failed == :unknown
+    end
+
+    test "a request that joins a read built from older metadata gets it as stale, not as current" do
+      Application.put_env(:malachi, :console_sample_ms, 60_000)
+      SamplerHelper.seed!(:metadata, Metadata.new())
+      # a list built from metadata this node no longer holds
+      SamplerHelper.seed!(:failed, {MapSet.new(), :older_metadata})
+      parent = self()
+
+      # another caller's read, still built from the older metadata, is in flight
+      slow =
+        Task.async(fn ->
+          Sampler.fetch(
+            :failed,
+            fn ->
+              send(parent, :slow_read_started)
+              Process.sleep(300)
+              {:ok, {MapSet.new(), :older_metadata}}
+            end,
+            interval_ms: 0
+          )
+        end)
+
+      assert_receive :slow_read_started
+      assert {:ok, %{value: failed, stale: true}} = Samples.failed()
+      assert failed == MapSet.new()
+      Task.await(slow)
+    end
+
     test "a failure latch that cannot be read is unknown, not empty" do
       # with no sample yet and a metadata whose replica on this node does not answer
       {state, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "health", 4})
