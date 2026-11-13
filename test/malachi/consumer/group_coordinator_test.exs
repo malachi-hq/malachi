@@ -492,4 +492,43 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
       assert tick.(session_ms: 300, tick_ms: 7) == 7
     end
   end
+
+  describe "describe/2" do
+    test "lists each group's members, how long each has been silent, their ranges and the generation" do
+      %{coord: c, clock: clock} = start(ranges: [:r0, :r1], open_fun: fn _group, _topic -> {:ok, 3} end)
+      {:ok, %{generation: _}} = GroupCoordinator.join_group(c, "g", "t", :m1)
+      set_clock(clock, 40)
+      {:ok, %{generation: generation}} = GroupCoordinator.join_group(c, "g", "t", :m2)
+      set_clock(clock, 70)
+
+      assert [%{group: "g", topic: "t", generation: ^generation, members: [m1, m2]}] = GroupCoordinator.describe(c)
+      assert generation == Bitwise.bsl(3, 32) + 2
+      assert %{member: :m1, idle_ms: 70} = m1
+      assert %{member: :m2, idle_ms: 30} = m2
+      assert Enum.sort(m1.ranges ++ m2.ranges) == [:r0, :r1]
+    end
+
+    test "is sorted by group then topic, and changes nothing" do
+      %{coord: c} = start(ranges: [:r0])
+      {:ok, _} = GroupCoordinator.join_group(c, "b", "t", :m)
+      {:ok, _} = GroupCoordinator.join_group(c, "a", "u", :m)
+      {:ok, _} = GroupCoordinator.join_group(c, "a", "t", :m)
+      before = :sys.get_state(c)
+
+      assert Enum.map(GroupCoordinator.describe(c), &{&1.group, &1.topic}) == [{"a", "t"}, {"a", "u"}, {"b", "t"}]
+      assert :sys.get_state(c) == before
+    end
+
+    test "a group without an epoch has no generation, and an empty coordinator lists nothing" do
+      %{coord: c} = start()
+      assert GroupCoordinator.describe(c) == []
+
+      :sys.replace_state(c, fn state ->
+        group = %{members: %{m: 0}, assignment: %{m: [:r0]}, generation: 1, assigned_at: %{r0: 1}}
+        %{state | groups: %{{"g", "t"} => group}}
+      end)
+
+      assert [%{generation: nil, members: [%{member: :m, ranges: [:r0]}]}] = GroupCoordinator.describe(c)
+    end
+  end
 end

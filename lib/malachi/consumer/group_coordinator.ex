@@ -111,6 +111,23 @@ defmodule Malachi.Consumer.GroupCoordinator do
   @spec leave(GenServer.server(), term(), term(), member()) :: :ok
   def leave(server, group, topic, member), do: GenServer.call(server, {:leave, group, topic, member})
 
+  @doc """
+  What this coordinator holds, for the operator interfaces (`GET /api/v1/groups`): every `{group, topic}`
+  it serves, with its members, how long ago each was last heard from, the ranges assigned to each, and the
+  generation as the group keys hand it (`nil` while the group has no epoch yet). A read of the state it
+  already keeps: it opens nothing and changes nothing, and it answers whether or not this node owns the
+  topics. The state is soft, so a coordinator that restarted lists only the members that joined since.
+  """
+  @spec describe(GenServer.server(), timeout()) :: [
+          %{
+            group: term(),
+            topic: term(),
+            generation: non_neg_integer() | nil,
+            members: [%{member: member(), idle_ms: non_neg_integer(), ranges: [term()]}]
+          }
+        ]
+  def describe(server, timeout \\ 5_000), do: GenServer.call(server, :describe, timeout)
+
   @doc "Runs one reconcile (evict timed-out members + rebalance) immediately. Also fired on the timer."
   @spec reconcile_now(GenServer.server()) :: :ok
   def reconcile_now(server), do: GenServer.call(server, :reconcile_now)
@@ -177,6 +194,31 @@ defmodule Malachi.Consumer.GroupCoordinator do
     do: with_epoch(request, topic, from, state)
 
   def handle_call(:reconcile_now, _from, state), do: {:reply, :ok, reconcile(state)}
+
+  def handle_call(:describe, _from, state) do
+    now = state.clock.()
+
+    groups =
+      for {{group, topic} = key, group_state} <- state.groups do
+        %{
+          group: group,
+          topic: topic,
+          generation: if(is_map_key(state.epochs, key), do: generation(state, key, group_state)),
+          members:
+            group_state.members
+            |> Enum.map(fn {member, last_heard} ->
+              %{
+                member: member,
+                idle_ms: max(now - last_heard, 0),
+                ranges: group_state.assignment |> Map.get(member, []) |> Enum.sort()
+              }
+            end)
+            |> Enum.sort_by(& &1.member)
+        }
+      end
+
+    {:reply, Enum.sort_by(groups, &{&1.group, &1.topic}), state}
+  end
 
   @impl true
   def handle_cast({:drop_epoch, group, topic, epoch}, state) do
