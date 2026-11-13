@@ -139,6 +139,40 @@ defmodule Malachi.Console.SamplerTest do
     assert {:ok, %{value: 2, stale: false}} = Sampler.fetch(:retry, read, interval_ms: 60_000)
   end
 
+  for {kind, read} <- [
+        raises: quote(do: fn -> raise "read failed" end),
+        overruns: quote(do: fn -> Process.sleep(:infinity) end)
+      ] do
+    test "a read that #{kind} is not tried again before an interval has passed either" do
+      {read, calls} = counting(unquote(read))
+      assert {:ok, %{value: :kept}} = Sampler.fetch(unquote(kind), fn -> {:ok, :kept} end, interval_ms: 50)
+      Process.sleep(60)
+
+      # the sample is older than the interval: this read is tried, and fails
+      assert {:ok, %{value: :kept, stale: true}} = Sampler.fetch(unquote(kind), read, interval_ms: 50, timeout_ms: 100)
+      assert calls.() == 1
+
+      for _caller <- 1..5 do
+        assert {:ok, %{value: :kept, stale: true}} =
+                 Sampler.fetch(unquote(kind), read, interval_ms: 50, timeout_ms: 100)
+      end
+
+      assert calls.() == 1
+    end
+  end
+
+  # `failing` with a count of how many times it was started.
+  defp counting(failing) do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    read = fn ->
+      Agent.update(counter, &(&1 + 1))
+      failing.()
+    end
+
+    {read, fn -> Agent.get(counter, & &1) end}
+  end
+
   test "a key whose first read failed is unavailable until the interval is up, with no new read" do
     {failing_read, failing_calls} = counting_failure()
     assert Sampler.fetch(:never, failing_read, interval_ms: 60_000) == {:error, :unavailable}

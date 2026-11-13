@@ -108,6 +108,26 @@ defmodule Malachi.Console.ApiGroupsTest do
     end
   end
 
+  describe "when every node answers but a coordinator does not" do
+    setup do
+      Sampler.clear()
+      :ok = :sys.suspend(Malachi.LogGroupCoordinator)
+      on_exit(fn -> :sys.resume(Malachi.LogGroupCoordinator) end)
+      :ok
+    end
+
+    test "the listing is a lower bound and a missing group is unavailable, not missing",
+         %{topic: topic, token: token} do
+      assert %{status: 200, json: body} = get("/api/v1/groups?topic=#{topic}", token)
+
+      assert %{"total" => %{"relation" => "gte"}, "complete" => false, "unanswered_coordinators" => 1} = body
+      assert body["unanswered_nodes"] == []
+
+      assert %{status: 503, json: %{"type" => "errors.http.unavailable", "unanswered_coordinators" => 1}} =
+               get("/api/v1/groups/nope?topic=#{topic}", token)
+    end
+  end
+
   describe "when the membership cannot be read" do
     setup do
       Application.put_env(:malachi, :console_sample_ms, 60_000)
