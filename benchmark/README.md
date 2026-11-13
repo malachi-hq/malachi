@@ -67,13 +67,18 @@ REAL_DISK=1 OUT=results/docker-cluster.jsonl benchmark/docker-cluster.sh   # the
   engine, what backs the Docker root (filesystem, mount options, disk), and each node's view of its own
   data mount.
 - **Per-flush latency is the servers' own.** Each node's `/metrics` is scraped from inside the node
-  (busybox `wget` on `127.0.0.1`, since the compose file publishes no port) when the generator's
+  (on `127.0.0.1`, since the compose file publishes no port: busybox `wget` logs in and busybox `nc` sends
+  the scrape as a raw HTTP/1.0 request, with the password and the session token on `docker exec -i`'s
+  stdin and never in a process argument, #180) when the generator's
   measured window opens and again when the generator exits, and `mix malachi.loadtest.ceiling
   flush-window` subtracts the two, so setup, prepopulate and warmup flushes are left out. Each `OUT` line
   carries `flush.nodes` (per node) and `flush.all` (every node's flushes added up into one
   distribution), p50/p99/p999 and mean in seconds. The opening scrape follows the same half-second
   marker poll as the CPU snapshot, so it starts up to about half a second into the window. A node that
   cannot be scraped leaves `flush.all` null with the reason in `flush.error`; the throughput still counts.
+  The reason names what failed: the status the dashboard answered (`HTTP 429`), or `wget on <node>` or
+  `nc on <node>` with the tool's own words, `timed out after <n>s` past `SCRAPE_TIMEOUT` (10 seconds per
+  request, the `docker exec` included), or `gave no HTTP status line` for an answer that is not HTTP.
 - **Linux only.** The script refuses any other host unless `ALLOW_NON_LINUX=1`, which runs it as a smoke
   test and says so.
 
