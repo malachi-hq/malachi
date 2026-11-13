@@ -134,6 +134,16 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     e in ArgumentError -> Mix.raise(Exception.message(e))
   end
 
+  # Each credential the run may take from the environment, and the variable it comes from.
+  @credential_vars [user: "MALACHI_USER", pass: "MALACHI_PASS", token: "MALACHI_TOKEN"]
+
+  @doc """
+  The environment variables `credentials/2` reads, the one list the task and its tests share
+  (`Malachi.Test.LoadtestEnv` clears exactly these).
+  """
+  @spec credential_vars() :: [String.t()]
+  def credential_vars, do: Keyword.values(@credential_vars)
+
   @doc """
   The credentials the run authenticates with, added to `opts` from `env` (a map of environment
   variables): `:user` from `MALACHI_USER` unless `--user` gave one, `:pass` from `MALACHI_PASS` and
@@ -142,7 +152,7 @@ defmodule Mix.Tasks.Malachi.Loadtest do
   """
   @spec credentials(keyword(), %{optional(String.t()) => String.t()}) :: keyword()
   def credentials(opts, env) do
-    Enum.reduce([user: "MALACHI_USER", pass: "MALACHI_PASS", token: "MALACHI_TOKEN"], opts, fn {key, var}, opts ->
+    Enum.reduce(@credential_vars, opts, fn {key, var}, opts ->
       case Map.get(env, var, "") do
         "" -> opts
         value -> Keyword.put_new(opts, key, value)

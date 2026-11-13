@@ -76,9 +76,12 @@ REAL_DISK=1 OUT=results/docker-cluster.jsonl benchmark/docker-cluster.sh   # the
   distribution), p50/p99/p999 and mean in seconds. The opening scrape follows the same half-second
   marker poll as the CPU snapshot, so it starts up to about half a second into the window. A node that
   cannot be scraped leaves `flush.all` null with the reason in `flush.error`; the throughput still counts.
-  The reason names what failed: the status the dashboard answered (`HTTP 429`), or `wget on <node>` or
-  `nc on <node>` with the tool's own words, `timed out after <n>s` past `SCRAPE_TIMEOUT` (10 seconds per
-  request, the `docker exec` included), or `gave no HTTP status line` for an answer that is not HTTP.
+  A reason from the login or a scrape starts with which one failed, `login failed:` or `scrape failed:`, and
+  then says why, for example
+  `scrape failed: HTTP 429 (the dashboard rate limit tripped)`, `login failed: the answer carried no token`,
+  `scrape failed: nc on malachi2 timed out after 10s` (past `SCRAPE_TIMEOUT`, 10 seconds per request with
+  the `docker exec` included), `scrape failed: nc on malachi2 gave no HTTP status line`, or
+  `login failed: wget on malachi3 failed:` followed by the tool's own words.
 - **Linux only.** The script refuses any other host unless `ALLOW_NON_LINUX=1`, which runs it as a smoke
   test and says so.
 

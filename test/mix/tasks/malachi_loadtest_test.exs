@@ -31,14 +31,21 @@ defmodule Mix.Tasks.Malachi.LoadtestTest do
       assert Task.credentials([], %{"PATH" => "/bin"}) == []
     end
 
-    # The precedence the moduledoc states: the token is added beside the certificate and the named user,
-    # and Malachi.Loadtest.Conn.authenticate/2 takes a token first.
+    # credentials/2 drops nothing: a token from the environment goes in beside a typed certificate and
+    # user, and which handshake wins is Malachi.Loadtest.Conn.authenticate/2's choice, pinned by
+    # Malachi.Loadtest.ConnAuthTest.
     test "a MALACHI_TOKEN is added even beside --cert and --user, and MALACHI_PASS beside --user" do
       opts =
         Task.credentials([cert: "c.pem", key: "k.pem", user: "flag"], %{"MALACHI_TOKEN" => "t", "MALACHI_PASS" => "p"})
 
       assert Map.new(Keyword.take(opts, [:token, :pass, :user, :cert])) ==
                %{token: "t", pass: "p", user: "flag", cert: "c.pem"}
+    end
+
+    test "credential_vars/0 names exactly the variables credentials/2 reads" do
+      env = Map.new(Task.credential_vars(), &{&1, "v"})
+      assert Task.credential_vars() == ~w(MALACHI_USER MALACHI_PASS MALACHI_TOKEN)
+      assert Map.new(Task.credentials([], env)) == %{user: "v", pass: "v", token: "v"}
     end
 
     test "each variable is read on its own" do
