@@ -36,19 +36,16 @@ defmodule Malachi.Policies do
   "finish the rolling upgrade". Defining and deleting policies need version 3 only.
   """
 
-  require Logger
-
-  alias Malachi.AuditLog
+  alias Malachi.AdminCall
   alias Malachi.BrokerServer
   alias Malachi.Cluster.MachineVersion
   alias Malachi.Cluster.Policy
   alias Malachi.Cluster.PolicyStore
   alias Malachi.Cluster.Retention
   alias Malachi.DataPlaneRouter
-  alias Malachi.I18n
 
   @typedoc "Who asked for a change, as the audit log records it: a username, or `cli@<node>`."
-  @type actor :: String.t()
+  @type actor :: AdminCall.actor()
 
   @typedoc "A topic's policy as read back by `topic_policy/1`."
   @type topic_policy :: %{
@@ -211,18 +208,11 @@ defmodule Malachi.Policies do
   def reason_string({:unsupported_policy_field, name, since, effective}),
     do: "unsupported_policy_field: #{name}: " <> MachineVersion.upgrade_pending_message(since, effective)
 
-  def reason_string({:unsupported_command, _key, introduced, effective}),
-    do: "unsupported_command: " <> MachineVersion.upgrade_pending_message(introduced, effective)
-
-  def reason_string(:timeout),
-    do: "timeout: the control plane did not answer in time; the change may still apply, read it back before retrying"
-
-  def reason_string(reason) when is_atom(reason), do: Atom.to_string(reason)
-  def reason_string(reason), do: inspect(reason)
+  def reason_string(reason), do: AdminCall.reason_string(reason)
 
   defp check_name(name), do: if(Policy.valid_name?(name), do: :ok, else: {:error, :invalid_policy_name})
 
-  defp check_topic(topic), do: if(is_binary(topic) and topic != "", do: :ok, else: {:error, :invalid_topic})
+  defp check_topic(topic), do: AdminCall.check_topic(topic)
 
   defp to_policy(pairs) when is_list(pairs), do: Policy.from_pairs(pairs)
   defp to_policy(policy) when is_map(policy), do: {:ok, policy}
@@ -251,26 +241,10 @@ defmodule Malachi.Policies do
     end
   end
 
-  # A broker that does not answer is an error to report and audit, never an exit that takes the caller
-  # (a client connection, a dashboard request) down with it. A timed out bind may still commit: the
-  # control plane answered nobody, and the operator is told to read the binding back.
-  defp broker_call(fun) do
-    fun.()
-  catch
-    :exit, {:timeout, _call} -> {:error, :timeout}
-    :exit, reason -> {:error, {:broker_unavailable, reason}}
-  end
+  defp broker_call(fun), do: AdminCall.call(fun)
 
-  defp audit(event, actor, action, result, metadata) do
-    {status, metadata} =
-      case result do
-        :ok -> {:success, metadata}
-        {:error, reason} -> {:failure, Map.put(metadata, :reason, reason_string(reason))}
-      end
+  defp audit(event, actor, action, result, metadata),
+    do: AdminCall.audit(event, actor, action, result, metadata, &reason_string/1)
 
-    AuditLog.log_event(event, %{username: actor}, action, status, metadata)
-  end
-
-  defp log(:ok, key, bindings), do: Logger.info(I18n.t(key, bindings))
-  defp log({:error, _reason}, _key, _bindings), do: :ok
+  defp log(result, key, bindings), do: AdminCall.log(result, key, bindings)
 end
