@@ -242,6 +242,8 @@ defmodule Malachi.Console.Reads do
     "operations.replication_ok" => [:operations, :replication_ok],
     "operations.replication_no_quorum" => [:operations, :replication_no_quorum],
     "operations.producer_streams_open" => [:operations, :producer_streams_open],
+    "operations.scrub_segments_verified" => [:operations, :scrub_segments_verified],
+    "storage_flush.count" => [:storage_flush, :count],
     "storage_flush.p50_us" => [:storage_flush, :p50_us],
     "storage_flush.p99_us" => [:storage_flush, :p99_us],
     "storage_flush.p999_us" => [:storage_flush, :p999_us],

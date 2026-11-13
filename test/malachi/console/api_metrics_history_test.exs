@@ -47,6 +47,10 @@ defmodule Malachi.Console.ApiMetricsHistoryTest do
              get("/api/v1/metrics/history", token)
 
     assert series == Reads.history_series()
+
+    # what the Overview's flush footer and the Segments view's scrub rate read (the design system's screens)
+    assert "storage_flush.count" in series
+    assert "operations.scrub_segments_verified" in series
     assert Map.keys(node_history["series"]) |> Enum.sort() == Reads.history_series()
   end
 
