@@ -1288,13 +1288,13 @@ defmodule Malachi.BrokerTest do
       # another frontend: its cache learns the purge only from the re-seed
       {other, ^root_id} = broker_with_topic()
       stale = ReadView.new(other, [root_id])
-      other = Broker.put_cache(other, purged.dsrsm)
+      other = other |> Broker.put_cache(purged.dsrsm) |> Broker.replay_journal([])
       assert ReadView.logical_start(stale, root_id) == 2
 
       # the topic gone from the control plane (deleted, or moved away by a split): its start goes too,
       # since a topic created again under the name reuses the range ids
       {fresh, _other_root} = broker_with_topic("other_topic_only")
-      _other = Broker.put_cache(other, fresh.dsrsm)
+      _other = other |> Broker.put_cache(fresh.dsrsm) |> Broker.replay_journal([])
       assert ReadView.logical_start(stale, root_id) == 0
     end
 
@@ -1309,8 +1309,12 @@ defmodule Malachi.BrokerTest do
 
       broker = purge(broker, "events", %{root_id => 2})
       {journaled, broker} = Broker.take_journal(broker)
-      _broker = broker |> Broker.put_cache(before_purge) |> Broker.replay_journal(journaled)
 
+      # Not for a moment either: a reader in another process can look between the two steps.
+      reseeded = Broker.put_cache(broker, before_purge)
+      assert ReadView.logical_start(view, root_id) == 2
+
+      _broker = Broker.replay_journal(reseeded, journaled)
       assert ReadView.logical_start(view, root_id) == 2
     end
 

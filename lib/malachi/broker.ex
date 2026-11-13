@@ -1587,10 +1587,16 @@ defmodule Malachi.Broker do
   `unreachable` names the vnodes the refresh could not read; those keep whatever view this broker
   already held, because the refresh represents them with an empty `Metadata` and installing it would
   delete live topics from the cache. See `Malachi.Cluster.DSRSM.retain_vnodes/3`.
+
+  It does not publish the logical starts (#198): the read it installs predates the commands this broker
+  applied since, so publishing it would take a purge among them back out of the live table, and a reader
+  holding a view from before that purge would be served what it removed until the table was published
+  again. `replay_journal/2`, which always follows it, publishes once, from the cache with those commands
+  applied, so the table never goes back.
   """
   @spec put_cache(t(), DSRSM.t(), [DSRSM.vnode_id()]) :: t()
   def put_cache(%__MODULE__{} = broker, %DSRSM{} = dsrsm, unreachable \\ []) do
-    broker |> put_dsrsm(DSRSM.retain_vnodes(dsrsm, broker.dsrsm, unreachable)) |> publish_starts()
+    put_dsrsm(broker, DSRSM.retain_vnodes(dsrsm, broker.dsrsm, unreachable))
   end
 
   @doc """
@@ -1620,16 +1626,16 @@ defmodule Malachi.Broker do
   read taken before them ends up agreeing with them again. A command the read already carries answers
   an error (`:already_exists`, `:segment_exists`, `{:already_sealed, _}`) and leaves the state alone,
   which is why the replies are dropped rather than surfaced.
+
+  Then publishes the logical starts of the resulting cache (#198), even with no command to replay: it is
+  the one publish of a re-seed (`put_cache/3` makes none), done once the cache agrees with every command
+  this broker applied, so the live table never holds less than a purge this broker already answered.
   """
   @spec replay_journal(t(), [Metadata.command()]) :: t()
-  def replay_journal(%__MODULE__{} = broker, []), do: broker
+  def replay_journal(%__MODULE__{} = broker, []), do: publish_starts(broker)
 
-  def replay_journal(%__MODULE__{} = broker, commands) do
-    # Published again after the replay: the re-seed before it rebuilt the starts table from a read older
-    # than these commands, so a purge among them was just taken back out of the table, and a reader
-    # holding a view from before the purge would be served what it removed until the next re-seed.
-    broker |> put_dsrsm(Enum.reduce(commands, broker.dsrsm, &replay_command/2)) |> publish_starts()
-  end
+  def replay_journal(%__MODULE__{} = broker, commands),
+    do: broker |> put_dsrsm(Enum.reduce(commands, broker.dsrsm, &replay_command/2)) |> publish_starts()
 
   defp replay_command(command, dsrsm) do
     case DSRSM.vnode_for(dsrsm, Metadata.command_target_topic(command)) do
