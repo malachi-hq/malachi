@@ -629,6 +629,28 @@ if System.get_env("MALACHI_TRACING_ENABLED") == "true" do
     otlp_endpoint: System.get_env("MALACHI_OTLP_ENDPOINT") || "http://localhost:4318"
 end
 
+# The Kafka wire protocol spike (#166), off unless MALACHI_KAFKA_SPIKE_PORT is set. It has no auth, so it
+# binds loopback unless MALACHI_KAFKA_SPIKE_IP says otherwise (the spike harness sets 0.0.0.0 inside its
+# compose network). Skipped under test, where the suite starts its own listener on port 0.
+if config_env() != :test and System.get_env("MALACHI_KAFKA_SPIKE_PORT") do
+  {:ok, kafka_spike_ip} =
+    :inet.parse_address(String.to_charlist(System.get_env("MALACHI_KAFKA_SPIKE_IP", "127.0.0.1")))
+
+  config :malachi, :kafka_spike,
+    port: String.to_integer(System.fetch_env!("MALACHI_KAFKA_SPIKE_PORT")),
+    ip: kafka_spike_ip,
+    advertised_host: System.get_env("MALACHI_KAFKA_SPIKE_ADVERTISED_HOST", "127.0.0.1"),
+    topic: System.get_env("MALACHI_KAFKA_SPIKE_TOPIC", "kafka-spike"),
+    idempotence:
+      (case System.get_env("MALACHI_KAFKA_SPIKE_IDEMPOTENCE", "hide") do
+         "advertise" -> :advertise
+         "hide" -> :hide
+         other -> raise "MALACHI_KAFKA_SPIKE_IDEMPOTENCE must be advertise or hide, got #{inspect(other)}"
+       end),
+    max_wait_cap_ms: parse_int.("MALACHI_KAFKA_SPIKE_MAX_WAIT_CAP_MS", 1_000),
+    capture_dir: System.get_env("MALACHI_KAFKA_SPIKE_CAPTURE_DIR")
+end
+
 # ============================================================
 # Production Security Warnings
 # ============================================================

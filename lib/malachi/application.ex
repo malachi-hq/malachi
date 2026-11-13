@@ -155,6 +155,7 @@ defmodule Malachi.Application do
           {Malachi.TCPAcceptorPool, port},
           {Malachi.Dashboard, dashboard_port}
         ] ++
+        Malachi.KafkaSpike.children() ++
         console_children(
           Application.get_env(:malachi, :console_enabled, true),
           Application.get_env(:malachi, :console_port, 4042)
