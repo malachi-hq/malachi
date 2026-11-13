@@ -315,9 +315,13 @@ defmodule Malachi.ConsumeStreams do
       else: read_positioned(view, range_id, position, kept)
   end
 
-  # The records retention removed before a page, and whether that count is exact.
+  # The records retention removed before a page, and whether that count is exact. A stretch an operator
+  # purged (`cause: :purged`, #198) is not counted: it was removed on purpose, and a client that alerts on
+  # `expired` must not page on every purge. It reaches the operator through the skip log and metrics.
   defp expired(skips) do
-    Enum.reduce(skips, {0, true}, fn skip, {total, exact?} ->
+    skips
+    |> Enum.filter(&(&1.cause == :expired))
+    |> Enum.reduce({0, true}, fn skip, {total, exact?} ->
       case {skip.offsets, Skip.span(skip)} do
         {offsets, :exact} when is_integer(offsets) -> {total + offsets, exact?}
         {offsets, _bound} when is_integer(offsets) -> {total + offsets, false}

@@ -784,7 +784,7 @@ permanently and meaninglessly here.
 | Scrub found something unrepairable | Error | `malachi_storage_scrub_segments_total{result="unrepairable"}` |
 | Storage failure | Error | `malachi_storage_failures_total{reason}` |
 | Replicas in one failure domain | Warning | `malachi_domain_violations{topic}` |
-| Consumer lost data to retention | Warning | `malachi_retention_skips_total{origin="cursor"}` |
+| Consumer lost data to retention | Warning | `malachi_retention_skips_total{origin="cursor",cause="expired"}` |
 | Retention sweep not running | Warning | `malachi_retention_sweep_duration_seconds_count` flat on every node |
 | Control plane version stuck | Warning | `[:malachi, :ra, :machine_version]` with `stuck: true` |
 | Rollback floor above this binary | Warning | `malachi.format` |

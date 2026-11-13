@@ -233,7 +233,15 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
 
     defp skip(offsets, overrides \\ []) do
       struct!(
-        %Skip{range_id: {"t", 0}, source_range_id: {"t", 0}, from: 0, offsets: offsets, origin: :cursor, source: :self},
+        %Skip{
+          range_id: {"t", 0},
+          source_range_id: {"t", 0},
+          from: 0,
+          offsets: offsets,
+          origin: :cursor,
+          source: :self,
+          cause: :expired
+        },
         overrides
       )
     end
@@ -248,10 +256,40 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
       Telemetry.retention_skip(topic, "billing", skip(5))
       Telemetry.retention_skip(topic, "billing", skip(2))
       Telemetry.retention_skip(topic, nil, skip(:unknown, source: :ancestor, origin: :start))
+      Telemetry.retention_skip(topic, "billing", skip(4, cause: :purged))
 
-      assert Enum.sort_by(skips_of(topic), & &1.group) == [
-               %{topic: topic, reader: :none, group: "", origin: :start, span: :unknown, events: 1, offsets: 0},
-               %{topic: topic, reader: :group, group: "billing", origin: :cursor, span: :exact, events: 2, offsets: 7}
+      assert Enum.sort_by(skips_of(topic), &{&1.group, &1.cause}) == [
+               %{
+                 topic: topic,
+                 reader: :none,
+                 group: "",
+                 origin: :start,
+                 span: :unknown,
+                 cause: :expired,
+                 events: 1,
+                 offsets: 0
+               },
+               %{
+                 topic: topic,
+                 reader: :group,
+                 group: "billing",
+                 origin: :cursor,
+                 span: :exact,
+                 cause: :expired,
+                 events: 2,
+                 offsets: 7
+               },
+               # a purge is never counted together with a loss to retention
+               %{
+                 topic: topic,
+                 reader: :group,
+                 group: "billing",
+                 origin: :cursor,
+                 span: :exact,
+                 cause: :purged,
+                 events: 1,
+                 offsets: 4
+               }
              ]
     end
 

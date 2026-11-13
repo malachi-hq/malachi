@@ -1,7 +1,8 @@
 # Per-topic retention
 
 [Operations](operations.md) sets one retention for the whole cluster, from the environment. A **storage
-policy** overrides it for the topics you choose, at runtime, without a restart.
+policy** overrides it for the topics you choose, at runtime, without a restart. To remove data on demand
+rather than by policy, see [Purging a topic](purging-a-topic.md).
 
 ## Policies and bindings
 

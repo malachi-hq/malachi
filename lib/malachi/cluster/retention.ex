@@ -89,6 +89,10 @@ defmodule Malachi.Cluster.Retention do
   The sealed segment ids to expire at `now_ms` (epoch ms). `global_policy` is the fallback; each
   range uses its topic's policy retention merged over it (see the module doc).
 
+  A sealed segment wholly below its range's logical start (#198) expires too, whatever its age and
+  size: an operator purged every record in it, and no reader is served any of them. The segment holding
+  the logical start is kept until the start passes its end, so a purge reclaims disk segment by segment.
+
   `policies` maps a policy NAME to its definition. The metadata says which name a topic points at, and
   the definitions are an administrative object of the cluster
   (`Malachi.Cluster.PolicyStore.fetch_all/0`), so the caller resolves them once per sweep and hands
@@ -113,7 +117,8 @@ defmodule Malachi.Cluster.Retention do
       oldest_first = Enum.sort_by(sealed, & &1.start_offset)
 
       expired_by_age(oldest_first, now_ms, Map.get(retention, :max_age_ms)) ++
-        expired_by_size(oldest_first, Map.get(retention, :max_bytes))
+        expired_by_size(oldest_first, Map.get(retention, :max_bytes)) ++
+        expired_by_purge(oldest_first, logical_start(metadata, range_id))
     end)
     |> Enum.uniq()
   end
@@ -218,6 +223,16 @@ defmodule Malachi.Cluster.Retention do
       segment.id
     end
   end
+
+  # Every sealed segment that ends at or below the logical start. Nothing for a range never purged.
+  defp expired_by_purge(_segments, 0), do: []
+
+  defp expired_by_purge(segments, logical_start) do
+    for segment <- segments, segment.start_offset + segment.length <= logical_start, do: segment.id
+  end
+
+  # A segment always names a range the metadata holds; an absent one reads as never purged.
+  defp logical_start(metadata, range_id), do: metadata.ranges |> Map.get(range_id, %{}) |> Metadata.logical_start()
 
   defp expired_by_size(_segments, nil), do: []
 

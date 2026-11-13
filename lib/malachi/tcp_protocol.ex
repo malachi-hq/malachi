@@ -31,6 +31,7 @@ defmodule Malachi.TCPProtocol do
   alias Malachi.Policies
   alias Malachi.Position
   alias Malachi.ProducerStreams
+  alias Malachi.Purge
   alias Malachi.RateLimiter
   alias Malachi.Routing
   alias Malachi.StreamWindow
@@ -285,6 +286,7 @@ defmodule Malachi.TCPProtocol do
       api_key == Wire.list_policies_key() -> list_policies(correlation_id, payload, session)
       api_key == Wire.bind_topic_policy_key() -> bind_topic_policy(correlation_id, payload, session)
       api_key == Wire.get_topic_policy_key() -> get_topic_policy(correlation_id, payload, session)
+      api_key == Wire.purge_topic_key() -> purge_topic(correlation_id, payload, session)
       true -> dispatch_routing(api_key, correlation_id, payload, session)
     end
   end
@@ -828,6 +830,22 @@ defmodule Malachi.TCPProtocol do
 
         error ->
           policy_reply(correlation_id, error, <<>>)
+      end
+    end)
+  end
+
+  # The manual purge (#198), gated by the :admin permission: a purge removes data from every reader.
+  defp purge_topic(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      {topic, point} = Wire.decode_purge_topic_req(payload)
+
+      case Purge.purge(topic, point, session.username) do
+        {:ok, moves} ->
+          rows = moves |> Enum.sort() |> Enum.map(fn {{_topic, seq}, {from, to}} -> {seq, from, to} end)
+          Wire.encode_ok(correlation_id, Wire.encode_purge_topic_resp(rows))
+
+        {:error, reason} ->
+          Wire.encode_error(correlation_id, Purge.reason_string(reason))
       end
     end)
   end

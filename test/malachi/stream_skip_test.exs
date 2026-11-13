@@ -77,6 +77,22 @@ defmodule Malachi.StreamSkipTest do
     assert_receive {:skip_event, %{offsets: 2}, %{group: nil}}
   end
 
+  test "a stream's expired count leaves out what an operator purged (#198)",
+       %{broker: broker, topic: topic, root_id: root_id} do
+    # Retention removed v0 and v1; a purge up to v3's position covers them and v2 too, all below the start.
+    {:ok, _} = BrokerServer.produce(broker, topic, [Record.new("v3", key: "v3")])
+    wait_until!(fn -> Enum.all?(segments(broker, root_id), &(&1.state == :sealed)) end)
+
+    assert {:ok, %{^root_id => {0, 3}}} =
+             BrokerServer.purge(broker, topic, {:position, Malachi.Position.encode(root_id, {0, 3})})
+
+    {:ok, token, position, _server} = BrokerServer.open_consume(broker, root_id, :earliest)
+    assert_receive {:consume_wake, ^token, view, reporter}, 3_000
+    assert {:ok, page, 1} = ConsumeStreams.read_page(view, root_id, position, 100, 1_048_576, reporter)
+    assert page.expired == 0
+    assert_receive {:skip_event, %{offsets: 3}, %{cause: :purged}}
+  end
+
   test "a broker with no registered name reads past what retention removed, and reports nowhere", %{tmp_dir: directory} do
     {:ok, anonymous} = BrokerServer.start_link(Path.join(directory, "anonymous"), segment_max_bytes: 1)
     on_exit(fn -> stop_quietly(anonymous) end)

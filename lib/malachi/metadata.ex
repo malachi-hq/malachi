@@ -47,13 +47,17 @@ defmodule Malachi.Metadata do
         }
 
   @type range_meta :: %{
-          id: range_id(),
-          topic: topic_name(),
-          key_start: non_neg_integer(),
-          key_end: non_neg_integer(),
-          keyspace_size: pos_integer(),
-          state: :active | :sealed,
-          parents: [range_id()]
+          required(:id) => range_id(),
+          required(:topic) => topic_name(),
+          required(:key_start) => non_neg_integer(),
+          required(:key_end) => non_neg_integer(),
+          required(:keyspace_size) => pos_integer(),
+          required(:state) => :active | :sealed,
+          required(:parents) => [range_id()],
+          # The range's logical start (#198): no reader is served an offset below it. Absent until an
+          # operator first purges the range, which reads as 0 (`logical_start/1`). Set only by
+          # `{:set_range_starts, topic, starts}`, and it only moves forward.
+          optional(:logical_start) => non_neg_integer()
         }
 
   @type segment_meta :: %{
@@ -147,6 +151,7 @@ defmodule Malachi.Metadata do
           | {:commit_offset, group(), topic_name(), offsets(), non_neg_integer()}
           | {:open_group, group(), topic_name()}
           | {:bind_topic_policy, topic_name(), policy_name() | nil}
+          | {:set_range_starts, topic_name(), %{range_id() => non_neg_integer()}}
           | {:extract_topic, topic_name()}
           | {:insert_topic, topic_export()}
           | {:begin_migration, topic_name()}
@@ -171,7 +176,11 @@ defmodule Malachi.Metadata do
   # 8 adds the groups' fences (`:fences`, see `t:group_fence/0`). An export that carries none is still
   # format 0, which every version reads: a vnode split of a topic no group key ever fenced goes through
   # while an upgrade holds the control plane below 8.
-  @export_format 8
+  #
+  # 9 adds the ranges' logical starts (`:logical_start` on a range, #198). A member below 9 would store
+  # the field and never clamp a reader by it, serving purged records again, so an export carrying one
+  # is refused there. An export with no purged range keeps the lower format.
+  @export_format 9
 
   @behaviour Malachi.Cluster.MachineVersion
 
@@ -213,6 +222,8 @@ defmodule Malachi.Metadata do
       {:open_group, 3} => 8,
       # The binding an operator emits (#194). Policy definitions live in `Malachi.Cluster.PolicyRegistry`.
       {:bind_topic_policy, 3} => 4,
+      # The manual purge (#198): moves the logical start of one or more ranges of a topic forward.
+      {:set_range_starts, 3} => 9,
       {:extract_topic, 2} => 0,
       {:insert_topic, 2} => 0,
       {:begin_migration, 2} => 0,
@@ -251,6 +262,7 @@ defmodule Malachi.Metadata do
   def command_target_topic({:seal_topic, name}), do: name
   def command_target_topic({:delete_topic, name}), do: name
   def command_target_topic({:bind_topic_policy, name, _policy}), do: name
+  def command_target_topic({:set_range_starts, name, _starts}), do: name
   def command_target_topic({:commit_offset, _group, topic, _offsets}), do: topic
   def command_target_topic({:commit_offset, _group, topic, _offsets, _generation}), do: topic
   def command_target_topic({:open_group, _group, topic}), do: topic
@@ -379,6 +391,7 @@ defmodule Malachi.Metadata do
   defp command_topic(_state, {:seal_topic, name}), do: name
   defp command_topic(_state, {:delete_topic, name}), do: name
   defp command_topic(_state, {:bind_topic_policy, name, _policy}), do: name
+  defp command_topic(_state, {:set_range_starts, name, _starts}), do: name
   defp command_topic(_state, {:commit_offset, _group, topic, _offsets}), do: topic
   defp command_topic(_state, {:commit_offset, _group, topic, _offsets, _generation}), do: topic
   defp command_topic(_state, {:open_group, _group, topic}), do: topic
@@ -585,6 +598,23 @@ defmodule Malachi.Metadata do
   defp do_apply(%__MODULE__{} = state, {:bind_topic_policy, topic, policy_name}),
     do: bind_policy(state, topic, policy_name)
 
+  # The manual purge (#198), all or nothing: every range is checked before any start moves, so a refused
+  # request leaves the topic as it was. A SEALED range accepts it (unlike `register_segment`): a range a
+  # split retired still serves its history to its children, and that history is what is being purged.
+  defp do_apply(%__MODULE__{} = state, {:set_range_starts, topic, starts}) when is_map(starts) do
+    with :ok <- check_topic_exists(state, topic),
+         {:ok, moves} <- check_range_starts(state, topic, starts) do
+      ranges =
+        for {range_id, {from, to}} <- moves, to > from, reduce: state.ranges do
+          ranges -> Map.update!(ranges, range_id, &Map.put(&1, :logical_start, to))
+        end
+
+      {%{state | ranges: ranges}, {:ok, moves}}
+    else
+      {:error, _reason} = error -> {state, error}
+    end
+  end
+
   # Vnode-split migration (driven through each vnode's Raft log): `:extract_topic` removes a topic's full
   # metadata from the source vnode and returns it as an `export` (the reply), `:insert_topic` restores that
   # export on the destination vnode. Together they relocate a topic, with its ranges, segments and
@@ -709,6 +739,19 @@ defmodule Malachi.Metadata do
     |> Map.get(range_id, @empty_set)
     |> Enum.map(&Map.fetch!(state.segments, &1))
   end
+
+  @doc """
+  A range's logical start (#198): the lowest offset any reader of it is served. 0 for a range no
+  operator ever purged.
+
+      iex> Malachi.Metadata.logical_start(%{id: {"t", 0}})
+      0
+      iex> Malachi.Metadata.logical_start(%{id: {"t", 0}, logical_start: 42})
+      42
+  """
+  @spec logical_start(%{optional(:logical_start) => non_neg_integer(), optional(atom()) => any()}) ::
+          non_neg_integer()
+  def logical_start(range), do: Map.get(range, :logical_start, 0)
 
   @doc "A consumer group's fence for a topic (`t:group_fence/0`): epoch 0 and no generation if it has none."
   @spec group_fence(t(), group(), topic_name()) :: group_fence()
@@ -893,10 +936,18 @@ defmodule Malachi.Metadata do
         fences = for {{group, ^name}, fence} <- state.group_fences, into: %{}, do: {group, fence}
 
         export = %{topic: topic, ranges: ranges, segments: segments, offsets: offsets}
+        export = if fences == %{}, do: export, else: Map.put(export, :fences, fences)
+        Map.put(export, :export_format, topic_export_format(ranges, fences))
+    end
+  end
 
-        if fences == %{},
-          do: Map.put(export, :export_format, 0),
-          else: Map.merge(export, %{fences: fences, export_format: @export_format})
+  # The lowest format whose reader understands everything this export carries: a member below it would
+  # store state it cannot act on (see `@export_format`).
+  defp topic_export_format(ranges, fences) do
+    cond do
+      Enum.any?(ranges, fn {_id, range} -> logical_start(range) > 0 end) -> 9
+      fences != %{} -> 8
+      true -> 0
     end
   end
 
@@ -1232,6 +1283,60 @@ defmodule Malachi.Metadata do
     state = %{state | segments: Map.put(state.segments, segment_id, segment)}
     {index_add_segment(state, range_id, segment_id), :ok}
   end
+
+  defp check_topic_exists(state, topic),
+    do: if(Map.has_key?(state.topics, topic), do: :ok, else: {:error, :no_such_topic})
+
+  # `{:ok, %{range_id => {from, to}}}` for the starts that can all be applied, or the first refusal in
+  # range id order (deterministic, so every replica answers the same).
+  defp check_range_starts(state, topic, starts) do
+    starts
+    |> Enum.sort()
+    |> Enum.reduce_while({:ok, %{}}, fn {range_id, offset}, {:ok, moves} ->
+      case check_range_start(state, topic, range_id, offset) do
+        {:ok, move} -> {:cont, {:ok, Map.put(moves, range_id, move)}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  # The start only moves forward: an offset at or below the current start moves nothing for that range and
+  # answers `{from, from}`, so a purge resolved from a cache that is behind the log (it saw a lower start)
+  # still moves the ranges it can rather than being refused whole.
+  defp check_range_start(state, topic, range_id, offset) do
+    with :ok <- check_offset(offset),
+         {:ok, range} <- fetch_topic_range(state, topic, range_id),
+         from = logical_start(range),
+         to = max(from, offset),
+         :ok <- check_within_end(state, range_id, to) do
+      {:ok, {from, to}}
+    end
+  end
+
+  defp check_offset(offset) when is_integer(offset) and offset >= 0, do: :ok
+  defp check_offset(_offset), do: {:error, :invalid_offset}
+
+  defp fetch_topic_range(state, topic, range_id) do
+    case Map.fetch(state.ranges, range_id) do
+      {:ok, %{topic: ^topic} = range} -> {:ok, range}
+      {:ok, _other_topic} -> {:error, :range_topic_mismatch}
+      :error -> {:error, :no_such_range}
+    end
+  end
+
+  # The control plane knows a range's end only where it is sealed: with an active segment the end is in
+  # the data plane, and the broker that owns the range checks the live end before it submits
+  # (`Malachi.Broker.set_range_starts/3`). A range whose sealed segments retention dropped entirely has
+  # no known end either, so nothing bounds it here, as `discontiguous?/3` reasons for registration.
+  defp check_within_end(state, range_id, offset) do
+    if active_segment?(state, range_id),
+      do: :ok,
+      else: check_within_sealed_end(range_end(state, range_id), offset)
+  end
+
+  defp check_within_sealed_end(nil, _offset), do: :ok
+  defp check_within_sealed_end(range_end, offset) when offset <= range_end, do: :ok
+  defp check_within_sealed_end(_range_end, _offset), do: {:error, :start_past_end}
 
   defp fetch_active_range(state, range_id) do
     case Map.fetch(state.ranges, range_id) do

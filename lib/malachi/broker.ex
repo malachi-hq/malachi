@@ -42,6 +42,8 @@ defmodule Malachi.Broker do
   alias Malachi.Keyspace
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Position
+  alias Malachi.Purge.Points
 
   # 64 MiB: the active segment asks to roll once it reaches this many encoded bytes (soft threshold,
   # checked at produce-batch boundaries, see `tally_bytes/3`).
@@ -106,11 +108,19 @@ defmodule Malachi.Broker do
           unrecovered: %{Metadata.range_id() => true},
           durable: %{Metadata.range_id() => non_neg_integer()},
           horizon_pending: %{Metadata.range_id() => true},
-          view_epoch: non_neg_integer()
+          view_epoch: non_neg_integer(),
+          starts_table: :ets.tid() | nil
         }
 
   defstruct dsrsm: nil,
             command_fun: nil,
+            # The logical starts of the ranges an operator purged (#198), published where every reader
+            # sees them at once: an ETS table this broker's owner writes and any process reads. A
+            # `Malachi.Broker.ReadView` snapshots the starts when it is built, and a consume stream keeps
+            # reading from the view it holds until it catches up, so a purge applied after the view was
+            # taken would not reach it; every read also looks here (`ReadView.logical_start/2`). `nil` for
+            # a broker built without one, which then clamps by the view alone.
+            starts_table: nil,
             # Control plane commands this broker applied locally, newest first, since the journal was
             # last taken. `nil` means journaling is off, which is every caller that does not re-seed
             # its cache from elsewhere: in-memory metadata, and the tests that build a broker directly.
@@ -212,8 +222,10 @@ defmodule Malachi.Broker do
        policy_fun: Keyword.get(opts, :policy_fun, &PolicyStore.get/1),
        broker_attributes: Keyword.get(opts, :broker_attributes, %{}),
        min_domains: Keyword.get(opts, :min_domains),
-       placement_policy: Keyword.get(opts, :placement_policy, :soft)
-     }}
+       placement_policy: Keyword.get(opts, :placement_policy, :soft),
+       starts_table: :ets.new(:malachi_logical_starts, [:set, :protected, read_concurrency: true])
+     }
+     |> publish_starts()}
   end
 
   defp validate_policy!(brokers, replication_factor, segment_max_bytes) do
@@ -249,6 +261,94 @@ defmodule Malachi.Broker do
   @spec bind_topic_policy(t(), Metadata.topic_name(), Metadata.policy_name() | nil) :: {t(), term()}
   def bind_topic_policy(%__MODULE__{} = broker, topic, policy_name) do
     apply_metadata(broker, {:bind_topic_policy, topic, policy_name})
+  end
+
+  @doc """
+  Moves the logical start of ranges of `topic` forward (#198): `starts` maps a range id to the offset no
+  reader of it is served below, through the topic's own vnode in one command
+  (`{:set_range_starts, topic, starts}`, machine version 9), so the purge is all or nothing.
+
+  The control plane cannot see where a range with an active segment ends, so this checks it first,
+  against the durable end this frontend serves reads up to (`durable_end/2`), not the end it planned:
+  the planned end counts produces still in flight, and one that fails is sealed below it, so the offsets
+  it reserved are handed again to the next produce. A start past the durable end would hide those
+  acknowledged records from every reader. No position a read handed out is past it. A range this frontend still waits to
+  recover answers `:metadata_unavailable`, which a caller retries. A frontend that has not caught up with
+  a range's end refuses (`:start_past_end`) rather than purge on a guess. A range this broker does not
+  know is left to the control plane, which refuses it.
+
+  Answers `{:ok, %{range_id => {from, to}}}`, each range's start before and after.
+  """
+  @spec set_range_starts(t(), Metadata.topic_name(), %{Metadata.range_id() => non_neg_integer()}) :: {t(), term()}
+  def set_range_starts(%__MODULE__{} = broker, topic, starts) when is_map(starts) do
+    case check_live_ends(broker, starts) do
+      :ok -> apply_metadata(broker, {:set_range_starts, topic, starts})
+      {:error, _reason} = error -> {broker, error}
+    end
+  end
+
+  @typedoc """
+  What a purge is up to (#198): a time (epoch ms, rounded down to a segment boundary), an opaque
+  position token a read handed out, or a consumer group's commit.
+  """
+  @type purge_point :: {:before, non_neg_integer()} | {:position, binary()} | {:group, Metadata.group()}
+
+  @doc """
+  Purges `topic` up to `point`: resolves where each range's logical start moves
+  (`Malachi.Purge.Points`) from this frontend's view of the topic, then submits them all in one command
+  (`set_range_starts/3`). A point that moves no range submits nothing and answers `{:ok, %{}}`.
+
+  Resolving and submitting in one call of the process that owns the broker leaves no window between
+  them on this frontend. A cache behind the control plane resolves from an older commit or fewer seals,
+  which only purges less.
+  """
+  @spec purge(t(), Metadata.topic_name(), purge_point()) :: {t(), term()}
+  def purge(%__MODULE__{} = broker, topic, point) do
+    with {:ok, view} <- purge_view(broker, topic),
+         {:ok, starts} <- purge_starts(broker, view, topic, point) do
+      if starts == %{}, do: {broker, {:ok, %{}}}, else: set_range_starts(broker, topic, starts)
+    else
+      {:error, _reason} = error -> {broker, error}
+    end
+  end
+
+  defp purge_view(broker, topic) do
+    case DSRSM.get_topic(broker.dsrsm, topic) do
+      nil ->
+        {:error, :no_such_topic}
+
+      _topic ->
+        ranges = broker.dsrsm |> DSRSM.ranges_of_topic(topic) |> Map.new(&{&1.id, &1})
+        segments = Map.new(ranges, fn {id, _range} -> {id, DSRSM.segments_of_range(broker.dsrsm, topic, id)} end)
+        {:ok, %{ranges: ranges, segments: segments}}
+    end
+  end
+
+  defp purge_starts(_broker, view, _topic, {:before, time_ms}) when is_integer(time_ms) and time_ms >= 0,
+    do: {:ok, Points.before_time(view, time_ms)}
+
+  defp purge_starts(_broker, view, topic, {:position, token}) do
+    with {:ok, issuer_id, at} <- Position.resolve(token, topic), do: Points.at_position(view, issuer_id, at)
+  end
+
+  defp purge_starts(broker, view, topic, {:group, group}) when is_binary(group) and group != "",
+    do: {:ok, Points.floors(view, committed_offsets(broker, group, topic))}
+
+  defp purge_starts(_broker, _view, _topic, _point), do: {:error, :invalid_purge_point}
+
+  defp check_live_ends(broker, starts) do
+    starts
+    |> Enum.sort()
+    |> Enum.find_value(:ok, fn {range_id, offset} -> live_end_refusal(broker, range_id, offset) end)
+  end
+
+  defp live_end_refusal(broker, range_id, offset) do
+    cond do
+      not is_tuple(range_id) or tuple_size(range_id) != 2 or not range_known?(broker, range_id) -> nil
+      unrecovered?(broker, range_id) or horizon_pending?(broker, range_id) -> {:error, :metadata_unavailable}
+      is_integer(offset) and offset > durable_end(broker, range_id) -> {:error, :start_past_end}
+      true -> nil
+    end
   end
 
   @doc "The policy NAME `topic` is bound to (`nil` for none), or `{:error, :no_such_topic}`."
@@ -646,6 +746,10 @@ defmodule Malachi.Broker do
   Reads up to `max_records` records from `range_id` starting at `offset`, via `read_fun`, from the owning
   segment's primary, or, for a sealed segment, from the first of its copies that serves it, the head first.
   Returns `:eof` past the range's end (or if nothing was produced to it).
+
+  This is a PHYSICAL read: it serves what is stored at `offset` and is not clamped by the range's
+  logical start, so it returns records a purge (#198) removed from every consumer. No client request
+  reaches it; consumers read through `read_consume/5` and `stream_history/5`, which are clamped.
   """
   @spec read(t(), Metadata.range_id(), non_neg_integer(), pos_integer(), read_fun()) ::
           {:ok, [Record.t()]} | :eof | {:error, term()}
@@ -1486,7 +1590,7 @@ defmodule Malachi.Broker do
   """
   @spec put_cache(t(), DSRSM.t(), [DSRSM.vnode_id()]) :: t()
   def put_cache(%__MODULE__{} = broker, %DSRSM{} = dsrsm, unreachable \\ []) do
-    put_dsrsm(broker, DSRSM.retain_vnodes(dsrsm, broker.dsrsm, unreachable))
+    broker |> put_dsrsm(DSRSM.retain_vnodes(dsrsm, broker.dsrsm, unreachable)) |> publish_starts()
   end
 
   @doc """
@@ -1521,7 +1625,10 @@ defmodule Malachi.Broker do
   def replay_journal(%__MODULE__{} = broker, []), do: broker
 
   def replay_journal(%__MODULE__{} = broker, commands) do
-    put_dsrsm(broker, Enum.reduce(commands, broker.dsrsm, &replay_command/2))
+    # Published again after the replay: the re-seed before it rebuilt the starts table from a read older
+    # than these commands, so a purge among them was just taken back out of the table, and a reader
+    # holding a view from before the purge would be served what it removed until the next re-seed.
+    broker |> put_dsrsm(Enum.reduce(commands, broker.dsrsm, &replay_command/2)) |> publish_starts()
   end
 
   defp replay_command(command, dsrsm) do
@@ -1789,7 +1896,7 @@ defmodule Malachi.Broker do
   defp own_position(broker, range_id, own, offset) do
     cond do
       unrecovered?(broker, range_id) -> {:error, :metadata_unavailable}
-      offset <= max(next_offset(broker, range_id), range_sealed_end(broker, range_id)) -> {:ok, {own, offset}}
+      offset <= known_end(broker, range_id) -> {:ok, {own, offset}}
       true -> {:error, :invalid_position}
     end
   end
@@ -1809,8 +1916,8 @@ defmodule Malachi.Broker do
   end
 
   @doc """
-  How many records `range_id` still holds past `position`, as `view` sees it: exact on the range's own
-  records, and an upper bound while `position` is in an ancestor, whose records are counted whole although
+  How many records `range_id` still holds past `position`, as `view` sees it, none below a source's
+  logical start (#198), which no reader is served: exact on the range's own records, and an upper bound while `position` is in an ancestor, whose records are counted whole although
   only the range's slice of them is read.
   """
   @spec consume_backlog(ReadView.t(), Metadata.range_id(), {non_neg_integer(), non_neg_integer()}) ::
@@ -1827,8 +1934,11 @@ defmodule Malachi.Broker do
         |> Enum.with_index()
         |> Enum.drop(index)
         |> Enum.map(fn
-          {source_id, ^index} -> max(view_end(view, source_id) - offset, 0)
-          {source_id, _later} -> view_end(view, source_id)
+          {source_id, ^index} ->
+            max(view_end(view, source_id) - max(offset, ReadView.logical_start(view, source_id)), 0)
+
+          {source_id, _later} ->
+            max(view_end(view, source_id) - ReadView.logical_start(view, source_id), 0)
         end)
         |> Enum.sum()
     end
@@ -2130,7 +2240,55 @@ defmodule Malachi.Broker do
     applied = %{broker | dsrsm: dsrsm, journal: journal_put(broker.journal, command, dsrsm, broker.dsrsm)}
     # matched exactly, as `journal_put/4` matches by identity: a seal changes one entry of the vnode's segments,
     # and loose equality would walk every other entry of the map before it found the one that differs
-    {if(view_neutral?(command) or dsrsm === broker.dsrsm, do: applied, else: views_changed(applied)), reply}
+    applied = if(view_neutral?(command) or dsrsm === broker.dsrsm, do: applied, else: views_changed(applied))
+    {publish_command_starts(applied, command, dsrsm !== broker.dsrsm), reply}
+  end
+
+  # Publishes the starts a purge just moved. A topic deleted, or moved away by a vnode split, reaches this
+  # broker through a re-seed (`put_cache/3`), which publishes the whole table again.
+  defp publish_command_starts(%{starts_table: table} = broker, {:set_range_starts, topic, _starts}, true)
+       when table != nil,
+       do: publish_topic_starts(broker, topic)
+
+  defp publish_command_starts(broker, _command, _changed?), do: broker
+
+  # The table made to hold exactly the starts of `topic` the cache now has: one each for its purged ranges,
+  # none for a topic it no longer holds.
+  defp publish_topic_starts(broker, topic) do
+    purged =
+      for range <- DSRSM.ranges_of_topic(broker.dsrsm, topic),
+          (start = Metadata.logical_start(range)) > 0,
+          do: {range.id, start}
+
+    put_starts(broker.starts_table, purged, fn {range_topic, _seq} -> range_topic == topic end)
+    broker
+  end
+
+  # The table made to hold exactly the starts of every purged range the cache holds, after a re-seed
+  # replaced it. New entries go in before stale ones come out, so no reader ever finds the table emptied.
+  defp publish_starts(%{starts_table: nil} = broker), do: broker
+
+  defp publish_starts(broker) do
+    purged =
+      for {_vnode, metadata} <- broker.dsrsm.vnodes,
+          {range_id, range} <- metadata.ranges,
+          (start = Metadata.logical_start(range)) > 0,
+          do: {range_id, start}
+
+    put_starts(broker.starts_table, purged, fn _range_id -> true end)
+    broker
+  end
+
+  defp put_starts(table, purged, in_scope?) do
+    :ets.insert(table, purged)
+    kept = MapSet.new(purged, &elem(&1, 0))
+
+    for {range_id, _start} <- :ets.tab2list(table),
+        in_scope?.(range_id),
+        not MapSet.member?(kept, range_id),
+        do: :ets.delete(table, range_id)
+
+    :ok
   end
 
   # The commands that change nothing a `Malachi.Broker.ReadView` holds (no range, no segment): a group's
@@ -2155,6 +2313,10 @@ defmodule Malachi.Broker do
   # Query routing: a range/segment id embeds its topic, which is how a read is dispatched to the owning
   # vnode. The command path uses `Metadata.command_target_topic/1` instead (it takes a whole command).
   defp topic_of_range(range_id), do: elem(range_id, 0)
+
+  # Where a range ends as this frontend knows it: what it planned, what a recovery learned, or where its
+  # last sealed segment ends.
+  defp known_end(broker, range_id), do: max(next_offset(broker, range_id), range_sealed_end(broker, range_id))
   defp topic_of_segment(segment_id), do: topic_of_range(elem(segment_id, 0))
 
   # Placement options for a new segment of `range_id`: spread it over the effective attribute using
@@ -2197,15 +2359,23 @@ defmodule Malachi.Broker do
     end
   end
 
-  # The earliest offset still stored for a range: the smallest segment start_offset (0 if none).
-  # Retention deletes the oldest segments: a contiguous prefix - so a consumer positioned below this
-  # has had its data expired; read callers clamp up to it (`clamp_to_stored/3`) to move on to what still
-  # exists, and the consume path reports the difference as a `Malachi.Broker.Skip`.
+  # The earliest offset a range still serves: the higher of the smallest segment start_offset (0 if none)
+  # and the range's logical start (#198).
+  #
+  # Retention deletes the oldest segments: a contiguous prefix - so a consumer positioned below the first
+  # stored segment has had its data expired. An operator's purge moves the logical start, which can sit
+  # inside a segment that is still stored, and a consumer below it is moved past records that are on
+  # disk but no longer served. Read callers clamp up to this floor (`clamp_to_stored/3`), and the consume
+  # path reports the difference as `Malachi.Broker.Skip`s, split at the logical start
+  # (`add_step_skips/7`).
   defp earliest_offset(view, range_id) do
-    view
-    |> ReadView.segments(range_id)
-    |> Enum.map(& &1.start_offset)
-    |> Enum.min(fn -> 0 end)
+    stored =
+      view
+      |> ReadView.segments(range_id)
+      |> Enum.map(& &1.start_offset)
+      |> Enum.min(fn -> 0 end)
+
+    max(stored, ReadView.logical_start(view, range_id))
   end
 
   defp primary(%{replica_set: [primary | _]}), do: primary
@@ -2295,9 +2465,10 @@ defmodule Malachi.Broker do
   defp cursor_origin(:start), do: :start
   defp cursor_origin({_source_index, _source_offset}), do: :cursor
 
-  # Never read below the earliest offset still stored for a source. Retention deletes the oldest
-  # segments, so a position under that floor points at data that is gone; both readers clamp through
-  # here, and the consume path reports the difference as skipped.
+  # Never read below the earliest offset a source still serves. Retention deletes the oldest segments and
+  # a purge moves the logical start, so a position under that floor points at data that is gone or no
+  # longer served; both readers clamp through here, and the consume path reports the difference as
+  # skipped.
   defp clamp_to_stored(view, range_id, offset), do: max(offset, earliest_offset(view, range_id))
 
   defp read_history_page(view, sources, source_index, source_offset, max_records, read_fun) do
@@ -2393,6 +2564,7 @@ defmodule Malachi.Broker do
     # Skip data retention expired: never read below the range's earliest available offset, so a
     # consumer whose position was deleted advances to the earliest data still stored (at-least-once).
     stored = clamp_to_stored(page.view, source_range_id, offset)
+    logical = ReadView.logical_start(page.view, source_range_id)
 
     # Every read asks for a whole page, not for what is left of this one: on an ancestor most of what a
     # read returns can belong to the sibling slice, and asking for the remainder made each read smaller
@@ -2402,7 +2574,7 @@ defmodule Malachi.Broker do
       {:ok, [_ | _] = records, start} ->
         # `start` is where the read really began: above `offset` by the clamp and by any hole
         # `locate_segment/3` stepped over, both of them missing segments.
-        skips = add_skip(skips, page, source_range_id, source, offset, start - offset)
+        skips = add_step_skips(skips, page, source_range_id, source, offset, start, logical)
         {kept, next_offset} = take_page(records, filter_range, page.max_records - count, start)
         acc = Enum.reverse(Enum.map(kept, fn {record, offset} -> {{index, offset}, record} end)) ++ acc
         count = count + length(kept)
@@ -2420,28 +2592,55 @@ defmodule Malachi.Broker do
       # pause on the self source so records produced later tail in on a subsequent call.
       _eof_or_empty ->
         if index < last_index do
-          remainder = unread_remainder(page.view, source_range_id, offset)
-          skips = add_skip(skips, page, source_range_id, source, offset, remainder)
+          # A purge can put an ancestor's floor at its very end, so the clamp itself is a skip here too;
+          # what the ancestor still owed past the floor is counted from it.
+          skips =
+            case unread_remainder(page.view, source_range_id, stored) do
+              :unknown ->
+                skips
+                |> add_step_skips(page, source_range_id, source, offset, stored, logical)
+                |> add_skip(page, source_range_id, source, stored, :unknown, :expired)
+
+              remainder ->
+                add_step_skips(skips, page, source_range_id, source, offset, stored + remainder, logical)
+            end
+
           consume_page(page, index + 1, 0, acc, count, skips)
         else
           # The pause cursor carries the clamp, so a reader whose position expired has moved past it
           # even on a page with no records, and that is a skip it was handed.
-          skips = add_skip(skips, page, source_range_id, source, offset, stored - offset)
+          skips = add_step_skips(skips, page, source_range_id, source, offset, stored, logical)
           {:ok, Enum.reverse(acc), {index, stored}, Enum.reverse(skips)}
         end
     end
   end
 
-  defp add_skip(skips, _page, _source_range_id, _source, _from, 0), do: skips
+  # The skips for a reader moved from `from` to `to`, split at the source's logical start `logical`: what
+  # lies below the start is `:purged`, what lies at or above it is `:expired` (data retention or an
+  # operator removed, or a hole). The rule is by position, not by which floor moved the reader: below the
+  # start the purge is the cause reported even where retention had already deleted the segments, since
+  # the operator purged past them anyway, and a purged stretch stays `:purged` after retention reclaims
+  # its segments and the stored floor rises to meet the start. With no purge (`logical` 0) the whole step
+  # is one expired skip, as it always was.
+  defp add_step_skips(skips, page, source_range_id, source, from, to, logical) do
+    purged_to = min(max(from, logical), to)
 
-  defp add_skip(skips, page, source_range_id, source, from, offsets) do
+    skips
+    |> add_skip(page, source_range_id, source, from, purged_to - from, :purged)
+    |> add_skip(page, source_range_id, source, purged_to, to - purged_to, :expired)
+  end
+
+  defp add_skip(skips, _page, _source_range_id, _source, _from, 0, _cause), do: skips
+
+  defp add_skip(skips, page, source_range_id, source, from, offsets, cause) do
     skip = %Skip{
       range_id: page.range_id,
       source_range_id: source_range_id,
       from: from,
       offsets: offsets,
       origin: page.origin,
-      source: source
+      source: source,
+      cause: cause
     }
 
     [skip | skips]

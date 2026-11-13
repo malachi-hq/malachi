@@ -110,7 +110,14 @@ defmodule Malachi.Telemetry.MetricsReporter do
   end
 
   def handle_event([:malachi, :retention, :skip], %{offsets: offsets}, metadata, _config) do
-    Metrics.record_retention_skip(metadata.topic, metadata.group, metadata.origin, metadata.span, offsets)
+    Metrics.record_retention_skip(
+      metadata.topic,
+      metadata.group,
+      metadata.origin,
+      metadata.span,
+      metadata.cause,
+      offsets
+    )
   end
 
   def handle_event([:malachi, :retention, :expire], %{bytes: bytes}, %{topic: topic, result: result}, _config) do

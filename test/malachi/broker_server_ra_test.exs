@@ -599,6 +599,48 @@ defmodule Malachi.BrokerServerRaTest do
     assert ReadView.fetch_end(view, root) == {:ok, 1}
   end
 
+  test "a purge applies on the frontend that ran it at once, and on another one by its next refresh (#198)" do
+    # The reply of a purge is the bound the guide states: the frontend that ran it clamps from then on, and
+    # every other one does once its refresh reconciles the cache with the control plane.
+    cluster = :"bs_purge_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+
+    name = :"purge_repl_#{System.unique_integer([:positive])}"
+    directory = TmpDir.path("malachi_purge")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    {:ok, repl} = ReplicationServer.start_link(directory: directory, name: name)
+    on_exit(fn -> stop_quietly(repl) end)
+
+    refresh_ms = 200
+    opts = [brokers: [{name, node()}], metadata_cluster: cluster, brokers_refresh_interval: refresh_ms]
+    {:ok, writer} = BrokerServer.start_link("unused", opts)
+    {:ok, other} = BrokerServer.start_link("unused", opts)
+    on_exit(fn -> stop_quietly(writer) end)
+    on_exit(fn -> stop_quietly(other) end)
+
+    {:ok, root} = BrokerServer.create_topic(writer, "events", 4)
+    {:ok, _} = BrokerServer.produce(writer, "events", for(i <- 0..3, do: Record.new("v#{i}", key: "k#{i}")))
+    assert :ok = wait_until(fn -> Metadata.get_range(BrokerServer.metadata(other), root) != nil end, timeout: 3_000)
+
+    assert {:ok, %{^root => {0, 2}}} =
+             BrokerServer.purge(writer, "events", {:position, Malachi.Position.encode(root, {0, 2})})
+
+    # the frontend that ran it: no wait
+    assert Metadata.logical_start(Metadata.get_range(BrokerServer.metadata(writer), root)) == 2
+
+    assert {:ok, [%{value: "v2"}, %{value: "v3"}], _cursor, [%{cause: :purged}]} =
+             BrokerServer.read_consume(writer, root, :start, 10)
+
+    # another frontend: once its refresh reconciles the cache (every `refresh_ms` here)
+
+    assert :ok =
+             wait_until(
+               fn -> Metadata.logical_start(Metadata.get_range(BrokerServer.metadata(other), root)) == 2 end,
+               timeout: 3_000,
+               interval: 10
+             )
+  end
+
   test "a broker that loses the control plane stays ready, and keeps serving what it already knew" do
     # Readiness answers whether this node can serve, not whether the control plane is answering. A
     # refresh that fails leaves the last view in place and reads keep working from it, so reporting
@@ -702,13 +744,19 @@ defmodule Malachi.BrokerServerRaTest do
 
     # Names divide between the two vnodes by hash. A name on the reachable vnode reads normally; a name
     # on the ghost must NOT read as an empty topic, because this broker cannot know whether it is empty.
-    results = for i <- 0..19, do: ReadBack.values(control, "gate_t#{i}")
+    names = for i <- 0..19, do: "gate_t#{i}"
+    results = Enum.map(names, &ReadBack.values(control, &1))
 
     refused = Enum.filter(results, &match?({:error, :metadata_unavailable}, &1))
     answered = Enum.filter(results, &match?([], &1))
 
     assert refused != [], "expected topics routed to the unreachable vnode to be refused"
     assert answered != [], "expected topics routed to the reachable vnode to still be served"
+
+    # A purge resolved from the placeholder would find no range to move and answer that nothing was
+    # purged (#198); it is refused instead, so the operator retries rather than believing it.
+    [ghost_topic | _] = for {name, {:error, :metadata_unavailable}} <- Enum.zip(names, results), do: name
+    assert BrokerServer.purge(control, ghost_topic, {:before, 0}) == {:error, :metadata_unavailable}
 
     # And the node says it is not ready, so an orchestrator stops routing to it rather than letting it
     # answer half its keyspace with a successful lie.

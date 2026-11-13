@@ -113,6 +113,7 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
   end
 
   defp deadline({:bind_topic_policy, _topic, _name}), do: @admin_command_deadline_ms
+  defp deadline({:set_range_starts, _topic, _starts}), do: @admin_command_deadline_ms
   defp deadline({:open_group, _group, _topic}), do: @group_command_deadline_ms
   defp deadline({:commit_offset, _group, _topic, _offsets, _generation}), do: @group_command_deadline_ms
   defp deadline(_data_path), do: nil

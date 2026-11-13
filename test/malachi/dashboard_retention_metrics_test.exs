@@ -37,7 +37,8 @@ defmodule Malachi.DashboardRetentionMetricsTest do
       from: 0,
       offsets: 12,
       origin: :cursor,
-      source: :self
+      source: :self,
+      cause: :expired
     }
 
     Telemetry.retention_skip(topic, "billing", skip)
@@ -46,7 +47,7 @@ defmodule Malachi.DashboardRetentionMetricsTest do
     Telemetry.retention_sweep(1_200, 1, 1)
 
     now = scrape(token)
-    labels = ~s(topic="#{topic}",reader="group",group="billing",origin="cursor",span="exact")
+    labels = ~s(topic="#{topic}",reader="group",group="billing",origin="cursor",span="exact",cause="expired")
 
     assert value(now, "malachi_retention_skips_total{#{labels}}") == 1
     assert value(now, "malachi_retention_offsets_skipped_total{#{labels}}") == 12

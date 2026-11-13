@@ -110,8 +110,12 @@ defmodule Malachi.Retention.SkipReporter do
   # it held after having started over reports the same offset with `origin: :cursor`, and that one is a
   # different fact, the one an operator alerts on. The log is rate limited per reader, a group on a range.
   defp observe(%Skip{} = skip, ledger, topic, group, now_ms) do
-    skip_key = {topic, group, skip.range_id, skip.source_range_id, skip.from, skip.origin, skip.source, skip.offsets}
-    log_key = {topic, group, skip.range_id}
+    skip_key =
+      {topic, group, skip.range_id, skip.source_range_id, skip.from, skip.origin, skip.source, skip.offsets, skip.cause}
+
+    # The cause is part of the reader's log key: a purge line must not hold back the warning for a loss to
+    # retention on the same reader, which the two keys exist to tell apart.
+    log_key = {topic, group, skip.range_id, skip.cause}
     {ledger, verdict} = SkipLedger.observe(ledger, skip_key, log_key, now_ms)
     act(verdict, skip, topic, group)
     ledger
@@ -124,7 +128,7 @@ defmodule Malachi.Retention.SkipReporter do
     Telemetry.retention_skip(topic, group, skip)
 
     Logger.warning(
-      I18n.t(:retention_consumer_skipped,
+      I18n.t(skipped_key(skip.cause),
         group: inspect(group),
         topic: topic,
         offsets: skip.offsets,
@@ -136,4 +140,9 @@ defmodule Malachi.Retention.SkipReporter do
       )
     )
   end
+
+  # Two lines because they say different things: retention expiring what a reader had not read is a
+  # loss to alert on, an operator's purge moving a reader is the purge doing what it was asked.
+  defp skipped_key(:expired), do: :retention_consumer_skipped
+  defp skipped_key(:purged), do: :purge_consumer_skipped
 end

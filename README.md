@@ -838,13 +838,14 @@ operation:
 | 32      | `join_group`            | a member's ranges, generation and session                                   |
 | 33      | `group_heartbeat`       | keeps a member alive within its session, reports a rebalance                |
 | 34      | `commit_offsets`        | checkpoints a member's position token in each of its ranges                 |
+| 35      | `purge_topic`           | admin, moves a topic's logical start up to a time, position or group commit |
 
 The server pushes three kinds of frame on an open stream, in the response envelope with the correlation id
 of the request that opened it: `append_ack`, `moved` and `records`.
 
 The admin api_keys (users 8 to 11, per-topic ACLs 14 to 16, storage policies 17 to 21, console roles 22
-and 23) require the `:admin` permission; see the [per-topic ACLs](docs/guides/per-topic-acls.md) and
-[per-topic retention](docs/guides/per-topic-retention.md) guides.
+and 23, the manual purge 35) require the `:admin` permission; see the [per-topic ACLs](docs/guides/per-topic-acls.md),
+[per-topic retention](docs/guides/per-topic-retention.md) and [purging a topic](docs/guides/purging-a-topic.md) guides.
 
 Keys 24 to 34 are the NorthGuard data path, the only keys that write and read records: routing (`cluster_state`, `topic_routes`),
 producer streams with a broker-defined window (`open_stream`, `append`, `close_stream`), per-range consume
