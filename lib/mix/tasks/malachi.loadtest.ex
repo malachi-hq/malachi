@@ -47,6 +47,10 @@ defmodule Mix.Tasks.Malachi.Loadtest do
       exactly `--record-size` bytes (at least #{Malachi.Loadtest.Payload.min_json_size()}); random is seeded
       noise, the incompressible control. `--payload-seed` (#{Malachi.Loadtest.Payload.default_seed()}) picks
       the values and is only accepted with json or random. See `Malachi.Loadtest.Payload`.
+    * `--wire` malachi | kafka (default malachi): the wire protocol driven. kafka produces to or fetches
+      from the Kafka spike's listener (#166, `Malachi.KafkaSpike`) at `--kafka-port` (9092) on `--host`,
+      partition 0 of `--topic` (the topic the spike serves), with no authentication. Only the produce and
+      fetch scenarios speak it; `--kafka-port` is only accepted with it.
     * `--json` emit the report as JSON
     * `--measure-marker` a path created (empty) the moment the measured window begins, after every
       connection has authenticated and the warmup has ended, so a harness can sample CPU over that
@@ -69,7 +73,8 @@ defmodule Mix.Tasks.Malachi.Loadtest do
       {"acl", :acl}
     ],
     connect_strategy: [{"bounded", :bounded}, {"stagger", :stagger}, {"all-at-once", :all_at_once}],
-    payload: [{"constant", :constant}, {"json", :json}, {"random", :random}]
+    payload: [{"constant", :constant}, {"json", :json}, {"random", :random}],
+    wire: [{"malachi", :malachi}, {"kafka", :kafka}]
   ]
 
   @switches [
@@ -104,7 +109,9 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     payload: :string,
     payload_seed: :integer,
     linger_ms: :integer,
-    linger_bytes: :integer
+    linger_bytes: :integer,
+    wire: :string,
+    kafka_port: :integer
   ]
 
   @impl Mix.Task

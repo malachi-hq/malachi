@@ -43,6 +43,7 @@ defmodule Malachi.Loadtest do
   alias Malachi.Loadtest.Conn
   alias Malachi.Loadtest.Consumer
   alias Malachi.Loadtest.Fetcher
+  alias Malachi.Loadtest.KafkaConn
   alias Malachi.Loadtest.Options
   alias Malachi.Loadtest.Payload
   alias Malachi.Loadtest.Producer
@@ -59,7 +60,13 @@ defmodule Malachi.Loadtest do
   @enums [
     scenario: {[:produce, :fetch, :mixed, :stream, :user, :acl], :produce},
     connect_strategy: {[:bounded, :stagger, :all_at_once], :bounded},
-    payload: {Payload.modes(), :constant}
+    payload: {Payload.modes(), :constant},
+    # The wire protocol driven: Malachi's own, or Kafka's through the spike's listener (#166), which only
+    # the produce and fetch scenarios speak. Named `wire`, not `protocol`: `--protocol` once chose between
+    # the legacy keys and the stream keys and was removed (#310), and must not come back meaning
+    # something else. Not mirrored in scripts/loadtest.js: the spike's overhead is measured with this
+    # generator alone, and the spike is not meant to outlive #166.
+    wire: {[:malachi, :kafka], :malachi}
   ]
 
   # A knob only some values of an enum read, with the message for passing it with another one. Silently
@@ -68,7 +75,8 @@ defmodule Malachi.Loadtest do
   @knobs [
     connect_concurrency: {:connect_strategy, [:bounded], "the :bounded connect strategy"},
     connect_stagger_ms: {:connect_strategy, [:stagger], "the :stagger connect strategy"},
-    payload_seed: {:payload, [:json, :random], "the :json and :random payloads"}
+    payload_seed: {:payload, [:json, :random], "the :json and :random payloads"},
+    kafka_port: {:wire, [:kafka], "the :kafka wire"}
   ]
 
   @ops 1
@@ -117,7 +125,7 @@ defmodule Malachi.Loadtest do
     cfg = opts |> normalize() |> attach_pool()
 
     try do
-      cfg = setup(cfg)
+      cfg = if cfg.wire == :kafka, do: setup_kafka(cfg), else: setup(cfg)
 
       # Genuine errors by reason. A table rather than a `:counters` slot because the reasons are only
       # known when the server sends them; errors are rare, so the shared writes cost nothing on the hot
@@ -206,6 +214,8 @@ defmodule Malachi.Loadtest do
 
     %{
       scenario: enums.scenario,
+      wire: kafka_scenario!(enums.wire, enums.scenario),
+      kafka_port: Options.positive!(opts, :kafka_port, 9092),
       connect_strategy: enums.connect_strategy,
       payload: enums.payload,
       payload_seed: payload_seed!(opts, enums.payload),
@@ -385,6 +395,14 @@ defmodule Malachi.Loadtest do
     [{:host, Enum.at(cfg.hosts, rem(index, length(cfg.hosts)))} | cfg.conn_opts]
   end
 
+  # Kafka through the spike is a produce or a fetch: the spike answers no stream, group or admin key.
+  defp kafka_scenario!(:kafka, scenario) when scenario in [:produce, :fetch], do: :kafka
+
+  defp kafka_scenario!(:kafka, scenario),
+    do: raise(ArgumentError, "the :kafka wire only drives the :produce and :fetch scenarios, got #{inspect(scenario)}")
+
+  defp kafka_scenario!(:malachi, _scenario), do: :malachi
+
   defp enum!(opts, key) do
     {values, default} = @enums[key]
     value = Keyword.get(opts, key, default)
@@ -470,6 +488,44 @@ defmodule Malachi.Loadtest do
 
       _missing_or_unwritable ->
         raise ArgumentError, "measure_marker directory #{inspect(dir)} does not exist or is not writable"
+    end
+  end
+
+  # Kafka through the spike: no authentication and no routes to read. The topic is the one the spike
+  # serves (it creates it on first use), and a fetch run's backlog is produced through the spike itself.
+  defp setup_kafka(cfg) do
+    cfg = publish_pool(cfg)
+    if cfg.prepopulate > 0, do: Enum.each(topic_names(cfg), &prepopulate_kafka(cfg, &1))
+    cfg
+  end
+
+  defp prepopulate_kafka(cfg, topic) do
+    host = cfg |> conn_opts_for(0) |> Keyword.fetch!(:host)
+
+    case KafkaConn.connect(host, cfg.kafka_port, topic) do
+      {:ok, conn} ->
+        try do
+          prepopulate_kafka_batches(conn, prepopulate_source(cfg), cfg.prepopulate)
+        after
+          KafkaConn.close(conn)
+        end
+
+      {:error, reason} ->
+        raise SetupError, "could not connect to the Kafka listener at #{host}:#{cfg.kafka_port} (#{inspect(reason)})"
+    end
+  end
+
+  defp prepopulate_kafka_batches(_conn, _source, left) when left <= 0, do: :ok
+
+  defp prepopulate_kafka_batches(conn, source, left) do
+    {entries, source} = next_entries(source)
+    records = entries |> Enum.map(&elem(&1, 1)) |> Enum.take(left)
+
+    with {:ok, conn} <- KafkaConn.send_produce(conn, records),
+         {{:ok, count, _latency}, conn} <- KafkaConn.await(conn) do
+      prepopulate_kafka_batches(conn, source, left - count)
+    else
+      other -> raise SetupError, "the Kafka listener refused the prepopulate: #{inspect(other)}"
     end
   end
 
@@ -720,6 +776,9 @@ defmodule Malachi.Loadtest do
   # connection to each broker leading one of its topic's ranges and a stream on each range, all opened
   # here, inside the connect ramp, so the measured window starts with every stream open. Any other worker
   # is the one authenticated connection it always was.
+  defp open_client(%{wire: :kafka} = cfg, index, conn_opts),
+    do: KafkaConn.connect(Keyword.fetch!(conn_opts, :host), cfg.kafka_port, topic_for(cfg, index))
+
   defp open_client(cfg, index, conn_opts) do
     case stream_client(cfg, index) do
       :producer ->
@@ -771,6 +830,7 @@ defmodule Malachi.Loadtest do
   defp close_client(%Consumer{} = consumer), do: Consumer.close(consumer)
   defp close_client(%Fetcher{} = fetcher), do: Fetcher.close(fetcher)
   defp close_client(%Conn{} = conn), do: Conn.close(conn)
+  defp close_client(%KafkaConn{} = conn), do: KafkaConn.close(conn)
 
   defp worker_loop(parent, index, cfg, ops, hist, conn_opts, conn) do
     ctx = build_ctx(cfg, index)
@@ -798,7 +858,7 @@ defmodule Malachi.Loadtest do
   # A fetch or stream worker's client keeps its own state.
   defp build_ctx(cfg, index) do
     topic = topic_for(cfg, index)
-    base = %{topic: topic}
+    base = %{topic: topic, pipeline: cfg.pipeline, fetch_bytes: cfg.max * cfg.record_size}
 
     case scenario_for(cfg.scenario, index) do
       :produce -> Map.put(base, :op, {:produce, produce_source(cfg, index)})
@@ -840,11 +900,80 @@ defmodule Malachi.Loadtest do
   defp scenario_for(:mixed, index), do: if(rem(index, 2) == 0, do: :produce, else: :fetch)
   defp scenario_for(other, _index), do: other
 
-  @spec drive(client, map(), m()) :: client when client: Conn.t() | Producer.t() | Consumer.t() | Fetcher.t()
+  @spec drive(client, map(), m()) :: client
+        when client: Conn.t() | Producer.t() | Consumer.t() | Fetcher.t() | KafkaConn.t()
   defp drive(%Producer{} = producer, ctx, m), do: stream_produce(producer, ctx, m)
   defp drive(%Consumer{} = consumer, ctx, m), do: start_consume(consumer, ctx, m)
   defp drive(%Fetcher{} = fetcher, ctx, m), do: stream_fetch(fetcher, ctx, m)
   defp drive(%Conn{} = conn, ctx, m), do: closed_loop(conn, ctx, m, 2)
+  defp drive(%KafkaConn{} = conn, ctx, m), do: kafka_loop(conn, ctx, m)
+
+  # --- kafka (the spike's listener, `--wire kafka`) ---
+  #
+  # Up to `pipeline` requests in flight on the connection, answered in order: a produce of one batch (one
+  # op, its records) or a fetch of up to `max` records' worth of bytes (one op, the records it read). At the
+  # deadline nothing more is sent and the requests in flight are awaited. A connection that fails ends the
+  # worker and counts as dropped: the spike is measured on a quiet node, where a drop is a finding, not
+  # load to ride out.
+  defp kafka_loop(conn, ctx, m) do
+    cond do
+      mono_ms() >= m.measure_end -> kafka_drain(conn, m)
+      KafkaConn.in_flight(conn) < ctx.pipeline -> kafka_send(conn, ctx, m)
+      true -> kafka_await(conn, ctx, m)
+    end
+  end
+
+  defp kafka_send(conn, %{op: {:produce, source}} = ctx, m) do
+    {entries, source} = next_entries(source)
+
+    case KafkaConn.send_produce(conn, Enum.map(entries, &elem(&1, 1))) do
+      {:ok, conn} -> kafka_loop(conn, %{ctx | op: {:produce, source}}, m)
+      {:error, _reason} -> kafka_dropped(conn, m)
+    end
+  end
+
+  defp kafka_send(conn, ctx, m) do
+    case KafkaConn.send_fetch(conn, ctx.fetch_bytes) do
+      {:ok, conn} -> kafka_loop(conn, ctx, m)
+      {:error, _reason} -> kafka_dropped(conn, m)
+    end
+  end
+
+  defp kafka_await(conn, ctx, m) do
+    case KafkaConn.await(conn) do
+      {:error, _reason} ->
+        kafka_dropped(conn, m)
+
+      {answer, conn} ->
+        kafka_record(m, answer)
+        kafka_loop(conn, ctx, m)
+    end
+  end
+
+  defp kafka_drain(conn, m) do
+    if KafkaConn.in_flight(conn) == 0 do
+      conn
+    else
+      case KafkaConn.await(conn) do
+        {:error, _reason} ->
+          kafka_dropped(conn, m)
+
+        {answer, conn} ->
+          kafka_record(m, answer)
+          kafka_drain(conn, m)
+      end
+    end
+  end
+
+  defp kafka_record(m, {:ok, records, latency_us}), do: record(m, {:ok, records}, latency_us, mono_ms() >= m.warmup_end)
+
+  defp kafka_record(m, {:error, reason, latency_us}),
+    do: record(m, {:error, Atom.to_string(reason)}, latency_us, mono_ms() >= m.warmup_end)
+
+  defp kafka_dropped(conn, m) do
+    :counters.add(m.ops, @dropped, 1)
+    conn
+  end
 
   # --- closed loop (the admin scenarios; threads ctx so the op counter advances) ---
 
@@ -1290,12 +1419,17 @@ defmodule Malachi.Loadtest do
         host: Enum.join(cfg.hosts, ","),
         port: Keyword.get(cfg.conn_opts, :port, 4040)
       ] ++
+        wire_options(cfg) ++
         connect_options(cfg) ++
         linger_options(cfg) ++
         payload_options(cfg) ++ auth_options(cfg.conn_opts) ++ tls_options(cfg.conn_opts) ++ json_option(cfg)
 
     Enum.join(["mix malachi.loadtest" | Enum.map(options, &render_option/1)], " ")
   end
+
+  # The wire travels only when it is not the default, with the port only Kafka reads.
+  defp wire_options(%{wire: :malachi}), do: []
+  defp wire_options(%{wire: :kafka} = cfg), do: [wire: "kafka", "kafka-port": cfg.kafka_port]
 
   # The connect strategy shapes the run (it is what tames the auth storm), so it must be reproducible
   # from the record. Its pacing knob travels only with the strategy that reads it: the up-front
