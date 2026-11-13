@@ -107,3 +107,13 @@ This needs a `get/list/watch` on `pods` in the RBAC, and the discovered node nam
 `RELEASE_NODE` (with a StatefulSet + headless service and `mode: hostname` they do). The `ra` peer set
 still comes from `MALACHI_LOG_NODES`, since Raft membership is explicit, dynamic *membership* changes
 ride on the rebalancing coordinator, not on discovery.
+
+Since libcluster 3.5.1, Kubernetes-API discovery always verifies the API server's certificate against
+the service account's CA (`/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`), in every mode,
+`hostname` included. The pod must therefore mount its service-account token: keep
+`automountServiceAccountToken` unset or `true` on both the `malachi` ServiceAccount and the pod spec.
+If the CA file is missing or invalid, every poll fails and libcluster logs an error, but polling goes on
+(every 10 seconds by default) and the peers a node already had are kept. A node that never had peers
+stays alone until the CA file is readable again, and then joins on the next poll, with no restart. So
+when a node stays alone after switching to this strategy, check the pod logs for libcluster TLS or
+request errors, and fix the mount rather than restarting the pod.

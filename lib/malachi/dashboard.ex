@@ -174,7 +174,7 @@ defmodule Malachi.Dashboard do
             charlist when is_list(charlist) -> charlist |> to_string() |> String.downcase()
           end
 
-        value = to_string(value)
+        value = value |> to_string() |> trim_trailing_ows()
         count = count + 1
         bytes = bytes + byte_size(key) + byte_size(value)
 
@@ -189,6 +189,20 @@ defmodule Malachi.Dashboard do
 
       {:error, _} ->
         {:error, :closed}
+    end
+  end
+
+  # RFC 9110 section 5.5: whitespace (space or tab) after a field value is not part of it. The decoder
+  # drops it before the value but keeps it after, so it is dropped here, before the value is counted or
+  # stored. Bandit does the same since 1.14.1, so the console and the dashboard count the same bytes and
+  # refuse the same requests (the transport contract pins it).
+  defp trim_trailing_ows(value) do
+    size = byte_size(value)
+
+    if size > 0 and :binary.at(value, size - 1) in [?\s, ?\t] do
+      trim_trailing_ows(binary_part(value, 0, size - 1))
+    else
+      value
     end
   end
 

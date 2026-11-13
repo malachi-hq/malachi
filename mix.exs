@@ -1,7 +1,7 @@
 defmodule Malachi.MixProject do
   use Mix.Project
 
-  @version "0.23.0"
+  @version "0.23.3"
   @source_url "https://github.com/malachi-hq/malachi"
   # Where the published site lives. Once the site's staging task is wired into the docs build (see Malachi.Site),
   # its sitemap and robots.txt will be built from this value, so a custom domain will change this one line.
@@ -312,7 +312,7 @@ defmodule Malachi.MixProject do
       {:argon2_elixir, "~> 4.1.3"},
       # JWT/JWS validation for the OIDC auth provider. Built on erlang-jose; handles the algorithm
       # pitfalls (alg:none, RS256/HS256 confusion) that hand-rolled JWT verification gets wrong.
-      {:joken, "~> 2.6.2"},
+      {:joken, "~> 2.7.0"},
       {:inet_cidr, "~> 1.0.9"},
       # Observability: emit telemetry events on the hot paths (produce/consume/auth/replication).
       {:telemetry, "~> 1.3"},
@@ -340,7 +340,7 @@ defmodule Malachi.MixProject do
       # application needs keep alive, conditional requests and content negotiation, which Bandit and
       # Plug provide with bounded, configurable parsing. Pinned to patch level because this is the
       # first dependency that parses bytes straight off an untrusted socket.
-      {:bandit, "~> 1.12.5"},
+      {:bandit, "~> 1.14.1"},
       {:plug, "~> 1.20.3"},
 
       # Development and test dependencies - PINNED to patch-level
@@ -350,7 +350,7 @@ defmodule Malachi.MixProject do
       {:ex_doc, "~> 0.40.3", only: :dev, runtime: false},
       {:excoveralls, "~> 0.18.5", only: :test},
       {:mix_audit, "~> 2.1.5", only: [:dev, :test], runtime: false},
-      {:sobelow, "~> 0.15.0", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.18.1", only: [:dev, :test], runtime: false},
       {:benchee, "~> 1.5.0", only: :dev, runtime: false},
       {:benchee_html, "~> 1.0", only: :dev, runtime: false},
       {:stream_data, "~> 1.1", only: [:dev, :test], runtime: false}

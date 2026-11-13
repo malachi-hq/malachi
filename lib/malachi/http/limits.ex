@@ -11,7 +11,7 @@ defmodule Malachi.HTTP.Limits do
   |---|---|---|
   | `:dashboard_max_header_count` | 50 | header lines per request, repeats included |
   | `:dashboard_max_header_line_size` | 10,000 | bytes in the request line and in each header line, at most 1 MiB |
-  | `:dashboard_max_header_size` | 32,768 | bytes of names plus values across all headers |
+  | `:dashboard_max_header_size` | 32,768 | bytes of names plus values across all headers, trailing whitespace of a value not counted |
   | `:dashboard_recv_timeout_ms` | 5,000 | the request line and the whole header block |
 
   The keys keep their `dashboard_` prefix because the environment variables operators already set
@@ -21,7 +21,9 @@ defmodule Malachi.HTTP.Limits do
   alias Malachi.Config
 
   # Bandit's defaults for the count and the line. A line is bounded at the socket; the total is what
-  # keeps fifty maximal lines, half a megabyte per connection, from being acceptable.
+  # keeps fifty maximal lines, half a megabyte per connection, from being acceptable. Whitespace after a
+  # value is not part of it (RFC 9110 section 5.5) and both listeners drop it before counting, so padding
+  # a value with it does not reach the total; the line and count limits still bound those bytes.
   @default_max_header_count 50
   @default_max_header_line_size 10_000
   @default_max_header_size 32_768
