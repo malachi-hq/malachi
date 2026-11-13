@@ -1,0 +1,5 @@
+ Container malachi-166-kafka-spike-java39-run-222ced387a05 Creating 
+ Container malachi-166-kafka-spike-java39-run-222ced387a05 Created 
+log4j:WARN No appenders could be found for logger (org.apache.kafka.clients.producer.ProducerConfig).
+log4j:WARN Please initialize the log4j system properly.
+log4j:WARN See http://logging.apache.org/log4j/1.2/faq.html#noconfig for more info.

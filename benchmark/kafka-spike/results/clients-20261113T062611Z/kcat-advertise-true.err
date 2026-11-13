@@ -1,0 +1,5 @@
+ Container malachi-166-kafka-spike-kcat-run-89f92e88d4dd Creating 
+ Container malachi-166-kafka-spike-kcat-run-89f92e88d4dd Created 
+produce_exit=0
+consume_exit=0
+Version 1.7.1 (JSON, Avro, Transactions, IncrementalAssign, JSONVerbatim, librdkafka 1.8.2 builtin.features=gzip,snappy,ssl,sasl,regex,lz4,sasl_gssapi,sasl_plain,sasl_scram,plugins,zstd,sasl_oauthbearer)

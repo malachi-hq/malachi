@@ -93,3 +93,7 @@ lefthook-local.yml
 
 # Concuerror checkout and escript (built on demand by scripts/concuerror-setup.sh, not a dep)
 /.concuerror/
+
+# Kafka spike harness (#166): request frames captured by the spike while a harness runs. The ones the
+# codec tests replay are copied to test/fixtures/kafka.
+/benchmark/kafka-spike/results/capture/
