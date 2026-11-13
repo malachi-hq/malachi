@@ -14,18 +14,28 @@ defmodule CiDockerSmokeTest do
 
   alias Malachi.Test.WorkflowText
 
-  # The variables holding a password or the session token, as `$NAME` or `${NAME}`.
-  @secret ~r/\$\{?(ADMIN_PASS|PRODUCER_PASS|CONSUMER_PASS|APP_PASS|TOKEN)\b/
+  # A line that carries a secret: one that expands a variable holding a password or the session token
+  # (`$NAME` or `${NAME}`), MALACHI_DEFAULT_USERS included since it holds all four passwords, or one that
+  # gives MALACHI_DEFAULT_USERS a value. Passing it by name (`-e MALACHI_DEFAULT_USERS`) is neither.
+  @secret ~r/\$\{?(ADMIN_PASS|PRODUCER_PASS|CONSUMER_PASS|APP_PASS|TOKEN|MALACHI_DEFAULT_USERS)\b|MALACHI_DEFAULT_USERS=/
 
-  # What a line mentioning one may be: an assignment (generating a password, building the users), the
-  # shared transport's login and scrape, or an echo, a shell builtin that starts no process.
-  @allowed [
-    ~r/^\s*(ADMIN|PRODUCER|CONSUMER|APP)_PASS="[a-z_]+\$\(openssl rand -hex \d+\)"$/,
-    ~r/^\s*MALACHI_DEFAULT_USERS="[^"]*"$/,
-    ~r/^\s*if ! TOKEN="\$\(ms_login admin "\$ADMIN_PASS"\)"; then$/,
-    ~r/^\s*if ! METRICS_RESPONSE="\$\(ms_http_get \/metrics "\$TOKEN" '\*\/\*'\)"; then$/,
-    ~r/^\s*echo "[^"]*"$/
-  ]
+  # Inside double quotes, text with no command substitution: plain characters and `$NAME` or `${NAME}`
+  # expansions, never `$(...)` or a backquote, either of which would start a process with the secret in
+  # its arguments.
+  @quoted ~S/"(?:[^"$`]|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)*"/
+
+  # What a line carrying one may be: an assignment (generating a password, building the users), the
+  # shared transport's login and scrape, or an echo of quoted text, a shell builtin that starts no
+  # process as long as the text substitutes no command.
+  defp allowed do
+    [
+      ~r/^\s*(ADMIN|PRODUCER|CONSUMER|APP)_PASS="[a-z_]+\$\(openssl rand -hex \d+\)"$/,
+      Regex.compile!("^\\s*MALACHI_DEFAULT_USERS=" <> @quoted <> "$"),
+      ~r/^\s*if ! TOKEN="\$\(ms_login admin "\$ADMIN_PASS"\)"; then$/,
+      ~r/^\s*if ! METRICS_RESPONSE="\$\(ms_http_get \/metrics "\$TOKEN" '\*\/\*'\)"; then$/,
+      Regex.compile!("^\\s*echo " <> @quoted <> "$")
+    ]
+  end
 
   defp step(ci \\ File.read!(WorkflowText.path("ci.yml"))) do
     [_, from_step] = String.split(ci, "- name: 🧪 Test Docker image\n", parts: 2)
@@ -38,7 +48,7 @@ defmodule CiDockerSmokeTest do
     step
     |> String.split("\n")
     |> Enum.filter(&(&1 =~ @secret))
-    |> Enum.reject(fn line -> Enum.any?(@allowed, &(line =~ &1)) end)
+    |> Enum.reject(fn line -> Enum.any?(allowed(), &(line =~ &1)) end)
   end
 
   test "no line of the step puts a password or the session token anywhere but an allowed kind of line" do
@@ -64,7 +74,17 @@ defmodule CiDockerSmokeTest do
         {"a lowercase authorization header",
          ~S(          curl -sf -H "authorization: bearer $TOKEN" http://localhost:4041/)},
         {"curl -u", ~S(          curl -sf -u "admin:$ADMIN_PASS" http://localhost:4041/login)},
-        {"a form body on a continuation line", ~S(            -d "username=admin&password=$ADMIN_PASS" \\)}
+        {"a form body on a continuation line", ~S(            -d "username=admin&password=$ADMIN_PASS" \\)},
+        {"a command substituted in an echo",
+         ~S|          echo "$(curl -sf -u admin:$ADMIN_PASS http://localhost:4041/login)"|},
+        {"a backquoted command in an echo",
+         ~S|          echo "`curl -sf -u admin:$ADMIN_PASS http://localhost:4041/`"|},
+        {"a command substituted in the users assignment",
+         ~S|          MALACHI_DEFAULT_USERS="admin:$(curl -sf -u a:$ADMIN_PASS http://localhost:4041/):admin"|},
+        {"the users passed by value, quoted", ~S(            -e "MALACHI_DEFAULT_USERS=$MALACHI_DEFAULT_USERS" \\)},
+        {"the users passed by value with --env",
+         ~S(            --env MALACHI_DEFAULT_USERS="${MALACHI_DEFAULT_USERS}" \\)},
+        {"the users passed by value, unquoted", ~S(            -e MALACHI_DEFAULT_USERS=$MALACHI_DEFAULT_USERS \\)}
       ] do
     test "catches #{name}" do
       ci = File.read!(WorkflowText.path("ci.yml"))
