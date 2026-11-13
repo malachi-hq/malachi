@@ -42,7 +42,12 @@ TOPIC=orders
 GROUP=g1
 # One admin password for the whole run: the users live in the control plane on the data directory, so every
 # container of the run seeds and logs in with the same one.
-ADMIN_PASS="drill_$(openssl rand -hex 8)"
+# It reaches each container as exported variables that `docker run -e NAME` copies by name, and the rpc
+# snippets read it from the node's own environment, so it is never an argument of the docker client or of
+# the rpc (#180).
+MALACHI_ADMIN_PASS="drill_$(openssl rand -hex 8)"
+MALACHI_DEFAULT_USERS="admin:${MALACHI_ADMIN_PASS}:admin"
+export MALACHI_ADMIN_PASS MALACHI_DEFAULT_USERS
 
 cleanup() {
   docker rm -f "$NAME" >/dev/null 2>&1 || true
@@ -71,7 +76,7 @@ run_node() {
     -v "$DIR:/app/data" \
     -e MALACHI_LOG_DATA_DIR=/app/data/log -e MALACHI_RA_DATA_DIR=/app/data/ra \
     -e MALACHI_CONFIG_ENV=test -e MALACHI_REQUIRE_TLS=false \
-    -e MALACHI_DEFAULT_USERS="admin:${ADMIN_PASS}:admin" \
+    -e MALACHI_DEFAULT_USERS -e MALACHI_ADMIN_PASS \
     -e MALACHI_RETENTION_ORPHAN_SWEEP_INTERVAL_MS=5000 \
     -e MALACHI_RETENTION_ORPHAN_MIN_AGE_MS=1000 \
     -e MALACHI_RETENTION_ORPHAN_SIGHTINGS=2 \
@@ -85,7 +90,7 @@ rpc() { docker exec "$NAME" bin/malachi rpc "$1"; }
 CONNECT="alias Malachi.Loadtest.Client
   client =
     Enum.reduce_while(1..100, nil, fn _, _ ->
-      case Client.connect(host: \"127.0.0.1\", port: Malachi.TCPAcceptorPool.port(), user: \"admin\", pass: \"$ADMIN_PASS\") do
+      case Client.connect(host: \"127.0.0.1\", port: Malachi.TCPAcceptorPool.port(), user: \"admin\", pass: System.fetch_env!(\"MALACHI_ADMIN_PASS\")) do
         {:ok, client} -> {:halt, client}
         {:error, _} -> Process.sleep(100); {:cont, nil}
       end
