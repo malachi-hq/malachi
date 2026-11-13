@@ -45,6 +45,8 @@ defmodule Malachi.HTTP.Problem do
     "errors.acls.invalid_operation" => 400,
     "errors.acls.invalid" => 400,
     "errors.cluster.upgrade_pending" => 409,
+    "errors.topics.not_found" => 404,
+    "errors.groups.not_found" => 404,
     "errors.policies.no_such_policy" => 404,
     "errors.policies.no_such_topic" => 404,
     "errors.policies.policy_in_use" => 409,
@@ -121,6 +123,11 @@ defmodule Malachi.HTTP.Problem do
 
   defp classify(:invalid_request), do: {"errors.http.invalid_request", %{}}
   defp classify(:not_found), do: {"errors.http.not_found", %{}}
+  defp classify({:topic_not_found, topic}), do: {"errors.topics.not_found", %{"topic" => topic}}
+
+  defp classify({:group_not_found, group, topic}),
+    do: {"errors.groups.not_found", %{"group" => group, "topic" => topic}}
+
   defp classify(:method_not_allowed), do: {"errors.http.method_not_allowed", %{}}
   defp classify(:header_fields_too_large), do: {"errors.http.header_fields_too_large", %{}}
 
@@ -163,6 +170,8 @@ defmodule Malachi.HTTP.Problem do
        when field_reason in [:unknown_policy_field, :invalid_policy_field, :duplicate_policy_field],
        do: {"errors.policies.#{field_reason}", %{"field" => field}}
 
+  # unavailable for a reason the response can name, such as the nodes that did not answer
+  defp classify({:unavailable, members}) when is_map(members), do: {"errors.http.unavailable", members}
   defp classify(_unavailable), do: {"errors.http.unavailable", %{}}
 
   defp upgrade_pending(introduced, effective),

@@ -109,6 +109,17 @@ defmodule Malachi.Console.ApiMeTest do
       assert List.last(statuses) == 429
       assert %{json: %{"type" => "errors.http.rate_limited", "retry_after_ms" => _}} = me(token)
     end
+
+    test "a token that does not validate spends the address's login budget, and past it is a 429" do
+      Application.put_env(:malachi, :dashboard_auth_rate_limit, 2)
+      on_exit(fn -> Application.delete_env(:malachi, :dashboard_auth_rate_limit) end)
+
+      statuses = for _request <- 1..4, do: me("not-a-session").status
+
+      assert List.last(statuses) == 429
+      assert %{json: %{"type" => "errors.http.rate_limited", "retry_after_ms" => _}} = me("not-a-session")
+      Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
+    end
   end
 
   describe "the /api/v1 namespace" do

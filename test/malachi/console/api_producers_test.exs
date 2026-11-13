@@ -1,15 +1,19 @@
 defmodule Malachi.Console.ApiProducersTest do
-  # `GET /api/v1/producers`: the producer streams open on the node that answers, at the viewer role, from
-  # stand-in connections registered in `Malachi.ProducerDirectory`.
+  # `GET /api/v1/producers`: the producer streams open across the cluster, at the viewer role, from stand-in
+  # connections registered in `Malachi.ProducerDirectory` on this node (the multinode suite covers others).
   #
   # async: false. The directory is the node's, and the async suites open producer streams of their own.
   use ExUnit.Case, async: false
 
+  alias Malachi.Console.Sampler
   alias Malachi.ProducerDirectory
   alias Malachi.Test.AccessHelper
 
   setup do
     Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
+    # each test reads its own connections, not the sample a previous test left
+    Sampler.clear()
+    on_exit(fn -> Sampler.clear() end)
     :ok
   end
 
@@ -61,12 +65,22 @@ defmodule Malachi.Console.ApiProducersTest do
 
     assert response.status == 200
     assert AccessHelper.header(response, "cache-control") == "no-store"
-    assert %{"node" => node_name, "streams" => streams, "total" => total, "unanswered_connections" => 0} = response.json
+
+    assert %{
+             "node" => node_name,
+             "streams" => streams,
+             "total" => total,
+             "unanswered_connections" => 0,
+             "unanswered_nodes" => [],
+             "unsupported_nodes" => []
+           } = response.json
+
     assert node_name == Atom.to_string(node())
     assert [listed] = Enum.filter(streams, &(&1["topic"] == "api_producers_topic"))
 
     assert listed == %{
              "stream_id" => 4,
+             "node" => Atom.to_string(node()),
              "topic" => "api_producers_topic",
              "range" => 2,
              "segment" => 9,
@@ -153,7 +167,13 @@ defmodule Malachi.Console.ApiProducersTest do
           "page_size[]=1",
           "page_token=%%%",
           "page_token[x]=y",
-          "page_token=" <> Base.url_encode64("x:y")
+          "page_token=" <> Base.url_encode64("x:y"),
+          # a well formed token of another listing, or of another version of this one
+          "page_token=" <> Base.url_encode64("v1.sessions.0." <> Base.url_encode64("a", padding: false), padding: false),
+          "page_token=" <> Base.url_encode64("v0.producers.0", padding: false),
+          # this listing's token with a field missing
+          "page_token=" <>
+            Base.url_encode64("v1.producers.0." <> Base.url_encode64("1", padding: false), padding: false)
         ] do
       assert %{status: 400, json: %{"type" => "errors.http.invalid_request"}} = page(token, query), query
     end
@@ -238,6 +258,49 @@ defmodule Malachi.Console.ApiProducersTest do
     assert length(json["streams"]) == 1_000
     assert json["next_page_token"] != ""
     assert json["complete"] == true
+  end
+
+  # A connection that counts how many times it was asked to describe its streams.
+  defp counting_connection(streams) do
+    parent = self()
+
+    pid =
+      spawn(fn ->
+        ProducerDirectory.track()
+        send(parent, {:tracked, self()})
+        count_asks(streams, 0)
+      end)
+
+    assert_receive {:tracked, ^pid}
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    pid
+  end
+
+  defp count_asks(streams, asked) do
+    receive do
+      {:describe_producer_streams, from, ref} ->
+        send(from, {ref, self(), streams})
+        count_asks(streams, asked + 1)
+
+      {:asked, from} ->
+        send(from, {:asked, asked})
+        count_asks(streams, asked)
+    end
+  end
+
+  test "the connections are asked once per interval however many requests read the listing" do
+    Application.put_env(:malachi, :console_sample_ms, 60_000)
+    on_exit(fn -> Application.delete_env(:malachi, :console_sample_ms) end)
+    pid = counting_connection([%{@stream | topic: "api_counted_topic"}])
+    token = AccessHelper.account!("producers_counted", [], :viewer)
+
+    for _request <- 1..3 do
+      assert %{status: 200, json: %{"streams" => streams}} = producers(token)
+      assert Enum.any?(streams, &(&1["topic"] == "api_counted_topic"))
+    end
+
+    send(pid, {:asked, self()})
+    assert_receive {:asked, 1}
   end
 
   test "it takes a viewer: no credentials is a 401, an account with no console role a 403" do

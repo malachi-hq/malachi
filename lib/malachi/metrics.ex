@@ -579,6 +579,10 @@ defmodule Malachi.Metrics do
     :ok
   end
 
+  @doc "How long this node has been up, in whole seconds."
+  @spec uptime_seconds() :: non_neg_integer()
+  def uptime_seconds, do: :erlang.statistics(:wall_clock) |> elem(0) |> div(1000)
+
   @doc "A snapshot of system-wide metrics (memory, processes, connections, auth) for the dashboard."
   def get_system_metrics do
     memory = :erlang.memory()
@@ -602,7 +606,7 @@ defmodule Malachi.Metrics do
         input_bytes: input_bytes,
         output_bytes: output_bytes
       },
-      uptime_seconds: :erlang.statistics(:wall_clock) |> elem(0) |> div(1000),
+      uptime_seconds: uptime_seconds(),
       rate_limiting: %{
         auth_blocked: get_counter({:rate_limit_blocked, :auth}),
         publish_blocked: get_counter({:rate_limit_blocked, :publish}),

@@ -97,6 +97,18 @@ defmodule Malachi.Console.Access do
     # Any valid session: the shell needs to know who it is talking to before it knows what it may show.
     {"GET", ["api", "v1", "me"], :authenticated},
     {"GET", ["api", "v1", "producers"], :viewer},
+    {"GET", ["api", "v1", "cluster"], :viewer},
+    {"GET", ["api", "v1", "ring", "vnodes"], :viewer},
+    {"GET", ["api", "v1", "topics"], :viewer},
+    {"GET", ["api", "v1", "topics", :param, "ranges"], :viewer},
+    {"GET", ["api", "v1", "topics", :param, "segments"], :viewer},
+    {"GET", ["api", "v1", "groups"], :viewer},
+    {"GET", ["api", "v1", "groups", :param], :viewer},
+    {"GET", ["api", "v1", "metrics", "history"], :viewer},
+    {"GET", ["api", "v1", "stream"], :viewer},
+    # Who is signed in and who is locked out name users and their addresses.
+    {"GET", ["api", "v1", "sessions"], :admin},
+    {"GET", ["api", "v1", "lockouts"], :admin},
     # Reads of the cluster's operational state.
     {"GET", [], :viewer},
     {"GET", ["stream"], :viewer},
