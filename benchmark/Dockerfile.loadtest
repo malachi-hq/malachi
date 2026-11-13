@@ -4,8 +4,9 @@
 FROM elixir:1.19-otp-28-alpine@sha256:07b2cb62c04ce868a1cc7105ab4b673511a8bd18cd1c3fea68d1ba99b969be59
 
 WORKDIR /app
-# build-base/git so NIF deps (argon2_elixir, etc.) compile, same as the release builder.
-RUN apk add --no-cache git build-base
+# build-base/git so NIF deps (argon2_elixir, etc.) compile, same as the release builder; cmake, bash and curl
+# for the Kafka spike's NIFs (crc32cer, ezstd, lz4b), as the release builder explains.
+RUN apk add --no-cache git build-base cmake bash curl
 RUN mix local.hex --force && mix local.rebar --force
 
 ENV MIX_ENV=dev

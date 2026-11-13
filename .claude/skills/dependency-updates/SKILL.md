@@ -207,7 +207,8 @@ first. The table lives in the script, with the reason for each tier beside it, a
 `groups` in `.github/dependabot.yml` are tested against it. The groups:
 
 - **actions**: every action, applied to every workflow on main.
-- **hex**: build tooling, runtime libraries, HTTP and observability packages.
+- **hex**: build tooling, runtime libraries, HTTP and observability packages, and the Kafka spike's
+  codec and NIFs (`kafka_protocol`, `crc32cer`, `snappyer`, `lz4b`, `ezstd`, tier `kafka`).
 - **hex-auth**: `joken`, `jose`, `argon2_elixir`, with the OIDC and JWT suites named.
 - **ra**: `ra` and the packages it pins, always on its own, with the multinode suite and every drill.
   A package nothing requires and the table does not name lands here too, with the full suite: nobody

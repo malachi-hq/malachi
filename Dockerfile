@@ -2,7 +2,11 @@ FROM elixir:1.19-otp-28-alpine@sha256:07b2cb62c04ce868a1cc7105ab4b673511a8bd18cd
 
 WORKDIR /app
 
-RUN apk add --no-cache git build-base ca-certificates
+# cmake builds crc32cer, the CRC32C NIF kafka_protocol needs for Kafka record batches (#166). The optional
+# compression NIFs fetch their C sources from GitHub while they compile (lz4b a release tarball through
+# curl, with no checksum; ezstd a clone of zstd at a pinned commit, through a bash script), so this stage
+# needs bash, curl and network access.
+RUN apk add --no-cache git build-base cmake bash curl ca-certificates
 
 ENV MIX_ENV=prod
 ENV ERL_FLAGS="+JPperf true"

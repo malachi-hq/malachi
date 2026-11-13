@@ -113,6 +113,18 @@ defmodule Malachi.I18n do
       "pt_BR" => "Arquivo de chave privada TLS não configurado (MALACHI_TLS_KEYFILE)",
       "en_US" => "TLS private key file not configured (MALACHI_TLS_KEYFILE)"
     },
+    kafka_spike_request_refused: %{
+      "pt_BR" => "Spike Kafka fechou a conexão (%{kind}): api_key=%{api_key} versão=%{vsn} client_id=%{client_id}",
+      "en_US" => "Kafka spike closed the connection (%{kind}): api_key=%{api_key} version=%{vsn} client_id=%{client_id}"
+    },
+    kafka_spike_connection_closed: %{
+      "pt_BR" => "Spike Kafka fechou a conexão: %{reason}",
+      "en_US" => "Kafka spike closed the connection: %{reason}"
+    },
+    kafka_spike_unmapped_error: %{
+      "pt_BR" => "Spike Kafka respondeu UNKNOWN_SERVER_ERROR para um erro sem código: %{reason}",
+      "en_US" => "Kafka spike answered UNKNOWN_SERVER_ERROR for an error with no code: %{reason}"
+    },
     acceptor_started: %{
       "pt_BR" => "Acceptor #%{id} iniciado",
       "en_US" => "Acceptor #%{id} started"

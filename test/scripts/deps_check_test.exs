@@ -253,7 +253,7 @@ defmodule DepsCheckTest do
     end
 
     test "build the image from the worktree before validating it, for the tiers that boot it" do
-      for tier <- [:auth, :observability, :full, :docker] do
+      for tier <- [:auth, :observability, :kafka, :full, :docker] do
         gates = DepsCheck.gates_for([tier])
         assert "make docker-build docker-validate" in gates, "#{tier}"
         refute "scripts/validate-docker-build.sh" in gates, "#{tier}"

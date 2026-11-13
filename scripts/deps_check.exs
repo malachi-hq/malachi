@@ -61,6 +61,7 @@ defmodule DepsCheck do
   @tracing_suite "mix test test/malachi/log_api_tracing_test.exs test/malachi/cluster/scrubber_tracing_test.exs"
   @runtime_suite "mix test test/malachi/wire_test.exs test/dashboard_test.exs test/acl_enforcement_test.exs " <>
                    "test/auth_test.exs test/malachi/telemetry"
+  @kafka_suite "mix test test/malachi/kafka_spike test/malachi/kafka_spike_test.exs test/malachi/loadtest/kafka_wire_test.exs"
   @http_suite "mix test test/malachi/http test/malachi/dashboard test/malachi/console test/dashboard_security_test.exs " <>
                 "test/dashboard_security_headers_test.exs test/dashboard_content_length_test.exs " <>
                 "test/http_transport_contract_test.exs"
@@ -77,6 +78,7 @@ defmodule DepsCheck do
     @tracing_suite,
     @runtime_suite,
     @http_suite,
+    @kafka_suite,
     "mix test",
     "mix coveralls",
     "mix dialyzer",
@@ -139,6 +141,14 @@ defmodule DepsCheck do
     # already carries the version tag, which a dependency update does not change.
     observability: [
       @tracing_suite,
+      "make docker-build docker-validate"
+    ],
+    # The Kafka spike's codec (#166): kafka_protocol's schemas and its CRC32C NIF, and the optional
+    # compression NIFs, which fetch their C sources from GitHub while they compile. The spike's suite,
+    # and the image built from the worktree and validated, because every one of them is a NIF compiled
+    # for Alpine there (with cmake, bash and curl in the builder).
+    kafka: [
+      @kafka_suite,
       "make docker-build docker-validate"
     ],
     # Login and token validation: the OIDC and JWT suites, and the image built from the worktree and
@@ -219,6 +229,11 @@ defmodule DepsCheck do
     "joken" => :auth,
     "jose" => :auth,
     "argon2_elixir" => :auth,
+    "kafka_protocol" => :kafka,
+    "crc32cer" => :kafka,
+    "snappyer" => :kafka,
+    "lz4b" => :kafka,
+    "ezstd" => :kafka,
     "libcluster" => :cluster,
     "ra" => :consensus,
     "aten" => :consensus,

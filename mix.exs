@@ -342,6 +342,14 @@ defmodule Malachi.MixProject do
       # first dependency that parses bytes straight off an untrusted socket.
       {:bandit, "~> 1.14.1"},
       {:plug, "~> 1.20.3"},
+      # Kafka wire protocol spike (#166): kafka_protocol's schemas and batch codec, tested on the
+      # server side. Pinned exactly: 4.3.8 was under two weeks old when the spike started. crc32cer is
+      # its required NIF (RecordBatch v2 checksums); snappyer, lz4b and ezstd are its optional
+      # compression NIFs, added only to prove they build on the CI runner and the Alpine image.
+      {:kafka_protocol, "== 4.3.7"},
+      {:snappyer, "== 1.2.10"},
+      {:lz4b, "== 0.1.0"},
+      {:ezstd, "== 1.2.5"},
 
       # Development and test dependencies - PINNED to patch-level
       # 1.7.19 fixes the Credo.Code.Token sigil-token crash under Elixir 1.20 (1.7.15 crashed on ~r//).
