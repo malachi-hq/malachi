@@ -366,6 +366,41 @@ defmodule Malachi.Console.ReadsTest do
     result = Fanout.call(:node_info, [])
     assert result.membership_unavailable
     assert Fanout.partial?(result)
-    assert Fanout.members(result)["membership"] == "unavailable"
+    assert Fanout.members(result)["membership"] == %{"state" => "unavailable"}
+  end
+
+  describe "whether this node runs a membership" do
+    setup do
+      original = Application.get_env(:malachi, :log_cluster)
+      on_exit(fn -> Application.put_env(:malachi, :log_cluster, original) end)
+      Sampler.clear()
+      on_exit(fn -> Sampler.clear() end)
+      %{original: original}
+    end
+
+    test "a node with no control plane is alone, and a fan-out that asks it alone is complete" do
+      Application.put_env(:malachi, :log_cluster, nil)
+
+      assert Samples.membership() == :none
+      assert Fanout.nodes_to_ask() == {[node()], false}
+      result = Fanout.call(:node_info, [])
+      refute Fanout.partial?(result)
+      refute Map.has_key?(Fanout.members(result), "membership")
+    end
+
+    test "a node with a control plane whose membership is not registered is unavailable, not alone", %{
+      original: original
+    } do
+      assert original != nil
+      pid = Process.whereis(Malachi.LogMembership)
+      Process.unregister(Malachi.LogMembership)
+
+      try do
+        assert Samples.membership() == {:error, :unavailable}
+        assert Fanout.nodes_to_ask() == {[node()], true}
+      after
+        Process.register(pid, Malachi.LogMembership)
+      end
+    end
   end
 end

@@ -141,9 +141,11 @@ defmodule Malachi.Console.ApiGroupsTest do
     test "the listing is a lower bound and a missing group is unavailable, not missing",
          %{topic: topic, token: token} do
       assert %{status: 200, json: body} = get("/api/v1/groups?topic=#{topic}", token)
-      assert %{"total" => %{"relation" => "gte"}, "complete" => false, "membership" => "unavailable"} = body
 
-      assert %{status: 503, json: %{"type" => "errors.http.unavailable", "membership" => "unavailable"}} =
+      assert %{"total" => %{"relation" => "gte"}, "complete" => false, "membership" => %{"state" => "unavailable"}} =
+               body
+
+      assert %{status: 503, json: %{"type" => "errors.http.unavailable", "membership" => %{"state" => "unavailable"}}} =
                get("/api/v1/groups/nope?topic=#{topic}", token)
     end
   end

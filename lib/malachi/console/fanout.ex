@@ -134,8 +134,8 @@ defmodule Malachi.Console.Fanout do
 
   @doc """
   The members a route adds when its data came from a fan-out: the nodes that did not answer and those that
-  do not support the read, by name, and `"membership": "unavailable"` when the membership naming the nodes
-  could not be read.
+  do not support the read, by name, and `"membership": {"state": "unavailable"}` when the membership naming
+  the nodes could not be read (the shape `GET /api/v1/cluster` gives its own membership member).
   """
   @spec members(result()) :: map()
   def members(%{unanswered: unanswered, unsupported: unsupported} = result) do
@@ -144,7 +144,9 @@ defmodule Malachi.Console.Fanout do
       "unsupported_nodes" => Enum.map(unsupported, &Atom.to_string/1)
     }
 
-    if membership_unavailable?(result), do: Map.put(members, "membership", "unavailable"), else: members
+    if membership_unavailable?(result),
+      do: Map.put(members, "membership", %{"state" => "unavailable"}),
+      else: members
   end
 
   @doc """

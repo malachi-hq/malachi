@@ -4,8 +4,8 @@ defmodule Malachi.Console.Samples do
   so two routes that need the same state share its sample instead of each reading it.
 
   Each answers `{:ok, sample}`, `{:error, :unavailable}` when it could not be read and there is no earlier
-  sample, or `:none` when this node does not run what it reads (a single node has no membership, an
-  unsharded control plane no ring).
+  sample, or `:none` when this node does not run what it reads (a node measured in memory, with no
+  `:log_cluster`, has no membership; an unsharded control plane has no ring).
   """
 
   alias Malachi.Auth.LockoutManager
@@ -38,17 +38,28 @@ defmodule Malachi.Console.Samples do
       else: :none
   end
 
-  @doc "This node's SWIM view (`Malachi.Cluster.MembershipServer.view/2`)."
+  @doc """
+  This node's SWIM view (`Malachi.Cluster.MembershipServer.view/2`). Whether the node runs a membership is
+  its configuration (`:log_cluster`, set on every node that runs a control plane, a node alone included),
+  not whether the process is registered at this instant: a membership server that is restarting is
+  unavailable, not absent, so a fan-out asking for the cluster's nodes knows it could not learn them.
+  """
   @spec membership() :: result()
   def membership do
-    if Process.whereis(Malachi.LogMembership),
-      do:
+    cond do
+      Application.get_env(:malachi, :log_cluster) == nil ->
+        :none
+
+      Process.whereis(Malachi.LogMembership) ->
         Sampler.fetch(
           :membership,
           fn -> {:ok, MembershipServer.view(Malachi.LogMembership, @read_timeout_ms)} end,
           @sample_opts
-        ),
-      else: :none
+        )
+
+      true ->
+        {:error, :unavailable}
+    end
   end
 
   @doc """

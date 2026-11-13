@@ -103,6 +103,18 @@ defmodule Malachi.Console.ClusterViewTest do
            })["membership"] == %{"state" => "unavailable"}
   end
 
+  test "a membership the fan-out could not read keeps its object shape on the cluster view" do
+    body =
+      ClusterView.render(%{
+        membership: {:error, :unavailable},
+        fanout: %{answers: [], unanswered: [], unsupported: [], asked: [node()], membership_unavailable: true},
+        ring: :none,
+        lease: :none
+      })
+
+    assert body["membership"] == %{"state" => "unavailable"}
+  end
+
   test "the ring and the lease of a sharded control plane, fresh, stale or unreadable" do
     lease = %Lease{holder: :a@h, fence: 5, renew_at: @at, duration_ms: 15_000}
 

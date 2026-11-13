@@ -66,7 +66,7 @@ defmodule Malachi.Console.FanoutTest do
   test "a result whose membership could not be read is partial and says so, though every node asked answered" do
     result = %{answers: [{:a@h, 1}], unanswered: [], unsupported: [], asked: [:a@h], membership_unavailable: true}
     assert Fanout.partial?(result)
-    assert Fanout.members(result)["membership"] == "unavailable"
+    assert Fanout.members(result)["membership"] == %{"state" => "unavailable"}
 
     refute Fanout.partial?(%{result | membership_unavailable: false})
     refute Map.has_key?(Fanout.members(%{result | membership_unavailable: false}), "membership")

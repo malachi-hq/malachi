@@ -172,6 +172,19 @@ defmodule Malachi.Console.ApiTopicsTest do
     end
   end
 
+  test "with the membership unreadable, no segment is called under replicated and the response says why", %{
+    token: token
+  } do
+    seed!(metadata(1))
+    # the fan-out picks its own nodes, from a membership whose first read failed
+    Application.delete_env(:malachi, :console_fanout)
+    {:error, :unavailable} = Sampler.fetch(:membership, fn -> {:error, :down} end, interval_ms: 0)
+
+    assert %{status: 200, json: body} = get("/api/v1/topics/big/segments", token)
+    assert %{"membership" => %{"state" => "unavailable"}, "complete" => _} = body
+    assert [%{"under_replicated" => nil}] = body["segments"]
+  end
+
   test "the topic routes take a viewer" do
     wire_only = AccessHelper.account!("topics_wire_only", [:produce], nil)
 
