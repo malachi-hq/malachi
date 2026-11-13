@@ -23,6 +23,7 @@ defmodule LoadtestCeilingTest do
   @project Path.expand("../..", __DIR__)
   @scrape_lib Path.expand("../../scripts/metrics_scrape_lib.sh", __DIR__)
   @bench_lib Path.expand("../../scripts/bench_lib.sh", __DIR__)
+  @curl_lib Path.expand("../../scripts/lib/dashboard_curl.sh", __DIR__)
 
   setup_all do
     # Missing tools fail loudly instead of skipping: a skipped harness test reads as a passing one.
@@ -39,6 +40,8 @@ defmodule LoadtestCeilingTest do
     File.cp!(@script, Path.join([root, "scripts", "loadtest-ceiling.sh"]))
     File.cp!(@scrape_lib, Path.join([root, "scripts", "metrics_scrape_lib.sh"]))
     File.cp!(@bench_lib, Path.join([root, "scripts", "bench_lib.sh"]))
+    File.mkdir_p!(Path.join([root, "scripts", "lib"]))
+    File.cp!(@curl_lib, Path.join([root, "scripts", "lib", "dashboard_curl.sh"]))
 
     stubs = Path.join(dir, "stubs")
     File.mkdir_p!(stubs)
@@ -56,6 +59,7 @@ defmodule LoadtestCeilingTest do
       out: Path.join([dir, "out", "result.json"]),
       log: Path.join(dir, "generator.log"),
       curl_log: Path.join(dir, "curl.log"),
+      argv_log: Path.join(dir, "argv.log"),
       rules: Path.join(dir, "rules"),
       tmp: dir
     }
@@ -272,10 +276,45 @@ defmodule LoadtestCeilingTest do
       assert login =~ ~s({"username":"admin","password":"admin123"})
     end
 
+    # #180: /proc/<pid>/cmdline is readable by every local user, so neither the password nor the session
+    # token may be a process argument, of curl or of the generator. Both must still arrive: the login
+    # body and the bearer on curl's stdin, the password in the generator's environment.
+    for generator <- ~w(elixir node) do
+      test "the #{generator} leg keeps the password and the token off every argv", ctx do
+        password = ~s(s3"cr\\et pw)
+
+        assert {_output, 0} =
+                 run_script(ctx, [
+                   {"BATCH_LADDER", "10"},
+                   {"CONNS_LADDER_10", "4"},
+                   {"GENERATOR", unquote(generator)},
+                   {"MALACHI_USER", "bench"},
+                   {"MALACHI_PASS", password}
+                 ])
+
+        argv = File.read!(ctx.argv_log)
+        assert argv =~ "curl "
+        assert argv =~ "generator "
+
+        # The test's own name (and so its tmp_dir, which reaches argv in paths) says "password", so the
+        # check is on the values, never on the words.
+        for secret <- [password, "stub-token", "Bearer"] do
+          refute argv =~ secret, "#{inspect(secret)} reached a process argument:\n#{argv}"
+        end
+
+        assert {"POST /login", login} = hd(curl_calls(ctx))
+        [_, body] = String.split(login, "; ", parts: 2)
+        assert Jason.decode!(body) == %{"username" => "bench", "password" => password}
+        assert Enum.any?(curl_calls(ctx), fn {_, line} -> line =~ "Authorization: Bearer stub-token" end)
+        assert File.read!(ctx.log) =~ "user=bench pass=#{password} payload="
+      end
+    end
+
     for {behavior, reason} <- [
           {"login403", "login failed: HTTP 403 (the dashboard refused the credentials)"},
           {"login429", "login failed: HTTP 429 (the dashboard rate limit tripped)"},
           {"notoken", "login failed: the answer carried no token"},
+          {"badtoken", "login failed: the answer carried a malformed token"},
           {"down", "login failed: curl could not reach http://127.0.0.1:"},
           {"scrape500", "scrape failed: HTTP 500"},
           {"session401", "scrape failed: HTTP 401 (the session is gone; the node may have restarted)"},
@@ -356,6 +395,7 @@ defmodule LoadtestCeilingTest do
       {"STUB_DEFAULT", "clean"},
       {"STUB_CURL", "ok"},
       {"STUB_CURL_LOG", ctx.curl_log},
+      {"STUB_ARGV_LOG", ctx.argv_log},
       # The curl stub answers everything, but a real client must never reach a dashboard another run
       # on this machine is serving.
       {"MALACHI_DASHBOARD_PORT", Integer.to_string(free_port())},
@@ -369,7 +409,9 @@ defmodule LoadtestCeilingTest do
       {"CONNS_LADDER", nil},
       {"REPS", nil},
       {"PAYLOAD", nil},
-      {"PAYLOAD_SEED", nil}
+      {"PAYLOAD_SEED", nil},
+      {"MALACHI_USER", nil},
+      {"MALACHI_PASS", nil}
     ]
 
     env = Enum.reduce(env, base, fn {key, value}, acc -> List.keystore(acc, key, 0, {key, value}) end)
@@ -444,6 +486,7 @@ defmodule LoadtestCeilingTest do
   defp generator_stub do
     ~S"""
     #!/usr/bin/env bash
+    printf 'generator %s\n' "$*" >> "$STUB_ARGV_LOG"
     batch="" conns="" rsize="" marker="" payload="" seed=""
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -456,7 +499,7 @@ defmodule LoadtestCeilingTest do
       esac
       shift
     done
-    echo "gen kind=$STUB_KIND batch=$batch conns=$conns rsize=$rsize group_commit=$MALACHI_GROUP_COMMIT prealloc=$MALACHI_SEGMENT_PREALLOC_BYTES marker=${marker:+yes} payload=$payload seed=$seed" >> "$STUB_LOG"
+    echo "gen kind=$STUB_KIND batch=$batch conns=$conns rsize=$rsize group_commit=$MALACHI_GROUP_COMMIT prealloc=$MALACHI_SEGMENT_PREALLOC_BYTES marker=${marker:+yes} user=$MALACHI_USER pass=$MALACHI_PASS payload=$payload seed=$seed" >> "$STUB_LOG"
 
     # What the real generators report: constant bytes with no seed unless told otherwise, and seed 1
     # for json or random when none was given.
@@ -484,15 +527,26 @@ defmodule LoadtestCeilingTest do
 
   # Answers like curl with `-w '\n%{http_code}'`: the body, then the status on its own line. STUB_CURL
   # picks the dashboard's behavior; /metrics alternates between the before and the after scrape, which is
-  # the order a run asks for them in.
+  # the order a run asks for them in. Its argv goes to STUB_ARGV_LOG as it came; what it read from stdin
+  # (the body of `--data-binary @-`, the `header = "..."` lines of `-K -`) is folded into STUB_CURL_LOG as
+  # the request it describes, so a secret is asserted on where it travelled and nowhere else.
   defp curl_stub do
     ~S"""
     #!/usr/bin/env bash
+    printf 'curl %s\n' "$*" >> "$STUB_ARGV_LOG"
     method=GET url="" data="" headers=""
     while [ $# -gt 0 ]; do
       case "$1" in
         -X) method="$2"; shift ;;
-        --data) data="$2"; shift ;;
+        --data-binary) [ "$2" = @- ] && data="$(cat)"; shift ;;
+        -K) if [ "$2" = - ]; then
+              while IFS= read -r line; do
+                case "$line" in
+                  'header = "'*'"') line="${line#header = \"}"; headers="$headers ${line%\"};" ;;
+                esac
+              done
+            fi
+            shift ;;
         -H) headers="$headers $2;"; shift ;;
         -w|--max-time) shift ;;
         -*) ;;
@@ -517,6 +571,8 @@ defmodule LoadtestCeilingTest do
           login429) printf 'slow down
     429' ;;
           notoken) printf '{"s":"ok"}
+    200' ;;
+          badtoken) printf '{"s":"ok","token":"stub\\"token"}
     200' ;;
           *) printf '{"s":"ok","token":"stub-token"}
     200' ;;

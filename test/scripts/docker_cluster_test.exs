@@ -47,7 +47,13 @@ defmodule DockerClusterTest do
     write_stub!(stubs, "lsblk", lsblk_stub())
     MetricsFixtures.write_flush_scrapes!(stubs)
 
-    %{root: root, stubs: stubs, log: Path.join(dir, "docker.log"), out: Path.join([dir, "out", "cases.jsonl"])}
+    %{
+      root: root,
+      stubs: stubs,
+      log: Path.join(dir, "docker.log"),
+      stdin_log: Path.join(dir, "stdin.log"),
+      out: Path.join([dir, "out", "cases.jsonl"])
+    }
   end
 
   describe "refuses invalid knobs before touching docker" do
@@ -64,6 +70,7 @@ defmodule DockerClusterTest do
           {"TOPICS", "0"},
           {"BATCH", "-1"},
           {"CASE_TIMEOUT", "5s"},
+          {"SCRAPE_TIMEOUT", "0"},
           {"DISK_PREALLOC_BYTES", "0"},
           {"DUR", "007"}
         ] do
@@ -446,8 +453,10 @@ defmodule DockerClusterTest do
         calls |> Enum.with_index() |> Enum.filter(&(elem(&1, 0) =~ pattern)) |> Enum.map(&elem(&1, 1))
       end
 
-      logins = indices.(~r/wget .*--post-data/)
-      scrapes = indices.(~r/wget .*Bearer stub-token/)
+      logins =
+        indices.(~r/^exec -i malachi-cluster-\d wget .*--post-file \/dev\/stdin http:\/\/127\.0\.0\.1:4041\/login$/)
+
+      scrapes = indices.(~r/^exec -i malachi-cluster-\d nc -w 5 127\.0\.0\.1 4041$/)
       generator = index.(~r/^run --rm --name malachi-cluster-loadtest-/)
       marker = index.(~r/sh -c test -e \/tmp\/malachi-measure-window/)
 
@@ -457,11 +466,21 @@ defmodule DockerClusterTest do
       assert marker < Enum.min(scrapes)
 
       for node <- 1..3 do
-        assert Enum.count(calls, &(&1 =~ ~r/^exec malachi-cluster-#{node} wget .*127\.0\.0\.1:4041\/metrics/)) == 2
+        assert Enum.count(calls, &(&1 =~ ~r/^exec -i malachi-cluster-#{node} nc /)) == 2
       end
 
-      assert Enum.all?(logins, &(Enum.at(calls, &1) =~ ~s(--post-data {"username":"bench","password":"s3cret"})))
-      assert Enum.all?(scrapes, &(Enum.at(calls, &1) =~ "--header Accept: text/plain"))
+      # What travelled on stdin: the login body to wget, the request with its bearer to nc.
+      stdin = stdin_calls(ctx)
+
+      for node <- 1..3 do
+        assert {"wget", ~s({"username":"bench","password":"s3cret"})} in stdin[node]
+
+        assert Enum.count(stdin[node], fn {tool, request} ->
+                 tool == "nc" and
+                   request ==
+                     "GET /metrics HTTP/1.0 | Host: 127.0.0.1 | Authorization: Bearer stub-token | Accept: text/plain |  | "
+               end) == 2
+      end
 
       # The window closes after the generator is done, before the case is torn down.
       teardown = calls |> Enum.with_index() |> Enum.filter(&(elem(&1, 0) == "down -v")) |> List.last() |> elem(1)
@@ -495,10 +514,67 @@ defmodule DockerClusterTest do
 
     test "a node whose scrape fails mid-window is recorded with the status", ctx do
       assert {_output, 0} =
-               run_script(ctx, [{"RFS", "1"}, {"STUB_FLUSH", "real"}, {"STUB_WGET", "scrape429:1"}, {"OUT", ctx.out}])
+               run_script(ctx, [{"RFS", "1"}, {"STUB_FLUSH", "real"}, {"STUB_NC", "scrape429:1"}, {"OUT", ctx.out}])
 
       assert [%{"flush" => %{"all" => nil, "nodes" => %{"malachi1" => %{"error" => error}}}}] = cases(ctx)
       assert error == "scrape failed: HTTP 429 (the dashboard rate limit tripped)"
+    end
+
+    # #180: the host sees every process, the container's included, so neither the password nor the token
+    # may be an argument of the docker client or of the tool it runs inside a node.
+    test "neither the password nor the session token is ever a process argument", ctx do
+      assert {_output, 0} =
+               run_script(ctx, [{"RFS", "1"}, {"MALACHI_USER", "bench"}, {"MALACHI_PASS", "s3cret"}, {"OUT", ctx.out}])
+
+      args = Enum.map_join(docker_calls(ctx), "\n", & &1.args)
+      assert args =~ "--post-file /dev/stdin"
+
+      for secret <- ["s3cret", "stub-token", "Bearer", "post-data"] do
+        refute args =~ secret, "#{inspect(secret)} reached a process argument"
+      end
+
+      stdin = File.read!(ctx.stdin_log)
+      assert stdin =~ "s3cret"
+      assert stdin =~ "Bearer stub-token"
+    end
+
+    for {behavior, reason} <- [
+          {"down",
+           "scrape failed: nc on malachi2 failed: nc: can't connect to remote host (127.0.0.1): Connection refused"},
+          {"hang", "scrape failed: nc on malachi2 timed out after 1s"},
+          {"silent", "scrape failed: nc on malachi2 gave no HTTP status line"},
+          {"garbage", "scrape failed: nc on malachi2 gave no HTTP status line"},
+          {"noend", "scrape failed: nc on malachi2 gave a response with no end of headers"},
+          {"scrape429", "scrape failed: HTTP 429 (the dashboard rate limit tripped)"}
+        ] do
+      test "a node whose nc scrape is #{behavior} leaves its window out with why", ctx do
+        assert {_output, 0} =
+                 run_script(ctx, [
+                   {"RFS", "1"},
+                   {"STUB_FLUSH", "real"},
+                   {"STUB_NC", "#{unquote(behavior)}:2"},
+                   {"SCRAPE_TIMEOUT", "1"},
+                   {"OUT", ctx.out}
+                 ])
+
+        assert [%{"outcome" => "ok", "flush" => %{"all" => nil, "nodes" => nodes}}] = cases(ctx)
+        assert nodes["malachi2"] == %{"error" => unquote(reason)}
+        assert nodes["malachi1"]["flushes"] == 1000
+      end
+    end
+
+    test "a login that hangs is cut off by the scrape timeout", ctx do
+      assert {_output, 0} =
+               run_script(ctx, [
+                 {"RFS", "1"},
+                 {"STUB_FLUSH", "real"},
+                 {"STUB_WGET", "hang:3"},
+                 {"SCRAPE_TIMEOUT", "1"},
+                 {"OUT", ctx.out}
+               ])
+
+      assert [%{"flush" => %{"nodes" => %{"malachi3" => %{"error" => error}}}}] = cases(ctx)
+      assert error == "login failed: wget on malachi3 timed out after 1s"
     end
 
     test "a window that never opens scrapes no node and says so", ctx do
@@ -510,7 +586,7 @@ defmodule DockerClusterTest do
       assert Map.values(nodes) ==
                List.duplicate(%{"error" => "no measured window was signaled, so nothing opened the flush window"}, 3)
 
-      refute Enum.any?(docker_calls(ctx), &(&1.args =~ "Bearer"))
+      refute File.exists?(ctx.stdin_log) and File.read!(ctx.stdin_log) =~ "nc "
     end
 
     test "a flush-window that gives no answer is recorded, not fatal", ctx do
@@ -581,6 +657,7 @@ defmodule DockerClusterTest do
     base = [
       {"PATH", "#{ctx.stubs}:#{System.get_env("PATH")}"},
       {"STUB_LOG", ctx.log},
+      {"STUB_STDIN_LOG", ctx.stdin_log},
       {"REAL_PROJECT", @project},
       {"REAL_MIX", System.find_executable("mix")},
       {"REAL_SLEEP", ctx.tools["sleep"]},
@@ -601,7 +678,10 @@ defmodule DockerClusterTest do
       {"MALACHI_DATA_ROOT", nil},
       {"MALACHI_SEGMENT_PREALLOC_BYTES", nil},
       {"MALACHI_SEGMENT_MAX_BYTES", nil},
-      {"MALACHI_LOG_ROLL_MAX_BYTES", nil}
+      {"MALACHI_LOG_ROLL_MAX_BYTES", nil},
+      {"MALACHI_USER", nil},
+      {"MALACHI_PASS", nil},
+      {"SCRAPE_TIMEOUT", nil}
     ]
 
     env = Enum.reduce(env, base, fn {key, value}, acc -> List.keystore(acc, key, 0, {key, value}) end)
@@ -609,6 +689,18 @@ defmodule DockerClusterTest do
     bash = System.find_executable("bash")
 
     System.cmd(bash, ["-c", ~s(#{shell_prelude} exec "#{bash}" "$0"), script], env: env, stderr_to_stdout: true)
+  end
+
+  # {tool, what it read on stdin} per node, in order, from the stub's STUB_STDIN_LOG.
+  defp stdin_calls(ctx) do
+    ctx.stdin_log
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(fn line ->
+      [tool, node, input] = String.split(line, " ", parts: 3)
+      {String.to_integer(node), {tool, input}}
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
   end
 
   # One entry per docker call: `%{verb, args, env}`, where args drops `compose -f <file>`.
@@ -684,45 +776,62 @@ defmodule DockerClusterTest do
       stats) echo "malachi-cluster-1 150.00%" ;;
       build | up | down | logs | rm) : ;;
       exec)
-        # `compose exec -T <service> <cmd>` puts the command fourth; the sampler's plain
-        # `exec <container> sh -c ...` puts it third.
-        command="$4"
+        # `compose exec -T <service> <cmd>` puts the command fourth, and so does the scrape's
+        # `exec -i <container> <cmd>`; the sampler's plain `exec <container> sh -c ...` puts it third.
+        command="$4" container="$2"
+        [ "$2" = -i ] && container="$3"
         [ "$3" = sh ] && command=sh
-        [ "$3" = wget ] && command=wget
+        node="${container#malachi-cluster-}"
+        # STUB_WGET (wget's login) and STUB_NC (nc's scrape) name a behavior for one node: <behavior>:<node>.
+        behavior_for() {
+          local behavior="$1"
+          [ "${behavior#*:}" = "$node" ] || behavior=ok
+          echo "${behavior%%:*}"
+        }
+        stubs="$(dirname "$0")"
         case "$command" in
           wget)
-            node="${2#malachi-cluster-}"
-            post=no url=""
+            # The login body comes on stdin (`--post-file /dev/stdin`), never in the arguments.
+            post=no
             for arg in "$@"; do
-              case "$arg" in
-                --post-data) post=yes ;;
-                http://*) url="$arg" ;;
-              esac
+              [ "$arg" = --post-file ] && post=yes
             done
-            behavior="${STUB_WGET:-ok}"
-            [ "${behavior#*:}" = "$node" ] || behavior=ok
-            behavior="${behavior%%:*}"
-            stubs="$(dirname "$0")"
+            [ "$post" = yes ] || { echo "stub docker: wget without --post-file" >&2; exit 97; }
+            body="$(cat)"
+            printf 'wget %s %s\n' "$node" "$body" >> "$STUB_STDIN_LOG"
+            behavior="$(behavior_for "${STUB_WGET:-ok}")"
+            [ "$behavior" = hang ] && exec "$REAL_SLEEP" 30
             if [ "$behavior" = down ]; then
               echo "wget: can't connect to remote host (127.0.0.1): Connection refused" >&2
               exit 1
             fi
-            if [ "$post" = yes ]; then
-              if [ "$behavior" = login403 ]; then
-                echo "wget: server returned error: HTTP/1.1 403 Forbidden" >&2
-                exit 1
-              fi
-              echo '{"s":"ok","token":"stub-token"}'
-              exit 0
-            fi
-            if [ "$behavior" = scrape429 ]; then
-              echo "wget: server returned error: HTTP/1.1 429 Too Many Requests" >&2
+            if [ "$behavior" = login403 ]; then
+              echo "wget: server returned error: HTTP/1.1 403 Forbidden" >&2
               exit 1
             fi
+            echo '{"s":"ok","token":"stub-token"}'
+            exit 0 ;;
+          nc)
+            # The scrape is a raw HTTP request on stdin; answered the way the dashboard does, a
+            # Content-Length body after CRLF headers.
+            # Read whole, trailing CRLFs included (a command substitution would drop the last newline).
+            request="$(cat; echo .)"
+            request="${request%.}"
+            printf 'nc %s %s\n' "$node" "${request//$'\r\n'/ | }" >> "$STUB_STDIN_LOG"
+            case "$(behavior_for "${STUB_NC:-ok}")" in
+              down) echo "nc: can't connect to remote host (127.0.0.1): Connection refused" >&2; exit 1 ;;
+              hang) exec "$REAL_SLEEP" 30 ;;
+              silent) exit 0 ;;
+              garbage) echo "<html>not http</html>"; exit 0 ;;
+              noend) printf 'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n'; exit 0 ;;
+              scrape429) printf 'HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n'; exit 0 ;;
+            esac
             calls="$stubs/scrapes-$node"
             n=$(( $(cat "$calls" 2> /dev/null || echo 0) + 1 ))
             echo "$n" > "$calls"
-            if [ $((n % 2)) = 1 ]; then cat "$stubs/before.prom"; else cat "$stubs/after.prom"; fi
+            if [ $((n % 2)) = 1 ]; then prom="$stubs/before.prom"; else prom="$stubs/after.prom"; fi
+            printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %s\r\n\r\n' "$(wc -c < "$prom" | tr -d ' ')"
+            cat "$prom"
             exit 0 ;;
           awk)
             [ "${STUB_FSTYPE:-ext4}" = none ] && exit 1

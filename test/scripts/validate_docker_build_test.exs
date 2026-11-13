@@ -8,9 +8,12 @@ defmodule ValidateDockerBuildTest do
   # `bin/malachi` that answer each case, so its exit status is what is checked, not its text.
   use ExUnit.Case, async: true
 
+  alias Malachi.Test.DockerHarnessStubs, as: Stubs
   alias Malachi.Test.TmpDir
 
   @script Path.expand("../../scripts/validate-docker-build.sh", __DIR__)
+  @scripts Path.expand("../../scripts", __DIR__)
+  @passwords ~w(MALACHI_ADMIN_PASS MALACHI_PRODUCER_PASS MALACHI_CONSUMER_PASS MALACHI_APP_PASS)
 
   setup_all do
     # Missing tools fail loudly instead of skipping: a skipped harness test reads as a passing one.
@@ -83,5 +86,85 @@ defmodule ValidateDockerBuildTest do
 
     refute step_one_body() =~ "grep -q 'OpenSSL'"
     refute step_one_body() =~ "which openssl"
+  end
+
+  # #180: the whole script, run in a throwaway tree with Malachi.Test.DockerHarnessStubs first on the PATH.
+  # The passwords reach the container by name (`docker run -e NAME`, MALACHI_DEFAULT_USERS included), the
+  # login body and the bearer reach curl on stdin, and none of them is ever a process argument.
+  describe "a full run" do
+    setup %{dir: dir} do
+      tree = Path.join(dir, "tree")
+      File.mkdir_p!(Path.join([tree, "scripts", "lib"]))
+
+      for file <- ~w(validate-docker-build.sh metrics_scrape_lib.sh lib/dashboard_curl.sh) do
+        File.cp!(Path.join(@scripts, file), Path.join([tree, "scripts", file]))
+      end
+
+      # The script reads the version from the mix.exs of the directory it runs in.
+      File.write!(Path.join(tree, "mix.exs"), ~s(  @version "9.9.9"\n))
+      Map.merge(Stubs.install!(dir), %{tree: tree})
+    end
+
+    test "passes, with every password and the session token off every process argument", ctx do
+      assert {output, 0} = run_full(ctx)
+      assert output =~ "Dashboard authentication successful"
+      assert output =~ "Dashboard responding"
+      assert output =~ "All validation checks completed"
+
+      env = Stubs.container_env(ctx)
+      argv = Stubs.argv(ctx)
+      assert argv =~ "hectorcardoso/malachi:9.9.9"
+
+      for var <- @passwords do
+        assert env[var] =~ ~r/^validation_/, "#{var} did not reach the container"
+        assert argv =~ "-e #{var} "
+        refute argv =~ env[var], "#{var}'s value reached a process argument"
+      end
+
+      assert env["MALACHI_DEFAULT_USERS"] ==
+               "admin:#{env["MALACHI_ADMIN_PASS"]}:admin;producer:#{env["MALACHI_PRODUCER_PASS"]}:produce;" <>
+                 "consumer:#{env["MALACHI_CONSUMER_PASS"]}:consume;app:#{env["MALACHI_APP_PASS"]}:produce,consume"
+
+      assert argv =~ "-e MALACHI_DEFAULT_USERS "
+      refute argv =~ "stub-token"
+      refute argv =~ "Bearer"
+
+      assert [login, bearer] = Stubs.curl_stdin(ctx)
+      assert Jason.decode!(login) == %{"username" => "admin", "password" => env["MALACHI_ADMIN_PASS"]}
+      assert bearer == ~s(header = "Authorization: Bearer stub-token"\n)
+    end
+
+    for {behavior, reason} <- [
+          {"login403", "login failed: HTTP 403 (the dashboard refused the credentials)"},
+          {"badtoken", "login failed: the answer carried a malformed token"}
+        ] do
+      test "#{behavior}: every attempt fails and the run stops, saying why", ctx do
+        assert {output, 1} = run_full(ctx, [{"STUB_CURL", unquote(behavior)}])
+        assert output =~ "Could not authenticate to dashboard after 10 attempts (#{unquote(reason)})"
+        assert length(Stubs.curl_stdin(ctx)) == 10
+        refute output =~ "Step 4"
+      end
+    end
+
+    test "without jq it refuses to start, before touching docker", ctx do
+      bin = Path.join(ctx.dir, "bin")
+      File.mkdir_p!(bin)
+
+      for tool <- ~w(bash dirname grep head sed curl) do
+        File.ln_s!(System.find_executable(tool), Path.join(bin, tool))
+      end
+
+      assert {output, 1} = run_full(ctx, [{"PATH", bin}])
+      assert output =~ "jq is required"
+      refute File.exists?(ctx.argv_log)
+    end
+  end
+
+  defp run_full(ctx, env \\ []) do
+    System.cmd(System.find_executable("bash"), [Path.join([ctx.tree, "scripts", "validate-docker-build.sh"])],
+      cd: ctx.tree,
+      env: Stubs.env(ctx, env),
+      stderr_to_stdout: true
+    )
   end
 end

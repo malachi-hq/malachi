@@ -1264,7 +1264,7 @@ defmodule Malachi.Loadtest do
   # generator records. Two reasons: `run/1` is called directly as well (the mix task is a thin wrapper),
   # so there is not always an argv to quote; and a reproduction needs the defaults too, while an argv
   # shows only what was typed. Credential VALUES are deliberately absent: this string gets committed
-  # and published, and `--pass` or `--token` has no business in either. File paths are not values and
+  # and published, and the password or the token has no business in either. File paths are not values and
   # do come along, see `tls_options/1`.
   defp command(cfg) do
     options =
@@ -1335,14 +1335,14 @@ defmodule Malachi.Loadtest do
   # different thing too, since the handshake and the record layer are part of what was timed.
   #
   # The certificate paths come along. They are paths, not secrets, which is the line this function
-  # already draws: `--pass` and `--token` are excluded because they carry the secret VALUE, and a
+  # already draws: the password and the token are excluded because they carry the secret VALUE, and a
   # command that names a key file leaks no key. Dropping them would produce a command that runs and
   # quietly reproduces a weaker configuration, which is the bug being fixed rather than a smaller
   # version of it.
   # The identity the run authenticated as, which decides what it was allowed to do: a user without a
   # produce ACL on the topic measures rejections, and the published command would reproduce it as
   # admin and disagree with its own numbers. The name is not the secret, which is the line
-  # `tls_options/1` already draws: `--pass` and `--token` stay out because they carry the VALUE.
+  # `tls_options/1` already draws: the password and the token stay out because they carry the VALUE.
   # Nothing is recorded for a token or certificate run, where there is no username in play and naming
   # one would describe a different handshake than the one measured.
   defp auth_options(conn_opts) do

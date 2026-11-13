@@ -30,8 +30,9 @@
 # Per-flush latency, the most direct cost of the durable path, is read from each node's own /metrics: a
 # scrape when the generator's window opens and one when the generator exits, subtracted and added up
 # across the nodes by `mix malachi.loadtest.ceiling flush-window` (#164). The dashboard port is not
-# published, so the scrape runs inside each node with its busybox wget against 127.0.0.1, logged in with
-# MALACHI_USER/MALACHI_PASS (the dev image's admin by default). The opening scrape waits on the same
+# published, so the scrape runs inside each node against 127.0.0.1 (busybox wget logs in, busybox nc
+# scrapes), logged in with MALACHI_USER/MALACHI_PASS (the dev image's admin by default). The password and
+# the session token reach the node on `docker exec -i`'s stdin, never as a process argument (#180). The opening scrape waits on the same
 # half-second marker poll as the CPU snapshot, so the flush window starts up to about half a second
 # after the measured one; the flushes are the same steady-state flushes either way. A node that cannot
 # be scraped leaves `flush.all` null with the reason in `flush.error`, and the case keeps its throughput.
@@ -50,6 +51,8 @@
 #                        segment size, and the disk check relies on that bound)
 #   CASE_TIMEOUT         seconds one load generator run may take, setup included (default 300); a run
 #                        that exceeds it is killed, reported as a timeout, and the next case still runs
+#   SCRAPE_TIMEOUT       seconds one dashboard request inside a node may take, docker exec included
+#                        (default 10); one that exceeds it leaves that node's flush window out, with why
 #   OUT                  when set, one JSON object per case is APPENDED to this file (JSON lines)
 #
 # Usage: benchmark/docker-cluster.sh
@@ -92,12 +95,15 @@ REAL_DISK="${REAL_DISK-0}"
 MAX_PREALLOC_BYTES=67108864
 DISK_PREALLOC_BYTES="${DISK_PREALLOC_BYTES:-$MAX_PREALLOC_BYTES}"
 CASE_TIMEOUT="${CASE_TIMEOUT:-300}"
+# Seconds one dashboard request inside a node may take, the docker exec included. wget's -T and nc's -w end
+# a request a node stops answering; this ends a docker exec that never returns, which neither of them can.
+SCRAPE_TIMEOUT="${SCRAPE_TIMEOUT:-10}"
 OUT="${OUT:-}"
 MALACHI_USER="${MALACHI_USER:-admin}"
 MALACHI_PASS="${MALACHI_PASS:-admin123}"
 export SRV_CPUSET="${SRV_CPUSET:-4,5,6,7}" LT_CPUSET="${LT_CPUSET:-0,1,2,3}"
 
-for knob in DUR WARM CONNS BATCH RSIZE TOPICS CASE_TIMEOUT DISK_PREALLOC_BYTES; do
+for knob in DUR WARM CONNS BATCH RSIZE TOPICS CASE_TIMEOUT SCRAPE_TIMEOUT DISK_PREALLOC_BYTES; do
   require_positive "$knob" "${!knob}"
 done
 [ -n "${RFS// /}" ] || usage_error "RFS is empty"
@@ -159,14 +165,28 @@ source scripts/metrics_scrape_lib.sh
 # The node a dashboard request goes to, set by the caller before each ms_* call.
 SCRAPE_NODE=""
 
-# wget ARGS inside SCRAPE_NODE: the body on a 2xx, else one line saying what went wrong (the contract
-# metrics_scrape_lib.sh states). busybox wget reports a refused request as `server returned error:
-# HTTP/1.1 <status> ...` on stderr, which is where the status comes from.
-node_request() {
-  local body err="$WORK/wget-$SCRAPE_NODE.err" status
-  if body="$(docker exec "malachi-cluster-${SCRAPE_NODE#malachi}" wget -q -O - -T 5 "$@" 2> "$err")"; then
+# The transport metrics_scrape_lib.sh asks for, run inside SCRAPE_NODE: the body on a 2xx, else one line
+# saying what went wrong. Neither the password nor the session token is ever a process argument, neither
+# on the host's docker client nor on the tool inside the node (the host sees the container's processes
+# too): both go through `docker exec -i` on stdin (#180). busybox wget takes the login body from
+# `--post-file /dev/stdin`; it can read no header from a file, so the scrape is a raw HTTP/1.0 request
+# written to busybox nc, which the dashboard answers with a Content-Length body and then closes.
+node_container() { echo "malachi-cluster-${SCRAPE_NODE#malachi}"; }
+
+# The login. busybox wget reports a refused request as `server returned error: HTTP/1.1 <status> ...` on
+# stderr, which is where the status comes from.
+ms_http_post() { # ms_http_post <path> <json>
+  local body err="$WORK/wget-$SCRAPE_NODE.err" code status
+  body="$(printf '%s' "$2" | timeout "$SCRAPE_TIMEOUT" docker exec -i "$(node_container)" \
+    wget -q -O - -T 5 --header 'Content-Type: application/json' --post-file /dev/stdin "http://127.0.0.1:4041$1" 2> "$err")"
+  code=$?
+  if [ "$code" -eq 0 ]; then
     printf '%s\n' "$body"
     return 0
+  fi
+  if [ "$code" -eq 124 ]; then
+    echo "wget on $SCRAPE_NODE timed out after ${SCRAPE_TIMEOUT}s"
+    return 1
   fi
   status="$(grep -oE 'HTTP/1\.[01] [0-9]{3}' "$err" | head -1 | cut -d' ' -f2)"
   if [ -n "$status" ]; then
@@ -176,11 +196,23 @@ node_request() {
   fi
   return 1
 }
-ms_http_post() {
-  node_request --header 'Content-Type: application/json' --post-data "$2" "http://127.0.0.1:4041$1"
-}
-ms_http_get() {
-  node_request --header "Authorization: Bearer $2" --header 'Accept: text/plain' "http://127.0.0.1:4041$1"
+
+# The scrape, as the session TOKEN. The token is written into the request unescaped: ms_login only hands
+# out base64url tokens, which hold no CR or LF that could add a header.
+ms_http_get() { # ms_http_get <path> <token>
+  local response err="$WORK/nc-$SCRAPE_NODE.err" code
+  response="$(printf 'GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer %s\r\nAccept: text/plain\r\n\r\n' "$1" "$2" |
+    timeout "$SCRAPE_TIMEOUT" docker exec -i "$(node_container)" nc -w 5 127.0.0.1 4041 2> "$err")"
+  code=$?
+  if [ "$code" -eq 124 ]; then
+    echo "nc on $SCRAPE_NODE timed out after ${SCRAPE_TIMEOUT}s"
+    return 1
+  fi
+  if [ "$code" -ne 0 ]; then
+    echo "nc on $SCRAPE_NODE failed: $(head -1 "$err")"
+    return 1
+  fi
+  ms_parse_http_response "nc on $SCRAPE_NODE" "$response"
 }
 
 declare -A FLUSH_TOKEN FLUSH_LOGIN_FAILURE
