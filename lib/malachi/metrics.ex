@@ -281,7 +281,7 @@ defmodule Malachi.Metrics do
 
   @doc """
   The retention counters as the Prometheus exporter needs them: every skip series (`topic`, `reader`,
-  `group`, `origin`, `span`, with its `events` and `offsets`), the expired `segments` and `bytes` per topic, the
+  `group`, `origin`, `span`, `cause`, with its `events` and `offsets`), the expired `segments` and `bytes` per topic, the
   refusals per reply (every known reply, zero included), the replica directories expiries left behind per
   topic, the ones the sweeper reclaimed, and the sweep duration histogram in the shape
   of `storage_flush_histogram/0` (its `count` is the number of sweeps). Read only at scrape time.

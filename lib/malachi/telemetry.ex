@@ -78,10 +78,10 @@ defmodule Malachi.Telemetry do
 
     * `[:malachi, :retention, :skip]`. `%{count: 1, offsets}` / `%{topic, group, range, source_range,
       origin, span, cause}` - a consumer was moved past data that is no longer served, once per distinct
-      skip. `cause` is `:expired` for data retention or an operator removed, and `:purged` for a stretch
-      below the range's logical start, set by an operator's purge (#198), whose records may still be on
-      disk (a re-read before the commit is not counted
-      again). `group` is `nil` for a fetch outside a group. `origin` is `:start` for a reader that had
+      skip (a re-read before the commit is not counted again). `cause` is `:expired` for data that
+      retention expired or an operator removed, and `:purged` for a stretch below the range's logical
+      start, set by an operator's purge (#198), whose records may still be on disk. `group` is `nil` for
+      a fetch outside a group. `origin` is `:start` for a reader that had
       no position (a new group, or a child range after a split) and `:cursor` for one that resumed from
       a position, which is the reader that fell behind retention. `span` says how far `offsets` can be
       trusted: `:exact`, `:upper_bound` (the data was an ancestor's, of which this range would only have
