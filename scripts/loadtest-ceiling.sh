@@ -80,6 +80,8 @@ PAYLOAD_SEED="${PAYLOAD_SEED:-}"
 payload_args=()
 if [ "$PAYLOAD" != constant ]; then payload_args+=(--payload "$PAYLOAD"); fi
 if [ -n "$PAYLOAD_SEED" ]; then payload_args+=(--payload-seed "$PAYLOAD_SEED"); fi
+# Both generators read the login from the environment, never from a flag: an argument is readable by every
+# local user in /proc/<pid>/cmdline for as long as the run lasts, the environment only by its owner (#180).
 export MALACHI_USER="${MALACHI_USER:-admin}"
 export MALACHI_PASS="${MALACHI_PASS:-admin123}"
 export MALACHI_PORT="${MALACHI_PORT:-4040}"
@@ -193,25 +195,10 @@ wait_for_marker() { # wait_for_marker <marker> <gen_pid>
 source "$ROOT/scripts/metrics_scrape_lib.sh"
 CURL="${CURL:-curl}"
 DASHBOARD_URL="http://127.0.0.1:${MALACHI_DASHBOARD_PORT:-4041}"
-
-# curl ARGS: the body on a 2xx, else one line saying what went wrong (the contract metrics_scrape_lib.sh
-# states). The status comes on the last line of the output, so a body is never mistaken for it.
-dashboard_request() {
-  command -v "$CURL" > /dev/null 2>&1 || { echo "curl not found"; return 1; }
-  local response code
-  response="$("$CURL" -sS --max-time 5 -w '\n%{http_code}' "$@" 2> /dev/null)"
-  code=$?
-  if [ "$code" -ne 0 ]; then
-    echo "curl could not reach $DASHBOARD_URL (exit $code)"
-    return 1
-  fi
-  case "${response##*$'\n'}" in
-    2??) printf '%s\n' "${response%$'\n'*}" ;;
-    *) echo "HTTP ${response##*$'\n'}"; return 1 ;;
-  esac
-}
-ms_http_post() { dashboard_request -X POST -H 'Content-Type: application/json' --data "$2" "$DASHBOARD_URL$1"; }
-ms_http_get() { dashboard_request -H "Authorization: Bearer $2" -H 'Accept: text/plain' "$DASHBOARD_URL$1"; }
+# The curl transport: dashboard_request, ms_http_post and ms_http_get, with the password and the token
+# on curl's stdin rather than its argv (#180).
+# shellcheck source=scripts/lib/dashboard_curl.sh
+source "$ROOT/scripts/lib/dashboard_curl.sh"
 
 # The fields a run gets: {flush_latency_seconds, flush_latency_error}, one of them null. Always valid
 # JSON, so the stamp below never loses the CPU attribution over a flush problem.
@@ -300,8 +287,7 @@ run_point() {
     ERL_AFLAGS="$GEN_ERL_AFLAGS" $lt_pin mix malachi.loadtest --scenario produce --json \
       --connections "$n" --batch "$batch" --record-size "$RSIZE" \
       --duration "$DUR" --warmup "$WARM" --pipeline 1 --host 127.0.0.1 \
-      --connect-strategy bounded --connect-concurrency 32 \
-      --user "$MALACHI_USER" --pass "$MALACHI_PASS" ${payload_args[@]+"${payload_args[@]}"} \
+      --connect-strategy bounded --connect-concurrency 32 ${payload_args[@]+"${payload_args[@]}"} \
       --measure-marker "$marker" > "$out" 2>> "$RUN_DIR/loadtest.err" < /dev/null &
   fi
   local gen_pid=$!
