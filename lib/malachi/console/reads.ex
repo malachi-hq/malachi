@@ -181,9 +181,18 @@ defmodule Malachi.Console.Reads do
   """
   @spec groups() :: %{groups: [map()], unanswered: non_neg_integer()}
   def groups do
+    coordinators = local_coordinators()
+
     results =
-      local_coordinators()
-      |> Task.async_stream(&Samples.group_coordinator/1, ordered: false, timeout: 5_000, on_timeout: :kill_task)
+      coordinators
+      # every one at once: the default concurrency is the scheduler count, which would read a node leading more
+      # vnodes than it has schedulers in waves, past the fan-out's bound
+      |> Task.async_stream(&Samples.group_coordinator/1,
+        ordered: false,
+        max_concurrency: max(length(coordinators), 1),
+        timeout: 5_000,
+        on_timeout: :kill_task
+      )
       |> Enum.map(fn
         {:ok, result} -> result
         {:exit, _timeout} -> {:error, :unavailable}

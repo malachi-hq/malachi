@@ -159,6 +159,31 @@ defmodule Malachi.Console.ReadsTest do
       end
     end
 
+    test "every coordinator is read at once, however many more there are than schedulers" do
+      Application.put_env(:malachi, :console_sample_ms, 50)
+      on_exit(fn -> Application.delete_env(:malachi, :console_sample_ms) end)
+      count = 2 * System.schedulers_online() + 1
+
+      # vnode coordinators that never answer a call, each with a sample older than the interval
+      names =
+        for n <- 1..count do
+          name = String.to_atom("Elixir.Malachi.LogGroupCoordinator.reads_test_#{n}")
+          pid = spawn(fn -> Process.sleep(:infinity) end)
+          Process.register(pid, name)
+          on_exit(fn -> Process.exit(pid, :kill) end)
+          SamplerHelper.seed!({:group_coordinator, name}, [])
+          name
+        end
+
+      Process.sleep(60)
+      {micros, result} = :timer.tc(fn -> Reads.groups() end)
+
+      # each answers with its last sample after one read bound, all of them together: about one second,
+      # not one per wave of schedulers
+      assert micros < 2_000_000, "took #{div(micros, 1000)} ms for #{length(names)} coordinators"
+      assert result.unanswered == 0
+    end
+
     test "a coordinator that does not answer is counted, not waited for" do
       :ok = :sys.suspend(Malachi.LogGroupCoordinator)
 
