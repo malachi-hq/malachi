@@ -131,6 +131,13 @@ jobs:
         with:
           persist-credentials: false
       
+      # The elixir base image floats to the latest OTP 28 patch under its pinned digest while every job that
+      # tests installs .github/beam-versions, so the two drifted apart unnoticed (#332). This fails when a
+      # digest bump in either Dockerfile moves its image to a runtime the tests do not run. Before the build,
+      # which it does not need: it reads the base images themselves.
+      - name: 🧬 Check the images ship the tested runtime
+        run: scripts/check-image-runtime.sh .github/beam-versions Dockerfile benchmark/Dockerfile.loadtest
+
       - name: 🐳 Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       
