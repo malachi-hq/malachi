@@ -10,14 +10,18 @@ defmodule Malachi.TCPAcceptorPoolTest do
   # application's.
   defp pool_name, do: :"tcp_acceptor_pool_test_#{System.unique_integer([:positive])}"
 
-  defp start_pool(port) do
+  defp start_pool(port, opts \\ []) do
     name = pool_name()
-    {start_supervised({TCPAcceptorPool, {port, name: name}}, id: name), name}
+    {start_supervised({TCPAcceptorPool, {port, [name: name] ++ opts}}, id: name), name}
+  end
+
+  defp acceptor_states(pool) do
+    for {{:acceptor, _i}, pid, :worker, _modules} <- Supervisor.which_children(pool), do: :sys.get_state(pid)
   end
 
   defp acceptor_ports(pool) do
     for {{:acceptor, _i} = id, _pid, :worker, _modules} <- Supervisor.which_children(pool) do
-      {:ok, %{start: {Malachi.TCPAcceptor, :start_link, [{port, _opts, _id, _transport}]}}} =
+      {:ok, %{start: {_acceptor, :start_link, [{port, _opts, _id, _transport}]}}} =
         :supervisor.get_childspec(pool, id)
 
       port
@@ -118,6 +122,61 @@ defmodule Malachi.TCPAcceptorPoolTest do
       client_opts = [:binary, active: false, verify: :verify_none, versions: [:"tlsv1.3", :"tlsv1.2"]]
       assert {:ok, client} = :ssl.connect(~c"127.0.0.1", port, client_opts, 5_000)
       :ssl.close(client)
+    end
+  end
+
+  describe "pool options" do
+    test "runs the acceptor module it is given, one per online scheduler, on the bound port" do
+      {{:ok, pool}, name} = start_pool(0, acceptor: Malachi.Test.StubAcceptor, tls: false)
+      bound = TCPAcceptorPool.port(name)
+
+      for {{:acceptor, _i} = id, _pid, :worker, _modules} <- Supervisor.which_children(pool) do
+        assert {:ok, %{start: {Malachi.Test.StubAcceptor, :start_link, [{^bound, _opts, _id, :gen_tcp}]}}} =
+                 :supervisor.get_childspec(pool, id)
+      end
+
+      assert length(acceptor_states(pool)) == System.schedulers_online()
+    end
+
+    test "defaults to Malachi.TCPAcceptor" do
+      {{:ok, pool}, _name} = start_pool(0)
+
+      assert {:ok, %{start: {Malachi.TCPAcceptor, :start_link, _args}}} =
+               :supervisor.get_childspec(pool, {:acceptor, 1})
+    end
+
+    test "binds the address it is given" do
+      {{:ok, pool}, name} = start_pool(0, acceptor: Malachi.Test.StubAcceptor, ip: {127, 0, 0, 1})
+      bound = TCPAcceptorPool.port(name)
+
+      for %{socket: socket} <- acceptor_states(pool) do
+        assert :inet.sockname(socket) == {:ok, {{127, 0, 0, 1}, bound}}
+      end
+    end
+
+    test "binds every interface when no address is given" do
+      {{:ok, pool}, name} = start_pool(0, acceptor: Malachi.Test.StubAcceptor)
+      bound = TCPAcceptorPool.port(name)
+
+      for %{socket: socket} <- acceptor_states(pool) do
+        assert :inet.sockname(socket) == {:ok, {{0, 0, 0, 0}, bound}}
+      end
+    end
+
+    test "tls: false listens in plain TCP even when the application enables TLS" do
+      previous = Application.fetch_env(:malachi, :enable_tls)
+      Application.put_env(:malachi, :enable_tls, true)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, old} -> Application.put_env(:malachi, :enable_tls, old)
+          :error -> Application.delete_env(:malachi, :enable_tls)
+        end
+      end)
+
+      {{:ok, pool}, _name} = start_pool(0, acceptor: Malachi.Test.StubAcceptor, tls: false)
+
+      assert Enum.all?(acceptor_states(pool), &(&1.transport == :gen_tcp))
     end
   end
 

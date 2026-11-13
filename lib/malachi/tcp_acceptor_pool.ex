@@ -22,8 +22,15 @@ defmodule Malachi.TCPAcceptorPool do
   alias Malachi.I18n
 
   @doc """
-  Starts the acceptor pool listening on `port`, registered under the module name. `{port, name: name}`
-  registers it under `name` instead, which is how a test runs a pool beside the application's.
+  Starts the acceptor pool listening on `port`, registered under the module name. `{port, opts}` takes:
+
+    * `:name`: registers the pool under `name` instead, which is how a test runs a pool beside the
+      application's, and how a second listener (the Kafka spike) runs beside the Malachi one.
+    * `:acceptor`: the module each acceptor runs, `Malachi.TCPAcceptor` by default. It is started as
+      `acceptor.start_link({port, listen_opts, id, transport})` and must open its own listen socket on
+      `port` with `listen_opts`, as `Malachi.TCPAcceptor` does.
+    * `:ip`: the address to bind, every interface by default.
+    * `:tls`: whether to listen over TLS, `:enable_tls` from the application config by default.
   """
   @spec start_link(:inet.port_number() | {:inet.port_number(), keyword()}) :: Supervisor.on_start()
   def start_link({port, opts}) do
@@ -31,7 +38,7 @@ defmodule Malachi.TCPAcceptorPool do
 
     # The port is recorded here, once the whole pool is up, and not in `init/1`: a pool whose acceptor
     # fails to bind after the throwaway socket succeeded never started, and must not leave a port behind.
-    with {:ok, pool} <- Supervisor.start_link(__MODULE__, port, name: name) do
+    with {:ok, pool} <- Supervisor.start_link(__MODULE__, {port, opts}, name: name) do
       :persistent_term.put({__MODULE__, name}, acceptor_port(pool))
       {:ok, pool}
     end
@@ -47,11 +54,12 @@ defmodule Malachi.TCPAcceptorPool do
   def port(name \\ __MODULE__), do: :persistent_term.get({__MODULE__, name}, nil)
 
   @impl true
-  def init(port) do
+  def init({port, pool_opts}) do
+    acceptor = Keyword.get(pool_opts, :acceptor, Malachi.TCPAcceptor)
     buffer_size = Application.get_env(:malachi, :tcp_buffer_size, 32_768)
     backlog = Application.get_env(:malachi, :tcp_backlog, 4096)
     send_timeout = Application.get_env(:malachi, :tcp_send_timeout, 30_000)
-    enable_tls = Application.get_env(:malachi, :enable_tls, false)
+    enable_tls = Keyword.get_lazy(pool_opts, :tls, fn -> Application.get_env(:malachi, :enable_tls, false) end)
 
     base_opts = [
       :binary,
@@ -69,6 +77,12 @@ defmodule Malachi.TCPAcceptorPool do
       recbuf: buffer_size,
       backlog: backlog
     ]
+
+    base_opts =
+      case Keyword.fetch(pool_opts, :ip) do
+        {:ok, ip} -> [{:ip, ip} | base_opts]
+        :error -> base_opts
+      end
 
     {transport, opts} =
       if enable_tls do
@@ -103,7 +117,7 @@ defmodule Malachi.TCPAcceptorPool do
         children =
           for i <- 1..num_acceptors do
             Supervisor.child_spec(
-              {Malachi.TCPAcceptor, {bound, opts, i, transport}},
+              {acceptor, {bound, opts, i, transport}},
               id: {:acceptor, i}
             )
           end
@@ -120,7 +134,7 @@ defmodule Malachi.TCPAcceptorPool do
 
   # Every acceptor was handed the same bound port (see `init/1`); the first one's start arguments say which.
   defp acceptor_port(pool) do
-    {:ok, %{start: {Malachi.TCPAcceptor, :start_link, [{bound, _opts, _id, _transport}]}}} =
+    {:ok, %{start: {_acceptor, :start_link, [{bound, _opts, _id, _transport}]}}} =
       :supervisor.get_childspec(pool, {:acceptor, 1})
 
     bound
