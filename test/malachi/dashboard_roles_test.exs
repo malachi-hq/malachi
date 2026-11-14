@@ -9,6 +9,7 @@ defmodule Malachi.DashboardRolesTest do
 
   alias Malachi.Auth
   alias Malachi.Auth.UserStore
+  alias Malachi.Dashboard.Assets
   alias Malachi.HTTP.Problem
   alias Malachi.Test.AccessHelper
 
@@ -218,8 +219,11 @@ defmodule Malachi.DashboardRolesTest do
   # The login page reads the problem body the dashboard now sends: it has a message for exactly the types
   # POST /login can answer with (its own three, and the header limit every request meets before routing),
   # no dead ones, and no longer looks for the reason member the old body carried.
+  # The mapping lives in the script the page loads (/login.js, #38), so that is what is read, as served.
   test "the login page maps exactly the problem types the login can answer with" do
-    %{status: 200, body: page} = AccessHelper.call(:dashboard, "GET", "/login", nil)
+    %{status: 200, body: html} = AccessHelper.call(:dashboard, "GET", "/login", nil)
+    assert html =~ Assets.versioned_path("/login.js")
+    %{status: 200, body: page} = AccessHelper.call(:dashboard, "GET", "/login.js", nil)
 
     login_types = [
       "errors.auth.invalid_credentials",

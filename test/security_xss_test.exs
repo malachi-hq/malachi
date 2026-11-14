@@ -1,6 +1,8 @@
 defmodule Malachi.Security.XSSTest do
   use ExUnit.Case, async: true
 
+  alias Malachi.Dashboard.SecurityHeaders
+
   @moduledoc """
   Security tests to prevent XSS (Cross-Site Scripting) attacks.
   Tests that user-controlled input (like queue names) cannot inject malicious code.
@@ -68,19 +70,13 @@ defmodule Malachi.Security.XSSTest do
   end
 
   describe "Content Security Policy" do
-    test "dashboard should implement CSP headers (future enhancement)" do
-      recommended_csp = [
-        "default-src 'self'",
-        "script-src 'self'",
-        "style-src 'self' 'unsafe-inline'",
-        "img-src 'self' data:",
-        "connect-src 'self'",
-        "frame-ancestors 'none'",
-        "base-uri 'self'",
-        "form-action 'self'"
-      ]
+    test "the default dashboard policy allows no inline script or style" do
+      csp = SecurityHeaders.default_csp()
 
-      refute Enum.empty?(recommended_csp)
+      assert csp =~ "script-src 'self';"
+      assert csp =~ "style-src 'self';"
+      refute csp =~ "'unsafe-inline'"
+      refute csp =~ "'unsafe-eval'"
     end
   end
 end
