@@ -53,12 +53,21 @@ defmodule Malachi.Console.TopicsViewTest do
              "key_start" => 0,
              "key_end" => 16,
              "state" => "sealed",
-             "parents" => []
+             "parents" => [],
+             "logical_start" => 0
            }
 
     assert %{seq: 1, parents: [0], state: :active, key_end: 8} = left
     assert %{seq: 2, parents: [0], key_start: 8} = right
     assert TopicsView.ranges(metadata(), "missing") == []
+  end
+
+  test "a range carries its logical start, so what a purge moved can be read back (#308)" do
+    state = apply!(metadata(), {:set_range_starts, "orders", %{{"orders", 0} => 4}})
+
+    assert [root, left, _right] = TopicsView.ranges(state, "orders")
+    assert %{"range" => 0, "logical_start" => 4} = TopicsView.render_range(root)
+    assert %{"range" => 1, "logical_start" => 0} = TopicsView.render_range(left)
   end
 
   defp all_healthy(nodes),

@@ -314,16 +314,31 @@ defmodule Malachi.Broker do
   Resolving and submitting in one call of the process that owns the broker leaves no window between
   them on this frontend. A cache behind the control plane resolves from an older commit or fewer seals,
   which only purges less.
+
+  `before_submit` is called with the plan, each range's logical start in this frontend's view and the
+  start it is about to be moved to (`%{range_id => {from, to}}`), after the point resolved and before the
+  command is submitted (#308), and not at all when nothing moves. It runs inside this call, so the plan is
+  the one submitted, with no split able to slip in between; it must not block, since the broker serves
+  nothing while it runs, and must not raise (`Malachi.BrokerServer` guards the callback it passes).
   """
-  @spec purge(t(), Metadata.topic_name(), purge_point()) :: {t(), term()}
-  def purge(%__MODULE__{} = broker, topic, point) do
+  @spec purge(t(), Metadata.topic_name(), purge_point(), (moves -> any())) :: {t(), term()}
+        when moves: %{Metadata.range_id() => {non_neg_integer(), non_neg_integer()}}
+  def purge(%__MODULE__{} = broker, topic, point, before_submit \\ fn _plan -> :ok end) do
     with {:ok, view} <- purge_view(broker, topic),
          {:ok, starts} <- purge_starts(broker, view, topic, point) do
-      if starts == %{}, do: {broker, {:ok, %{}}}, else: set_range_starts(broker, topic, starts)
+      if starts == %{} do
+        {broker, {:ok, %{}}}
+      else
+        before_submit.(plan(view, starts))
+        set_range_starts(broker, topic, starts)
+      end
     else
       {:error, _reason} = error -> {broker, error}
     end
   end
+
+  defp plan(view, starts),
+    do: Map.new(starts, fn {range_id, to} -> {range_id, {Metadata.logical_start(view.ranges[range_id]), to}} end)
 
   defp purge_view(broker, topic) do
     case DSRSM.get_topic(broker.dsrsm, topic) do

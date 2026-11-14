@@ -170,7 +170,8 @@ interface to render carelessly, and section 6.4 specifies how it is made visible
 
 SOURCE: `GET /api/v1/topics/:topic/ranges` (#230) returns per range `range` (its sequence), `key_start`,
 `key_end`, `state` and `parents`, the sequences of the ranges it was split or merged from, so lineage can
-be drawn. The legacy `GET /topic?name=<t>` still reduces them to a count.
+be drawn, and `logical_start` (#308), the offset below which a purge stopped serving its records (0 until
+one does). The legacy `GET /topic?name=<t>` still reduces them to a count.
 
 GAP: nothing exposes range size or load. Issue #29 states the harder problem plainly: **there is no
 per range load signal anywhere**, because telemetry carries only `%{topic}` and the reporter drops

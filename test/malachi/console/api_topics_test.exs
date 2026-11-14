@@ -123,7 +123,12 @@ defmodule Malachi.Console.ApiTopicsTest do
   test "ranges are listed in sequence order, and a name is percent-decoded", %{token: token} do
     seed!(metadata(1))
     assert %{status: 200, json: body} = get("/api/v1/topics/big/ranges", token)
-    assert %{"topic" => "big", "ranges" => [%{"range" => 0, "parents" => [], "state" => "active"}]} = body
+
+    assert %{
+             "topic" => "big",
+             "ranges" => [%{"range" => 0, "parents" => [], "state" => "active", "logical_start" => 0}]
+           } =
+             body
 
     assert %{status: 200, json: %{"topic" => "big", "ranges" => [_root]}} = get("/api/v1/topics/%62ig/ranges", token)
   end
