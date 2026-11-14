@@ -121,6 +121,25 @@ defmodule Malachi.PoliciesTest do
       assert Enum.any?(bound, &(&1.metadata.topic == "<10 bytes>"))
       refute inspect(bound) =~ "%{actor}"
     end
+
+    test "a policy name that is not short safe text is audited by its size, the topic refused or not", ctx do
+      forged = "p\n%{actor}"
+      assert {:error, _} = Policies.bind("a/b", forged, ctx.actor)
+      assert {:error, _} = Policies.bind(ctx.topic, forged, ctx.actor)
+      assert {:error, _} = Policies.bind(ctx.topic, String.duplicate("p", 256), ctx.actor)
+
+      _ = :sys.get_state(Malachi.AuditLog)
+
+      names =
+        ctx.actor
+        |> Malachi.AuditLog.get_events_by_user()
+        |> Enum.filter(&(&1.event_type == :topic_policy_bound))
+        |> Enum.map(& &1.metadata.policy)
+
+      assert Enum.count(names, &(&1 == "<10 bytes>")) == 2
+      assert "<256 bytes>" in names
+      refute inspect(names) =~ "%{actor}"
+    end
   end
 
   describe "a broker that does not answer" do

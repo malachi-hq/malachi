@@ -87,6 +87,49 @@ defmodule Malachi.AdminCall do
   def describe_invalid(nil), do: "<none>"
   def describe_invalid(_value), do: "<not a string>"
 
+  @doc """
+  A topic as an audit entry records it: as it is when `check_topic/1` accepts it, by its size otherwise.
+
+      iex> Malachi.AdminCall.describe_topic("events")
+      "events"
+      iex> Malachi.AdminCall.describe_topic("a/b")
+      "<3 bytes>"
+  """
+  @spec describe_topic(term()) :: String.t()
+  def describe_topic(topic), do: if(check_topic(topic) == :ok, do: topic, else: describe_invalid(topic))
+
+  @doc """
+  A free-text field an audit entry records (a policy name, say): as it is when it is `nil` or at most
+  `max_bytes` of `safe_text?/1` text, by its size otherwise, so a request's bytes never reach the trail
+  unchecked.
+
+      iex> Malachi.AdminCall.describe_text("retain-7d", 255)
+      "retain-7d"
+      iex> Malachi.AdminCall.describe_text("x\\n%{actor}", 255)
+      "<10 bytes>"
+  """
+  @spec describe_text(term(), pos_integer()) :: String.t() | nil
+  def describe_text(nil, _max_bytes), do: nil
+
+  def describe_text(text, max_bytes) when is_binary(text) and byte_size(text) in 1..max_bytes//1,
+    do: if(safe_text?(text), do: text, else: describe_invalid(text))
+
+  def describe_text(text, _max_bytes), do: describe_invalid(text)
+
+  @doc """
+  Whether `text` is valid UTF-8 with no control character (Cc), no format character (Cf) and no line or
+  paragraph separator (Zl, Zp): text that can sit in an audit entry or a log line without breaking it,
+  forging another, or reading differently from what it holds. Spaces are allowed.
+
+      iex> Malachi.AdminCall.safe_text?("billing team")
+      true
+      iex> Malachi.AdminCall.safe_text?("bill\\u202Eing")
+      false
+  """
+  @spec safe_text?(binary()) :: boolean()
+  def safe_text?(text) when is_binary(text),
+    do: String.valid?(text) and not Regex.match?(~r/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u, text)
+
   @doc "Logs the I18n line `key` for a request that succeeded; a refusal is in the audit log and the reply."
   @spec log(result, atom(), keyword()) :: :ok
   def log({:error, _reason}, _key, _bindings), do: :ok

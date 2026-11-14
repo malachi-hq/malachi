@@ -63,19 +63,17 @@ defmodule Malachi.Purge.Request do
   defp printable_ascii?(_other), do: false
 
   @doc """
-  Whether `text` is valid UTF-8 with no control character (Cc), no format character (Cf) and no line or
-  paragraph separator (Zl, Zp): text that can sit in an audit entry or a log line without breaking it,
-  forging another, or reading differently from what it holds. The reason obeys it, and so does a consumer
-  group name a purge names (`Malachi.Purge`).
+  The rule the reason follows, and so does a consumer group name a purge names (`Malachi.Purge`):
+  `Malachi.AdminCall.safe_text?/1`, valid UTF-8 with no control, format, line or paragraph separator
+  character. Spaces are allowed.
 
-      iex> Malachi.Purge.Request.safe_text?("billing-2026")
+      iex> Malachi.Purge.Request.safe_text?("billing team")
       true
       iex> Malachi.Purge.Request.safe_text?("bill\\u202Eing")
       false
   """
   @spec safe_text?(binary()) :: boolean()
-  def safe_text?(text) when is_binary(text),
-    do: String.valid?(text) and not Regex.match?(~r/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u, text)
+  defdelegate safe_text?(text), to: Malachi.AdminCall
 
   defp valid_reason?(reason) when is_binary(reason) and byte_size(reason) in 1..@max_reason_bytes,
     do: safe_text?(reason)
