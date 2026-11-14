@@ -284,6 +284,35 @@ defmodule Malachi.I18n do
         "✂️ Topic %{topic} purged up to %{point} by %{actor}: logical start moved on %{ranges} range(s) " <>
           "(logical purge: the records stay on disk until retention removes their whole segment)"
     },
+    topic_purged_for_request: %{
+      "pt_BR" =>
+        "✂️ Tópico %{topic} purgado até %{point} por %{actor} para o pedido %{request}: início lógico movido em " <>
+          "%{ranges} range(s) (purge lógico: os registros continuam em disco até a retenção remover o segmento inteiro)",
+      "en_US" =>
+        "✂️ Topic %{topic} purged up to %{point} by %{actor} for request %{request}: logical start moved on " <>
+          "%{ranges} range(s) (logical purge: the records stay on disk until retention removes their whole segment)"
+    },
+    purge_request_not_recorded: %{
+      "pt_BR" =>
+        "⛔ O pedido %{request} de %{actor} para o tópico %{topic} não pôde ser gravado no log de auditoria; " <>
+          "o purge foi recusado",
+      "en_US" =>
+        "⛔ Request %{request} by %{actor} for topic %{topic} could not be written to the audit log; " <>
+          "the purge was refused"
+    },
+    purge_plan_callback_failed: %{
+      "pt_BR" => "⚠️ O registro do plano de purge do tópico %{topic} falhou: %{reason}; o purge segue",
+      "en_US" => "⚠️ Recording the purge plan of topic %{topic} failed: %{reason}; the purge goes on"
+    },
+    purge_audit_flush_failed: %{
+      "pt_BR" =>
+        "⚠️ Não foi possível descarregar o log de auditoria de um purge: %{reason}; a entrada será escrita quando ele se recuperar",
+      "en_US" => "⚠️ Could not flush the audit log for a purge: %{reason}; the entry is written when it recovers"
+    },
+    purge_request_recorded: %{
+      "pt_BR" => "📋 Pedido de purge %{request} registrado por %{actor} para o tópico %{topic} até %{point}",
+      "en_US" => "📋 Purge request %{request} recorded by %{actor} for topic %{topic} up to %{point}"
+    },
     legal_hold_set: %{
       "pt_BR" => "🔒 Legal hold colocado no tópico %{topic} por %{actor}: %{reason}",
       "en_US" => "🔒 Legal hold placed on topic %{topic} by %{actor}: %{reason}"
@@ -1315,9 +1344,18 @@ defmodule Malachi.I18n do
 
   defp interpolate(template, []), do: template
 
+  # One pass over the template: each placeholder is replaced by its binding's value, and a value is never
+  # scanned again. Replacing the bindings one after another would let a value that holds `%{other}` (a
+  # topic, a group name, anything a client sent) be rewritten by a later binding, forging the line.
+  # A placeholder with no binding is left as it is.
   defp interpolate(template, bindings) do
-    Enum.reduce(bindings, template, fn {key, value}, acc ->
-      String.replace(acc, "%{#{key}}", to_string(value))
+    values = Map.new(bindings, fn {key, value} -> {to_string(key), value} end)
+
+    Regex.replace(~r/%\{(\w+)\}/, template, fn placeholder, name ->
+      case Map.fetch(values, name) do
+        {:ok, value} -> to_string(value)
+        :error -> placeholder
+      end
     end)
   end
 end

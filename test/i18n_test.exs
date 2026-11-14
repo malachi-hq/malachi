@@ -92,5 +92,18 @@ defmodule Malachi.I18nTest do
       assert result =~ "TLS"
       assert result =~ "4040"
     end
+
+    test "a value holding another placeholder is not rewritten by a later binding" do
+      I18n.set_locale("en_US")
+
+      line = I18n.t(:topic_policy_bound, topic: "t%{actor}", policy: "p", actor: "mallory")
+
+      assert line == "🔗 Topic t%{actor} bound to policy p by mallory"
+    end
+
+    test "a placeholder with no binding is left as it is" do
+      I18n.set_locale("en_US")
+      assert I18n.t(:topic_policy_bound, topic: "t") == "🔗 Topic t bound to policy %{policy} by %{actor}"
+    end
   end
 end

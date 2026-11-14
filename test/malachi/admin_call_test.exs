@@ -23,21 +23,36 @@ defmodule Malachi.AdminCallTest do
   end
 
   describe "check_topic/1" do
-    test "accepts a non-empty binary and refuses anything else" do
+    test "accepts a name the control plane accepts and refuses anything else" do
       assert AdminCall.check_topic("events") == :ok
+      assert AdminCall.check_topic("Orders_v2.eu-1") == :ok
       assert AdminCall.check_topic("") == {:error, :invalid_topic}
       assert AdminCall.check_topic(nil) == {:error, :invalid_topic}
       assert AdminCall.check_topic(:events) == {:error, :invalid_topic}
     end
+
+    test "refuses what would forge a log line or escape a directory" do
+      for bad <- ["a\nb", "a b", "a/b", "..", ".", "t%{actor}", "caf\u00e9", <<0>>, "a\u202Eb"] do
+        assert AdminCall.check_topic(bad) == {:error, :invalid_topic}, "accepted #{inspect(bad)}"
+      end
+    end
+
+    test "accepts up to 255 bytes and refuses 256" do
+      assert AdminCall.check_topic(String.duplicate("a", 255)) == :ok
+      assert AdminCall.check_topic(String.duplicate("a", 256)) == {:error, :invalid_topic}
+    end
   end
 
   describe "log/3" do
+    # capture_log captures every process's lines, and this module is async, so another test's line can
+    # land in a capture: each assertion looks for this test's own line, never for an empty capture.
     test "logs the I18n line for :ok and {:ok, _}, nothing for a refusal" do
-      bindings = [topic: "t", policy: "p", actor: "a"]
+      bindings = [topic: "log-#{System.unique_integer([:positive])}", policy: "p", actor: "a"]
+      line = Malachi.I18n.t(:topic_policy_bound, bindings)
 
-      assert capture_log(fn -> AdminCall.log(:ok, :topic_policy_bound, bindings) end) =~ "t"
-      assert capture_log(fn -> AdminCall.log({:ok, %{}}, :topic_policy_bound, bindings) end) =~ "t"
-      assert capture_log(fn -> AdminCall.log({:error, :x}, :topic_policy_bound, bindings) end) == ""
+      assert capture_log(fn -> AdminCall.log(:ok, :topic_policy_bound, bindings) end) =~ line
+      assert capture_log(fn -> AdminCall.log({:ok, %{}}, :topic_policy_bound, bindings) end) =~ line
+      refute capture_log(fn -> AdminCall.log({:error, :x}, :topic_policy_bound, bindings) end) =~ bindings[:topic]
     end
   end
 

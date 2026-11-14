@@ -44,6 +44,10 @@ defmodule Malachi.Policies do
   alias Malachi.Cluster.Retention
   alias Malachi.DataPlaneRouter
 
+  # A policy name an audit entry records as it is; a longer one, or one that is not safe text, is recorded
+  # by its size (`Malachi.AdminCall.describe_text/2`).
+  @max_audited_name_bytes 255
+
   @typedoc "Who asked for a change, as the audit log records it: a username, or `cli@<node>`."
   @type actor :: AdminCall.actor()
 
@@ -128,7 +132,10 @@ defmodule Malachi.Policies do
         broker_call(fn -> BrokerServer.bind_topic_policy(DataPlaneRouter.shard_for(topic), topic, name) end)
       end
 
-    audit(:topic_policy_bound, actor, "bind_topic_policy", result, %{topic: topic, policy: name})
+    # A refused topic, and a policy name that is not short safe text, are recorded by their size: their
+    # bytes are whatever the request carried, and the name is not checked at all when the topic is refused.
+    audited = %{topic: AdminCall.describe_topic(topic), policy: AdminCall.describe_text(name, @max_audited_name_bytes)}
+    audit(:topic_policy_bound, actor, "bind_topic_policy", result, audited)
 
     log(result, if(name, do: :topic_policy_bound, else: :topic_policy_unbound),
       topic: topic,

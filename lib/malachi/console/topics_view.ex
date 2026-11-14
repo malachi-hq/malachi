@@ -72,13 +72,20 @@ defmodule Malachi.Console.TopicsView do
         key_start: range.key_start,
         key_end: range.key_end,
         state: range.state,
-        parents: range.parents |> Enum.map(&elem(&1, 1)) |> Enum.sort()
+        parents: range.parents |> Enum.map(&elem(&1, 1)) |> Enum.sort(),
+        logical_start: Metadata.logical_start(range)
       }
     end)
     |> Enum.sort_by(& &1.seq)
   end
 
-  @doc "A range as JSON. Its parents are the ranges it was split or merged from, by sequence."
+  @doc """
+  A range as JSON. Its parents are the ranges it was split or merged from, by sequence. Its
+  `logical_start` is the offset below which no reader is served its records, 0 until a purge moves it
+  (#198); reading it back is how an operator confirms what a purge did, a timed out one included (#308).
+  It is this node's copy of the control plane, so a purge just committed elsewhere can show here a moment
+  later: a start at or past the planned one is conclusive, a lower one may still be catching up.
+  """
   @spec render_range(map()) :: map()
   def render_range(range) do
     %{
@@ -86,7 +93,8 @@ defmodule Malachi.Console.TopicsView do
       "key_start" => range.key_start,
       "key_end" => range.key_end,
       "state" => Atom.to_string(range.state),
-      "parents" => range.parents
+      "parents" => range.parents,
+      "logical_start" => range.logical_start
     }
   end
 

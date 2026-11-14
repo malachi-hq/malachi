@@ -21,6 +21,10 @@ The records themselves stay where they are:
 So a purge is not erasure. A secret produced by mistake is unreadable to consumers once the purge answers,
 and stays on the disks of the segment's replicas until that segment expires.
 
+To answer a person's request that their records be removed, purge with the request attached and read
+[Data subject requests](data-subject-requests.md) first: it states what such a purge does and does not do,
+what the audit trail keeps, and what must stay out of it.
+
 ## The point
 
 Clients never see offsets, so a purge is up to one of three points:
@@ -60,7 +64,13 @@ there was nothing to purge.
 
 On the wire it is api key 35 (`purge_topic`), `admin` only. Every purge, and every refusal, is written to
 the audit log as `topic_purged`, with the user who made it (`cli@<node>` for the mix task), the point, and
-each range's logical start before and after.
+each range's logical start before and after. A purge that moves something also writes
+`topic_purge_planned` just before its command is sent, with the starts it is about to set: if the purge
+answers `timeout` after it was sent, it may still commit, and the plan is then the record of what it set
+out to move; a purge still waiting on the node when its caller gave up is dropped there, unplanned. Each
+range's current `logical_start` is listed by the console's `GET /api/v1/topics/<topic>/ranges`. Every
+purge is also counted on `/metrics` as `malachi_purges_total{result, kind, request}` and
+`malachi_purged_offsets_total`, from the telemetry event `[:malachi, :purge, :done]`.
 
 ## When it takes effect
 
@@ -81,7 +91,10 @@ leaves purged stretches out, so a client alerting on it does not page on a purge
 | reason | meaning |
 |---|---|
 | `no_such_topic` | the topic does not exist |
-| `invalid_purge_point` | a negative time, an empty group name, or no point at all |
+| `invalid_purge_point` | a negative time, a position token that is empty or over 1024 bytes, a group name that is empty, over 255 bytes or holds a control, format, line separator or paragraph separator character, or no point at all; a group with such a name can still be purged by time or by position |
+| `invalid_topic` | a topic name the control plane would never accept (`[A-Za-z0-9._-]`, at most 255 bytes) |
+| `invalid_request` | a data subject request whose id or reason is missing or out of bounds ([Data subject requests](data-subject-requests.md)) |
+| `audit_unavailable` | the audit log could not write a data subject request's entry, so the purge was not sent; check the audit log and retry |
 | `invalid_position` | the token does not decode, names another topic, or a range or source the topic does not have |
 | `cursor_in_ancestor` | the position is inside a range a split retired; purge by time or by group instead |
 | `start_past_end` | the point is past what the node knows of the range's end; retry once it has caught up |
@@ -91,6 +104,14 @@ leaves purged stretches out, so a client alerting on it does not page on a purge
 | `legal_hold` | the topic is under a [legal hold](legal-hold.md); even a purge that would move nothing is refused |
 
 ## Upgrades
+
+The `purge_topic` request on the wire (api key 35) changed after its first release: it now ends with the
+two fields of a data subject request (both absent when the purge answers none). A node and a client on
+different sides of that change do not understand each other's request: an older client sending to an
+upgraded node, or an upgraded client sending to an older node, is answered `malformed_request`, not the
+upgrade message below. No order keeps both working, so a wire client that purges is upgraded together with
+the nodes, and does not purge in between. `mix malachi.purge` calls the node over Erlang distribution and is
+not affected.
 
 Purging needs control-plane machine version 9. During a rolling upgrade it is refused, identically on every
 member, until every node runs a release that implements it and the version pin is lifted. A topic with a

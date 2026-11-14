@@ -1419,6 +1419,37 @@ defmodule Malachi.BrokerTest do
       assert {^broker, {:ok, %{}}} = Broker.purge(broker, "events", {:before, 1_000})
     end
 
+    test "purge/4 hands the plan to its callback before submitting, and only when something moves", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 4)
+      parent = self()
+      announce = fn plan -> send(parent, {:plan, plan}) end
+
+      # nothing to move: no plan
+      assert {^broker, {:ok, %{}}} = Broker.purge(broker, "events", {:before, 999}, announce)
+      refute_received {:plan, _}
+
+      token = Position.encode(root_id, {0, 2})
+      assert {broker, {:ok, %{^root_id => {0, 2}}}} = Broker.purge(broker, "events", {:position, token}, announce)
+      assert_received {:plan, plan}
+      assert plan == %{root_id => {0, 2}}
+
+      # the plan's "from" is the start the frontend sees, so a second purge plans from 2
+      token = Position.encode(root_id, {0, 3})
+      assert {_broker, {:ok, %{^root_id => {2, 3}}}} = Broker.purge(broker, "events", {:position, token}, announce)
+      assert_received {:plan, %{^root_id => {2, 3}}}
+    end
+
+    test "purge/4 announces the plan even when the submission is refused after it", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 4)
+      parent = self()
+      token = Position.encode(root_id, {0, 99})
+
+      assert {_broker, {:error, :start_past_end}} =
+               Broker.purge(broker, "events", {:position, token}, fn plan -> send(parent, {:plan, plan}) end)
+
+      assert_received {:plan, %{^root_id => {0, 99}}}
+    end
+
     test "purge/3 by position moves the issuing range up to it", %{store: store} do
       {broker, root_id} = one_record_segments(store, 4)
       token = Position.encode(root_id, {0, 2})

@@ -69,11 +69,15 @@ defmodule Malachi.CLI.Rpc do
   @doc """
   The RPC seam: a `(module, fun, args -> {:ok, value} | {:error, reason})` function that calls `node` over
   Erlang distribution. The task's `execute/3` core calls through this, and tests substitute a fake.
+
+  `timeout_ms` (5 s by default) bounds the wait. A call that runs out of it is answered `{:error,
+  :timeout}`, but the remote call is not stopped and may still complete, so a task whose remote work
+  waits on its own deadlines passes a budget above their sum.
   """
-  @spec rpc(node()) :: (module(), atom(), list() -> {:ok, term()} | {:error, term()})
-  def rpc(node) do
+  @spec rpc(node(), pos_integer()) :: (module(), atom(), list() -> {:ok, term()} | {:error, term()})
+  def rpc(node, timeout_ms \\ @rpc_timeout) do
     fn module, fun, args ->
-      case :rpc.call(node, module, fun, args, @rpc_timeout) do
+      case :rpc.call(node, module, fun, args, timeout_ms) do
         {:badrpc, reason} -> {:error, reason}
         value -> {:ok, value}
       end

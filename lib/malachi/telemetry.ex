@@ -88,6 +88,13 @@ defmodule Malachi.Telemetry do
       received its key slice) or `:unknown` (the ancestor's end was not recovered after a restart;
       `offsets` is then 0). See `Malachi.Broker.Skip`.
 
+    * `[:malachi, :purge, :done]`. `%{count: 1, ranges, offsets}` / `%{topic, kind, result, reason,
+      request}` - a manual purge (`Malachi.Purge`, #198, #308) answered. `result` is `:applied` (a logical
+      start moved: `ranges` of them, `offsets` no longer served), `:nothing` (the point moved none) or
+      `:refused` (`reason` says why). `kind` is the point's (`:before`, `:position`, `:group`, `:other`),
+      `request` whether a data subject request came with it; its id and reason are in the audit trail, not
+      here. `topic` is recorded by its size when the name was refused.
+
     * `[:malachi, :retention, :expire]`. `%{count: 1, bytes}` / `%{topic, segment, result}` - the
       retention sweep tried to expire one sealed segment of `topic` (`bytes` is its size). `result` is
       `Malachi.Cluster.Retention.reply_label/1` of what the control plane answered: `:ok` (expired),

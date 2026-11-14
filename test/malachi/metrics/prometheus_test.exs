@@ -92,6 +92,11 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ ~s(malachi_producer_streams_total{event="closed"} 2)
     assert out =~ ~s(malachi_producer_streams_total{event="moved"} 1)
     assert out =~ "# TYPE malachi_producer_streams_open gauge\nmalachi_producer_streams_open 2\n"
+    assert out =~ "# TYPE malachi_purges_total counter\n"
+    assert out =~ ~s(malachi_purges_total{result="applied",kind="position",request="true"} 3)
+    assert out =~ ~s(malachi_purges_total{result="refused",kind="group",request="false"} 1)
+    assert out =~ "# TYPE malachi_purged_offsets_total counter\n"
+    assert out =~ "malachi_purged_offsets_total 120"
     assert out =~ "# TYPE malachi_storage_failures_total counter\n"
     assert out =~ ~s(malachi_storage_failures_total{reason="enospc"} 6)
     assert out =~ ~s(malachi_storage_failures_total{reason="eio"} 1)
