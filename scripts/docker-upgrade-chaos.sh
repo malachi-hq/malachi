@@ -422,12 +422,17 @@ effective_version() {
 }
 
 # How many replication casts node $1 dropped as unknown, read from its /metrics like an operator would.
+# The script runs in the node's shell from stdin, and neither the password nor the session token is ever a
+# process argument there (#180): ash's printf is a builtin, wget takes the login body from stdin, and the
+# scrape is a raw HTTP/1.0 request on nc's stdin, since busybox wget reads no header from a file.
 unexpected_casts() {
   docker exec -i "malachi-cluster-$1" sh -s 2>/dev/null <<'EOF' | sed -n 's/^malachi_unexpected_messages_total{server="replication",kind="cast"} \([0-9][0-9]*\).*/\1/p'
-token=$(wget -qO- --header 'Content-Type: application/json' \
-  --post-data '{"username":"admin","password":"admin123"}' http://127.0.0.1:4041/login |
-  sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
-wget -qO- --header "Authorization: Bearer $token" --header 'Accept: text/plain' http://127.0.0.1:4041/metrics
+token=$(printf '%s' '{"username":"admin","password":"admin123"}' |
+  wget -qO- -T 5 --header 'Content-Type: application/json' --post-file /dev/stdin http://127.0.0.1:4041/login |
+  sed -n 's/.*"token":"\([A-Za-z0-9_-]*\)".*/\1/p')
+[ -n "$token" ] || exit 1
+printf 'GET /metrics HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer %s\r\nAccept: text/plain\r\n\r\n' "$token" |
+  nc -w 5 127.0.0.1 4041
 EOF
 }
 

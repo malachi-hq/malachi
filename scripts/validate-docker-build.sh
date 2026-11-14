@@ -19,11 +19,26 @@ echo "Version: $VERSION"
 echo "Image: $IMAGE_NAME"
 echo ""
 
-# Generate random passwords (save admin password for dashboard auth)
-ADMIN_PASS="validation_admin_pass_$(date +%s)"
-PRODUCER_PASS="validation_producer_pass_$(date +%s)"
-CONSUMER_PASS="validation_consumer_pass_$(date +%s)"
-APP_PASS="validation_app_pass_$(date +%s)"
+# The dashboard login goes through the shared curl transport, which keeps the password and the session
+# token off every process's argv (#180); its JSON is built by jq.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+for tool in curl jq; do
+    command -v "$tool" > /dev/null 2>&1 || { echo -e "${RED}✗ $tool is required${NC}"; exit 1; }
+done
+DASHBOARD_URL="http://localhost:14041"
+# shellcheck source=scripts/metrics_scrape_lib.sh
+source "$ROOT/scripts/metrics_scrape_lib.sh"
+# shellcheck source=scripts/lib/dashboard_curl.sh
+source "$ROOT/scripts/lib/dashboard_curl.sh"
+
+# Generate random passwords. They reach the container as exported variables that `docker run -e NAME`
+# copies by name, so no password is ever an argument of the docker client.
+MALACHI_ADMIN_PASS="validation_admin_pass_$(date +%s)"
+MALACHI_PRODUCER_PASS="validation_producer_pass_$(date +%s)"
+MALACHI_CONSUMER_PASS="validation_consumer_pass_$(date +%s)"
+MALACHI_APP_PASS="validation_app_pass_$(date +%s)"
+MALACHI_DEFAULT_USERS="admin:${MALACHI_ADMIN_PASS}:admin;producer:${MALACHI_PRODUCER_PASS}:produce;consumer:${MALACHI_CONSUMER_PASS}:consume;app:${MALACHI_APP_PASS}:produce,consume"
+export MALACHI_ADMIN_PASS MALACHI_PRODUCER_PASS MALACHI_CONSUMER_PASS MALACHI_APP_PASS MALACHI_DEFAULT_USERS
 
 # Step 1: Check runtime dependencies
 echo "Step 1: Validating runtime dependencies..."
@@ -54,13 +69,13 @@ echo ""
 echo "Step 3: Starting container for functional tests..."
 docker run -d --name "$CONTAINER_NAME" \
     -p 14040:4040 -p 14041:4041 \
-    -e MALACHI_ADMIN_PASS="$ADMIN_PASS" \
-    -e MALACHI_PRODUCER_PASS="$PRODUCER_PASS" \
-    -e MALACHI_CONSUMER_PASS="$CONSUMER_PASS" \
-    -e MALACHI_APP_PASS="$APP_PASS" \
+    -e MALACHI_ADMIN_PASS \
+    -e MALACHI_PRODUCER_PASS \
+    -e MALACHI_CONSUMER_PASS \
+    -e MALACHI_APP_PASS \
     -e MALACHI_REQUIRE_TLS=false \
     -e MALACHI_ENABLE_TLS=false \
-    -e MALACHI_DEFAULT_USERS="admin:${ADMIN_PASS}:admin;producer:${PRODUCER_PASS}:produce;consumer:${CONSUMER_PASS}:consume;app:${APP_PASS}:produce,consume" \
+    -e MALACHI_DEFAULT_USERS \
     "$IMAGE_NAME" > /dev/null
 
 # Wait for app to be fully started
@@ -80,15 +95,12 @@ trap cleanup EXIT
 echo "Authenticating to dashboard..."
 RETRIES=10
 TOKEN=""
-for i in $(seq 1 $RETRIES); do
-    LOGIN_RESPONSE=$(curl -sf -X POST \
-        -H "Content-Type: application/json" \
-        -d "{\"username\":\"admin\",\"password\":\"${ADMIN_PASS}\"}" \
-        "http://localhost:14041/login" 2>&1) && {
-        TOKEN=$(echo "$LOGIN_RESPONSE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['token'])" 2>/dev/null) && break
-    }
-    if [ $i -eq $RETRIES ]; then
-        echo -e "${RED}✗ Could not authenticate to dashboard after ${RETRIES} attempts${NC}"
+for i in $(seq 1 "$RETRIES"); do
+    if TOKEN="$(ms_login admin "$MALACHI_ADMIN_PASS")"; then
+        break
+    fi
+    if [ "$i" -eq "$RETRIES" ]; then
+        echo -e "${RED}✗ Could not authenticate to dashboard after ${RETRIES} attempts (${TOKEN})${NC}"
         docker logs "$CONTAINER_NAME"
         exit 1
     fi
@@ -100,7 +112,7 @@ echo ""
 
 # Step 4: Check if services are running (with auth)
 echo "Step 4: Validating service availability..."
-if curl -sf -H "Authorization: Bearer ${TOKEN}" http://localhost:14041/metrics > /dev/null 2>&1; then
+if ms_http_get /metrics "$TOKEN" > /dev/null; then
     echo -e "${GREEN}✓ Dashboard responding${NC}"
 else
     echo -e "${RED}✗ Dashboard not responding with authenticated request${NC}"

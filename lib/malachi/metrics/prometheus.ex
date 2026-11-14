@@ -17,10 +17,11 @@ defmodule Malachi.Metrics.Prometheus do
   @doc """
   Builds the exposition text (as iodata) from a system snapshot, the topic overview, the storage flush
   histogram (`Malachi.Metrics.storage_flush_histogram/0`) and the retention counters
-  (`Malachi.Metrics.retention_snapshot/0`; a node with none when omitted).
+  (`Malachi.Metrics.retention_snapshot/0`; a node with none when omitted), and the machine versions of
+  the replicated state machine members this node hosts (`Malachi.Console.Reads.machine_versions/0`).
   """
-  @spec export(map(), [map()], map(), map()) :: iodata()
-  def export(system, topics, flush, retention \\ no_retention()) do
+  @spec export(map(), [map()], map(), map(), [map()]) :: iodata()
+  def export(system, topics, flush, retention \\ empty_retention(), machine_versions \\ []) do
     mem = system.memory
     ops = system.operations
 
@@ -194,12 +195,14 @@ defmodule Malachi.Metrics.Prometheus do
         [{[], flush.records}]
       ),
       topic_metrics(topics),
-      retention_metrics(retention)
+      retention_metrics(retention),
+      machine_version_metrics(machine_versions)
     ]
   end
 
-  # What `Malachi.Metrics.retention_snapshot/0` answers on a node that never swept nor skipped.
-  defp no_retention do
+  @doc "What `Malachi.Metrics.retention_snapshot/0` answers on a node that never swept nor skipped."
+  @spec empty_retention() :: map()
+  def empty_retention do
     %{
       skips: [],
       expired: [],
@@ -216,15 +219,24 @@ defmodule Malachi.Metrics.Prometheus do
   # refusals the closed set of replies.
   defp retention_metrics(retention) do
     skip_labels = fn skip ->
-      [topic: skip.topic, reader: skip.reader, group: skip.group, origin: skip.origin, span: skip.span]
+      [
+        topic: skip.topic,
+        reader: skip.reader,
+        group: skip.group,
+        origin: skip.origin,
+        span: skip.span,
+        cause: skip.cause
+      ]
     end
 
     [
       metric(
         "malachi_retention_skips_total",
         :counter,
-        "Times a consumer was moved past data no longer stored (expired or deleted), counted once per " <>
-          "distinct skip; origin=cursor is a reader that fell behind, origin=start one that had no position; " <>
+        "Times a consumer was moved past data no longer served, counted once per distinct skip; " <>
+          "cause=expired is data retention or an operator removed, cause=purged a stretch below the range's " <>
+          "logical start (an operator's purge); origin=cursor is a reader that fell behind, origin=start one " <>
+          "that had no position; " <>
           "reader=group names the group, reader=none is a fetch outside a group and reader=other a group " <>
           "folded by the label cap (both with an empty group)",
         Enum.map(retention.skips, &{skip_labels.(&1), &1.events})
@@ -281,6 +293,37 @@ defmodule Malachi.Metrics.Prometheus do
         "Retention sweep duration; its count is the number of sweeps this node ran (only the leader sweeps)",
         "retention sweep",
         retention.sweeps
+      )
+    ]
+  end
+
+  # One series per replicated state machine, not per member: a sharded control plane runs a metadata member
+  # per vnode, and a label per member would grow with the ring. The worst member decides: the highest
+  # effective version, and stuck when any member is. The per member detail is `GET /api/v1/cluster`.
+  defp machine_version_metrics([]), do: []
+
+  defp machine_version_metrics(versions) do
+    by_machine = versions |> Enum.group_by(& &1.machine) |> Enum.sort()
+
+    [
+      metric(
+        "malachi_ra_machine_version",
+        :gauge,
+        "Replicated state machine version on this node: the highest effective version among its members, " <>
+          "and the version this release supports",
+        Enum.flat_map(by_machine, fn {machine, members} ->
+          [
+            {[machine: machine, kind: "effective"], members |> Enum.map(& &1.effective) |> Enum.max()},
+            {[machine: machine, kind: "supported"], members |> Enum.map(& &1.supported) |> Enum.max()}
+          ]
+        end)
+      ),
+      metric(
+        "malachi_ra_machine_version_stuck",
+        :gauge,
+        "1 while a member of this replicated state machine on this node met a version above what this " <>
+          "release supports and stopped applying its log until the node runs newer code",
+        Enum.map(by_machine, fn {machine, members} -> {[machine: machine], bool(Enum.any?(members, & &1.stuck))} end)
       )
     ]
   end

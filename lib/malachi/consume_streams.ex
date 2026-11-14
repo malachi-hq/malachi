@@ -287,6 +287,8 @@ defmodule Malachi.ConsumeStreams do
         backlog: Broker.consume_backlog(view, range_id, next),
         expired: expired,
         expired_exact: exact?,
+        # whether the read moved the reader past any data (expired, removed or purged)
+        skipped: skips != [],
         batch: Batch.encode(entries, :none, :positioned),
         records_end: records_end(kept)
       }
@@ -315,9 +317,13 @@ defmodule Malachi.ConsumeStreams do
       else: read_positioned(view, range_id, position, kept)
   end
 
-  # The records retention removed before a page, and whether that count is exact.
+  # The records retention removed before a page, and whether that count is exact. A stretch an operator
+  # purged (`cause: :purged`, #198) is not counted: it was removed on purpose, and a client that alerts on
+  # `expired` must not page on every purge. It reaches the operator through the skip log and metrics.
   defp expired(skips) do
-    Enum.reduce(skips, {0, true}, fn skip, {total, exact?} ->
+    skips
+    |> Enum.filter(&(&1.cause == :expired))
+    |> Enum.reduce({0, true}, fn skip, {total, exact?} ->
       case {skip.offsets, Skip.span(skip)} do
         {offsets, :exact} when is_integer(offsets) -> {total + offsets, exact?}
         {offsets, _bound} when is_integer(offsets) -> {total + offsets, false}
@@ -347,10 +353,12 @@ defmodule Malachi.ConsumeStreams do
   defp read_once(state, stream, budget) do
     case read_page(stream.view, stream.range_id, stream.position, budget, stream.max_bytes, stream.reporter) do
       {:ok, page, 0} ->
-        # caught up on this view; a page with no records still goes out when it moved past expired data, so
-        # the consumer learns what it lost
+        # caught up on this view; a page with no records still goes out when it moved the reader past data:
+        # expired data, so the consumer learns what it lost, or a purged stretch (#198), which `expired`
+        # leaves out, so the consumer learns its new position and backlog instead of holding the old ones
+        # until new records arrive. Moving on from a drained ancestor skips nothing and sends nothing.
         BrokerServer.arm_consume(stream.broker, stream.token, view_end(stream))
-        frames = if page.expired > 0, do: [records_frame(stream, page)], else: []
+        frames = if page.expired > 0 or page.skipped, do: [records_frame(stream, page)], else: []
         {put(state, %{stream | position: page.next, view: nil}), frames}
 
       {:ok, page, count} ->

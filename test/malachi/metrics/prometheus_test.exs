@@ -249,16 +249,53 @@ defmodule Malachi.Metrics.PrometheusTest do
     defp retention do
       %{
         skips: [
-          %{topic: "orders", reader: :group, group: "billing", origin: :cursor, span: :exact, events: 3, offsets: 120},
-          %{topic: "orders", reader: :none, group: "", origin: :start, span: :upper_bound, events: 1, offsets: 7},
-          %{topic: "orders", reader: :other, group: "", origin: :cursor, span: :unknown, events: 2, offsets: 0},
-          %{topic: "orders", reader: :group, group: "__other__", origin: :cursor, span: :exact, events: 5, offsets: 9},
+          %{
+            topic: "orders",
+            reader: :group,
+            group: "billing",
+            origin: :cursor,
+            span: :exact,
+            cause: :expired,
+            events: 3,
+            offsets: 120
+          },
+          %{
+            topic: "orders",
+            reader: :none,
+            group: "",
+            origin: :start,
+            span: :upper_bound,
+            cause: :expired,
+            events: 1,
+            offsets: 7
+          },
+          %{
+            topic: "orders",
+            reader: :other,
+            group: "",
+            origin: :cursor,
+            span: :unknown,
+            cause: :expired,
+            events: 2,
+            offsets: 0
+          },
+          %{
+            topic: "orders",
+            reader: :group,
+            group: "__other__",
+            origin: :cursor,
+            span: :exact,
+            cause: :expired,
+            events: 5,
+            offsets: 9
+          },
           %{
             topic: "orders",
             reader: :group,
             group: ~s(we"ird\nname),
             origin: :cursor,
             span: :exact,
+            cause: :expired,
             events: 1,
             offsets: 1
           }
@@ -281,7 +318,7 @@ defmodule Malachi.Metrics.PrometheusTest do
       assert out =~ "# TYPE malachi_retention_skips_total counter\n"
       assert out =~ "# TYPE malachi_retention_offsets_skipped_total counter\n"
 
-      billing = ~s(topic="orders",reader="group",group="billing",origin="cursor",span="exact")
+      billing = ~s(topic="orders",reader="group",group="billing",origin="cursor",span="exact",cause="expired")
       assert out =~ ~s(malachi_retention_skips_total{#{billing}} 3\n)
       assert out =~ ~s(malachi_retention_offsets_skipped_total{#{billing}} 120\n)
     end
@@ -293,9 +330,9 @@ defmodule Malachi.Metrics.PrometheusTest do
       out = render_retention(retention())
       series = fn labels -> ~s(malachi_retention_skips_total{topic="orders",#{labels}}) end
 
-      assert out =~ series.(~s(reader="none",group="",origin="start",span="upper_bound")) <> " 1\n"
-      assert out =~ series.(~s(reader="other",group="",origin="cursor",span="unknown")) <> " 2\n"
-      assert out =~ series.(~s(reader="group",group="__other__",origin="cursor",span="exact")) <> " 5\n"
+      assert out =~ series.(~s(reader="none",group="",origin="start",span="upper_bound",cause="expired")) <> " 1\n"
+      assert out =~ series.(~s(reader="other",group="",origin="cursor",span="unknown",cause="expired")) <> " 2\n"
+      assert out =~ series.(~s(reader="group",group="__other__",origin="cursor",span="exact",cause="expired")) <> " 5\n"
     end
 
     test "the offsets series says it is not a count of records lost" do
@@ -360,6 +397,38 @@ defmodule Malachi.Metrics.PrometheusTest do
 
     test "the flush histogram keeps its own created help" do
       assert render([]) =~ "# HELP malachi_storage_flush_duration_seconds_created Unix time the flush latency histogram"
+    end
+  end
+
+  describe "machine versions" do
+    defp member(machine, member, effective, supported \\ 2),
+      do: %{machine: machine, member: member, effective: effective, supported: supported, stuck: effective > supported}
+
+    defp render_versions(versions) do
+      MetricsFixtures.system()
+      |> Prometheus.export([], flush(), Prometheus.empty_retention(), versions)
+      |> IO.iodata_to_binary()
+    end
+
+    test "one series per machine, the worst member deciding, and none without members" do
+      out =
+        render_versions([
+          member("metadata", "vnode_1", 2),
+          member("metadata", "vnode_2", 3),
+          member("ring", "ring", 2)
+        ])
+
+      assert out =~ ~s(malachi_ra_machine_version{machine="metadata",kind="effective"} 3\n)
+      assert out =~ ~s(malachi_ra_machine_version{machine="metadata",kind="supported"} 2\n)
+      assert out =~ ~s(malachi_ra_machine_version{machine="ring",kind="effective"} 2\n)
+      assert out =~ ~s(malachi_ra_machine_version_stuck{machine="metadata"} 1\n)
+      assert out =~ ~s(malachi_ra_machine_version_stuck{machine="ring"} 0\n)
+      assert out =~ "# TYPE malachi_ra_machine_version gauge"
+      # one series per machine, never per member
+      refute out =~ "vnode_1"
+
+      refute render_versions([]) =~ "malachi_ra_machine_version"
+      refute render([]) =~ "malachi_ra_machine_version"
     end
   end
 end

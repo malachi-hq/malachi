@@ -301,6 +301,29 @@ defmodule Malachi.Auth.SessionManager do
   def list_sessions(username \\ :all) do
     now = System.system_time(:second)
 
+    for {token, session_data} <- active_sessions(username, now) do
+      session_data
+      |> describe(now)
+      |> Map.put(:token_prefix, String.slice(token, 0, 8))
+    end
+  end
+
+  @doc """
+  The active sessions of this node, each named by `identify.(token)` instead of any part of its token, for
+  a reader that must not see one (the operator console names a session by
+  `Malachi.Console.Access.session_digest/1`). Otherwise as `list_sessions/1`: `:session` in place of
+  `:token_prefix`.
+  """
+  @spec list_sessions_identified((String.t() -> term())) :: [map()]
+  def list_sessions_identified(identify) when is_function(identify, 1) do
+    now = System.system_time(:second)
+
+    for {token, session_data} <- active_sessions(:all, now) do
+      session_data |> describe(now) |> Map.put(:session, identify.(token))
+    end
+  end
+
+  defp active_sessions(username, now) do
     sessions =
       if username == :all do
         :ets.tab2list(@table_sessions)
@@ -317,23 +340,20 @@ defmodule Malachi.Auth.SessionManager do
         |> Enum.reject(&is_nil/1)
       end
 
-    # Filtra sessões expiradas e formata
-    sessions
-    |> Enum.filter(fn {_token, session_data} ->
-      session_data.expires_at > now
-    end)
-    |> Enum.map(fn {token, session_data} ->
-      %{
-        token_prefix: String.slice(token, 0, 8),
-        username: session_data.username,
-        ip: IPAddress.format(session_data.ip),
-        created_at: session_data.created_at,
-        expires_at: session_data.expires_at,
-        last_activity: session_data.last_activity,
-        ip_binding_disabled: Map.get(session_data, :ip_binding_disabled, false),
-        time_until_expiry: session_data.expires_at - now
-      }
-    end)
+    # Filtra sessões expiradas
+    Enum.filter(sessions, fn {_token, session_data} -> session_data.expires_at > now end)
+  end
+
+  defp describe(session_data, now) do
+    %{
+      username: session_data.username,
+      ip: IPAddress.format(session_data.ip),
+      created_at: session_data.created_at,
+      expires_at: session_data.expires_at,
+      last_activity: session_data.last_activity,
+      ip_binding_disabled: Map.get(session_data, :ip_binding_disabled, false),
+      time_until_expiry: session_data.expires_at - now
+    }
   end
 
   ## Private Functions

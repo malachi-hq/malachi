@@ -16,8 +16,11 @@ Like the Node one, it connects to an **already running** server rather than star
 MIX_ENV=dev mix run --no-halt
 ```
 
-Unlike the Node one, the target and the credentials are flags rather than environment variables, and
-the defaults are `--host 127.0.0.1 --port 4040 --user admin --pass admin123`.
+Unlike the Node one, the target is given by flags, with the defaults `--host 127.0.0.1 --port 4040`. The
+credentials come from the environment, as in the Node one: `MALACHI_USER` (or `--user`, which wins) and
+`MALACHI_PASS`, admin and admin123 by default. There is no password flag, because a process argument is
+readable by every local user in `/proc/<pid>/cmdline` for as long as the run lasts, while the environment
+is readable only by its owner. An empty variable counts as unset.
 
 ## The six scenarios
 
@@ -112,8 +115,13 @@ as soon as the window has room.
 
 ```bash
 mix malachi.loadtest --tls --cacert ca.pem --cert client.pem --key client-key.pem
-mix malachi.loadtest --token "$(...)"   # instead of --user/--pass
+MALACHI_TOKEN="$(...)" mix malachi.loadtest   # a session token instead of the user and password
 ```
+
+When several credentials are present, one handshake wins: a `MALACHI_TOKEN` over `--cert`/`--key`, and
+either over the user and password. `MALACHI_PASS` is the password of whichever user is named, `--user`
+included. A token left exported in the shell therefore overrides the flags on the command line, and the
+recorded command names no token, so unset it before a certificate or password run.
 
 A `--cert` without a `--key` (or the reverse) is rejected before a connection is opened, rather than
 failing later inside the handshake.

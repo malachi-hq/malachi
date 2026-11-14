@@ -96,10 +96,10 @@ defmodule UpgradeCanaryPatchTest do
     patch = File.read!(@patch)
 
     assert patch =~ "+  @capabilities [:producer_streams, :upgrade_canary]"
-    assert patch =~ "+  @code_version 10"
-    assert patch =~ "+      {:canary_note, 3} => 10"
+    assert patch =~ "+  @code_version 11"
+    assert patch =~ "+      {:canary_note, 3} => 11"
     assert patch =~ "+  @supported_format 3"
-    assert patch =~ "+  @first_release %{1 => \"0.12.0\", 2 => \"0.24.0\", 3 => \"upgrade-canary\"}"
+    assert patch =~ "+  @first_release %{1 => \"0.12.0\", 2 => \"0.25.0\", 3 => \"upgrade-canary\"}"
     assert patch =~ "FormatMarker.raise_to(log_data_dir(), 3)"
     added = patch |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, "+"))
 

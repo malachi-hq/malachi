@@ -345,6 +345,7 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | `MALACHI_DASHBOARD_PORT` | 4041 | Dashboard port |
 | `MALACHI_CONSOLE_PORT` | 4042 | Operator console port |
 | `MALACHI_CONSOLE_ENABLED` | true | `false` starts no console listener |
+| `MALACHI_CONSOLE_SAMPLE_MS` | 1000 | How old a sample of costly state the console API reads may be before it is taken again |
 | `MALACHI_LOCALE` | en_US | Language (en_US, pt_BR) |
 | `MALACHI_ADMIN_PASS` | admin123 | Admin password |
 | `MALACHI_PRODUCER_PASS` | producer123 | Producer password |
@@ -385,7 +386,7 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | `MALACHI_LOG_SPREAD_BY` | _(unset)_ | Broker attribute to spread replicas over (e.g. `rack`), rack/DC-aware placement |
 | `MALACHI_LOG_MIN_DOMAINS` | _(unset)_ | Min distinct `spread_by` domains a segment's replicas must span |
 | `MALACHI_LOG_PLACEMENT_POLICY` | soft | `hard` fails a produce that cannot meet `min_domains`; `soft` places best-effort |
-| `MALACHI_SEGMENT_FORMAT` | record | How new segments frame their records on disk: `record` (one frame per record) or `batch` (one frame per batch, one CRC per batch). For development and the chaos drills; not supported in production. Set it only when every node runs this release and the control plane runs machine version 9 (no pin below 9): under such a pin a frontend set to `batch` cannot open a segment |
+| `MALACHI_SEGMENT_FORMAT` | record | How new segments frame their records on disk: `record` (one frame per record) or `batch` (one frame per batch, one CRC per batch). For development and the chaos drills; not supported in production. Set it only when every node runs this release and the control plane runs machine version 10 (no pin below 10): under such a pin a frontend set to `batch` cannot open a segment |
 | `MALACHI_AUTO_REBALANCE` | false | Auto-commit vnode rebalancing on membership change (else operator-driven) |
 | `MALACHI_AUTO_REBALANCE_INTERVAL_MS` | 30000 | Reconcile interval for auto-rebalancing |
 | `MALACHI_AUTO_REBALANCE_STABILIZATION` | 3 | Consecutive stable reconciles before an auto-commit (absorbs flaps) |
@@ -839,13 +840,14 @@ operation:
 | 32      | `join_group`            | a member's ranges, generation and session                                   |
 | 33      | `group_heartbeat`       | keeps a member alive within its session, reports a rebalance                |
 | 34      | `commit_offsets`        | checkpoints a member's position token in each of its ranges                 |
+| 35      | `purge_topic`           | admin, moves a topic's logical start up to a time, position or group commit |
 
 The server pushes three kinds of frame on an open stream, in the response envelope with the correlation id
 of the request that opened it: `append_ack`, `moved` and `records`.
 
 The admin api_keys (users 8 to 11, per-topic ACLs 14 to 16, storage policies 17 to 21, console roles 22
-and 23) require the `:admin` permission; see the [per-topic ACLs](docs/guides/per-topic-acls.md) and
-[per-topic retention](docs/guides/per-topic-retention.md) guides.
+and 23, the manual purge 35) require the `:admin` permission; see the [per-topic ACLs](docs/guides/per-topic-acls.md),
+[per-topic retention](docs/guides/per-topic-retention.md) and [purging a topic](docs/guides/purging-a-topic.md) guides.
 
 Keys 24 to 34 are the NorthGuard data path, the only keys that write and read records: routing (`cluster_state`, `topic_routes`),
 producer streams with a broker-defined window (`open_stream`, `append`, `close_stream`), per-range consume

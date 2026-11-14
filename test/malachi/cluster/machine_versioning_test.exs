@@ -63,9 +63,10 @@ defmodule Malachi.Cluster.MachineVersioningTest do
         # `Malachi.Auth.UserRegistry` introduced the console roles, 6 where `Malachi.Cluster.Policy`
         # introduced `retention.segment_max_age_ms`, 7 where `Malachi.Metadata` made `{:set_segment_replicas, ...}`
         # a compare-and-swap on the expected replica set, 8 where `Malachi.Metadata` introduced the group
-        # fence, and 9 where `Malachi.Metadata` introduced the batch storage format; each time the others moved
-        # with it, paying nothing but a no-op `{:machine_version, n - 1, n}`.
-        assert unquote(machine).version() == 9
+        # fence, 9 where `Malachi.Metadata` introduced the manual purge, and 10 where `Malachi.Metadata`
+        # introduced the batch storage format; each time the others moved with it, paying nothing but a no-op
+        # `{:machine_version, n - 1, n}`.
+        assert unquote(machine).version() == 10
 
         for version <- 0..unquote(machine).version(),
             do: assert(unquote(machine).which_module(version) == unquote(machine))
@@ -144,22 +145,41 @@ defmodule Malachi.Cluster.MachineVersioningTest do
 
   test "a topic export carries the format its contents need, and an old export without it still inserts" do
     {state, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 2})
-    # a group fence needs format 8; a topic without one exports as format 0
+    # a topic with neither a group fence nor a purged range exports as format 0
+    assert Metadata.export_topic(state, "events").export_format == 0
+    # a group fence is what format 8 adds
     {state, {:ok, 1}} = Metadata.apply(state, {:open_group, "g", "events"})
+    assert Metadata.export_topic(state, "events").export_format == 8
+    # a purged range is what format 9 adds
+    {state, {:ok, _moves}} = Metadata.apply(state, {:set_range_starts, "events", %{{"events", 0} => 0}})
+    assert Metadata.export_topic(state, "events").export_format == 8
+    {state, {:ok, _moves}} = Metadata.apply(state, {:set_range_starts, "events", %{{"events", 0} => 1}})
 
     export = Metadata.export_topic(state, "events")
-    assert export.export_format == 8
+    assert export.export_format == 9
 
-    # a batch segment needs the current format, 9
-    {batch_state, :ok} =
-      Metadata.apply(state, Metadata.register_command(root, {root, 0}, [:a], 0, :batch), 1)
-
+    # a batch segment is what the current format, 10, adds
+    {batch_state, :ok} = Metadata.apply(state, Metadata.register_command(root, {root, 0}, [:a], 1, :batch), 1)
     assert Metadata.export_topic(batch_state, "events").export_format == Metadata.export_format()
+
     assert {_without, ^export} = Metadata.extract_topic(state, "events")
 
     legacy = Map.delete(export, :export_format)
     {inserted, :ok} = MetadataMachine.apply(meta(1), {:insert_topic, legacy}, Metadata.new())
     assert Metadata.get_topic(inserted, "events") == Metadata.get_topic(state, "events")
+  end
+
+  test "a purged topic's export is refused by a vnode below version 9, and kept whole at 9" do
+    {state, {:ok, _root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 2})
+    {state, {:ok, _moves}} = Metadata.apply(state, {:set_range_starts, "events", %{{"events", 0} => 1}})
+    export = Metadata.export_topic(state, "events")
+    empty = Metadata.new()
+
+    assert {^empty, {:error, {:unsupported_export_format, 9, 8}}} =
+             MetadataMachine.apply(meta(8), {:insert_topic, export}, empty)
+
+    {inserted, :ok} = MetadataMachine.apply(meta(9), {:insert_topic, export}, empty)
+    assert inserted.ranges[{"events", 0}] |> Metadata.logical_start() == 1
   end
 
   test "an export above the group's effective version is refused by the metadata machine" do
@@ -197,7 +217,12 @@ defmodule Malachi.Cluster.MachineVersioningTest do
         {StreamData.constant(:commit_offset), StreamData.constant("g"), topic, StreamData.constant(%{})}
       ),
       # Introduced at version 4, so the property sees it refused below that and applied at it.
-      StreamData.tuple({StreamData.constant(:bind_topic_policy), topic, StreamData.member_of(["p", nil])})
+      StreamData.tuple({StreamData.constant(:bind_topic_policy), topic, StreamData.member_of(["p", nil])}),
+      # Introduced at version 9 (#198).
+      StreamData.tuple(
+        {StreamData.constant(:set_range_starts), topic,
+         StreamData.map_of(StreamData.tuple({topic, StreamData.integer(0..1)}), StreamData.integer(0..3), max_length: 2)}
+      )
     ])
   end
 

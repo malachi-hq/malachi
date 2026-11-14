@@ -290,7 +290,7 @@ config :malachi,
   # "batch" (one frame per batch, one CRC per batch). Read only where a segment is registered, so every
   # replica writes what the control plane recorded. For development and the chaos drills until a cluster
   # flag replaces it (#207); not supported in production. Set it only when every node runs this release
-  # and the control plane is at machine version 9 (no MALACHI_RA_MACHINE_VERSION pin below 9): a frontend
+  # and the control plane is at machine version 10 (no MALACHI_RA_MACHINE_VERSION pin below 10): a frontend
   # set to batch cannot register any segment under such a pin, and a broker on an older release cannot
   # take a batch segment's replication. Anything else than record or batch stops the node at boot.
   segment_format:
@@ -376,6 +376,15 @@ if config_env() != :test do
     console_port: String.to_integer(System.get_env("MALACHI_CONSOLE_PORT") || "4042"),
     # Off starts no console listener; the dashboard and the broker are unaffected either way.
     console_enabled: System.get_env("MALACHI_CONSOLE_ENABLED") != "false",
+    # How old a sample of costly state the console reads may be before it is taken again
+    # (`Malachi.Console.Sampler`): the most each such read costs is one per interval, however many look.
+    console_sample_ms:
+      Malachi.Config.checked(
+        parse_int.("MALACHI_CONSOLE_SAMPLE_MS", 1_000),
+        :console_sample_ms,
+        1_000,
+        &(is_integer(&1) and &1 > 0)
+      ),
     # Rate limiting configuration
     auth_rate_limit: parse_int.("MALACHI_AUTH_RATE_LIMIT", 10),
     auth_rate_window_ms: parse_int.("MALACHI_AUTH_RATE_WINDOW_MS", 60_000),

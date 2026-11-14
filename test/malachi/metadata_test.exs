@@ -507,6 +507,122 @@ defmodule Malachi.MetadataTest do
     end
   end
 
+  describe "set_range_starts (the manual purge, machine version 9, #198)" do
+    # A topic whose root range holds a sealed segment [0, 10) and an active one from 10.
+    defp purgeable_topic do
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "s0", [:b1], 0})
+      {state, :ok} = apply!(state, {:seal_segment, "s0", 10, 100, 1_700_000_000_000})
+      {state, :ok} = apply!(state, {:register_segment, root_id, "s1", [:b1], 10})
+      {state, root_id}
+    end
+
+    test "moves the start forward and answers each range's move" do
+      {state, root_id} = purgeable_topic()
+      assert Metadata.logical_start(state.ranges[root_id]) == 0
+
+      {state, reply} = apply!(state, {:set_range_starts, "events", %{root_id => 7}})
+      assert reply == {:ok, %{root_id => {0, 7}}}
+      assert Metadata.logical_start(state.ranges[root_id]) == 7
+    end
+
+    test "accepts an offset inside the active segment: its end is the broker's to check" do
+      {state, root_id} = purgeable_topic()
+      assert {state, {:ok, _}} = apply!(state, {:set_range_starts, "events", %{root_id => 1_000}})
+      assert Metadata.logical_start(state.ranges[root_id]) == 1_000
+    end
+
+    test "an equal start is accepted and moves nothing (a retry answers as the first)" do
+      {state, root_id} = purgeable_topic()
+      {state, {:ok, _}} = apply!(state, {:set_range_starts, "events", %{root_id => 5}})
+      assert {^state, {:ok, %{^root_id => {5, 5}}}} = apply!(state, {:set_range_starts, "events", %{root_id => 5}})
+    end
+
+    test "never moves backward: a lower start moves nothing for that range" do
+      {state, root_id} = purgeable_topic()
+      {state, {:ok, _}} = apply!(state, {:set_range_starts, "events", %{root_id => 5}})
+      assert {^state, {:ok, %{^root_id => {5, 5}}}} = apply!(state, {:set_range_starts, "events", %{root_id => 4}})
+    end
+
+    test "a range already purged further does not hold back the others (a cache behind the log)" do
+      {state, root_id} = create_topic()
+      {state, {:ok, left, right}} = apply!(state, {:split_range, root_id})
+      {state, {:ok, _}} = apply!(state, {:set_range_starts, "events", %{right => 3}})
+
+      assert {state, {:ok, moves}} = apply!(state, {:set_range_starts, "events", %{left => 9, right => 1}})
+      assert moves == %{left => {0, 9}, right => {3, 3}}
+      assert Metadata.logical_start(state.ranges[left]) == 9
+      assert Metadata.logical_start(state.ranges[right]) == 3
+    end
+
+    test "a sealed range accepts it, bounded by its sealed end" do
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "s0", [:b1], 0})
+      {state, :ok} = apply!(state, {:seal_segment, "s0", 10, 100, 1_700_000_000_000})
+      {state, {:ok, _left, _right}} = apply!(state, {:split_range, root_id})
+      assert state.ranges[root_id].state == :sealed
+
+      assert {^state, {:error, :start_past_end}} = apply!(state, {:set_range_starts, "events", %{root_id => 11}})
+      assert {state, {:ok, _}} = apply!(state, {:set_range_starts, "events", %{root_id => 10}})
+      assert Metadata.logical_start(state.ranges[root_id]) == 10
+    end
+
+    test "a range with no segment left has no known end and is not bounded here" do
+      {state, root_id} = create_topic()
+      assert {_state, {:ok, %{^root_id => {0, 50}}}} = apply!(state, {:set_range_starts, "events", %{root_id => 50}})
+    end
+
+    test "is all or nothing: one refused range leaves every range as it was" do
+      {state, root_id} = create_topic()
+      {state, {:ok, left, right}} = apply!(state, {:split_range, root_id})
+      {state, {:ok, _}} = apply!(state, {:set_range_starts, "events", %{right => 3}})
+
+      assert {^state, {:error, :no_such_range}} =
+               apply!(state, {:set_range_starts, "events", %{left => 9, {"events", 99} => 1}})
+
+      assert Metadata.logical_start(state.ranges[left]) == 0
+    end
+
+    test "refuses an unknown topic, an unknown range, another topic's range and a bad offset" do
+      {state, root_id} = create_topic()
+      {state, other_root} = create_topic(state, "other")
+
+      assert {^state, {:error, :no_such_topic}} = apply!(state, {:set_range_starts, "ghost", %{root_id => 1}})
+      assert {^state, {:error, :no_such_range}} = apply!(state, {:set_range_starts, "events", %{{"events", 99} => 1}})
+
+      assert {^state, {:error, :range_topic_mismatch}} =
+               apply!(state, {:set_range_starts, "events", %{other_root => 1}})
+
+      assert {^state, {:error, :invalid_offset}} = apply!(state, {:set_range_starts, "events", %{root_id => -1}})
+      assert {^state, {:error, :invalid_offset}} = apply!(state, {:set_range_starts, "events", %{root_id => 1.5}})
+    end
+
+    test "an empty map is accepted and changes nothing" do
+      {state, _root_id} = create_topic()
+      assert {^state, {:ok, moves}} = apply!(state, {:set_range_starts, "events", %{}})
+      assert moves == %{}
+    end
+
+    test "is fenced while the topic migrates" do
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:begin_migration, "events"})
+      assert {^state, {:error, :migrating}} = apply!(state, {:set_range_starts, "events", %{root_id => 1}})
+    end
+
+    test "the start rides along a vnode split (extract and insert)" do
+      {state, root_id} = create_topic()
+      {state, {:ok, _}} = apply!(state, {:set_range_starts, "events", %{root_id => 4}})
+      {_source, export} = Metadata.extract_topic(state, "events")
+      inserted = Metadata.insert_topic(Metadata.new(), export)
+      assert Metadata.logical_start(inserted.ranges[root_id]) == 4
+    end
+
+    test "is introduced at version 9 and routed by the topic it names" do
+      assert Metadata.command_versions()[{:set_range_starts, 3}] == 9
+      assert Metadata.command_target_topic({:set_range_starts, "events", %{}}) == "events"
+    end
+  end
+
   describe "unknown commands" do
     test "an unrecognized command is rejected, not crashed (replica safety)" do
       {state, _root_id} = create_topic()
@@ -722,6 +838,24 @@ defmodule Malachi.MetadataTest do
       {state, _} = create_topic(Metadata.new(), "zeta", 4)
       {state, _} = create_topic(state, "alpha", 4)
       assert ["alpha", "zeta"] == Enum.map(Metadata.overview(state), & &1.name)
+    end
+  end
+
+  describe "broker_ref_string/1" do
+    test "a replica is named by its node, a single node's pid included, never as an inspected pid" do
+      assert Metadata.broker_ref_string({Malachi.LogReplication, :"malachi@10.0.0.1"}) == "malachi@10.0.0.1"
+      assert Metadata.broker_ref_string(self()) == Atom.to_string(node())
+      assert Metadata.broker_ref_string(:repl) == "repl"
+      assert Metadata.broker_ref_string(nil) == nil
+      refute Metadata.broker_ref_string(self()) =~ "#PID"
+    end
+
+    test "the topic drill-down names a pid replica set by its node" do
+      {state, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "pids", 4})
+      {state, :ok} = Metadata.apply(state, {:register_segment, root, {root, 0}, [self()], 0})
+      name = Atom.to_string(node())
+
+      assert %{ranges: [%{segments: [%{primary: ^name, replica_set: [^name]}]}]} = Metadata.topic_detail(state, "pids")
     end
   end
 

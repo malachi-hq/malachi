@@ -10,6 +10,7 @@ defmodule Malachi.Console.AccessMatrixTest do
   use ExUnit.Case, async: false
 
   alias Malachi.Console.Access
+  alias Malachi.Console.Api
   alias Malachi.Test.AccessHelper
 
   # The caller kinds: no credentials, a valid session with no role, each role, and a wire superuser.
@@ -62,6 +63,7 @@ defmodule Malachi.Console.AccessMatrixTest do
       case Access.authorize(subject, level) do
         :ok ->
           refute response.status in [401, 403], "#{label}: refused with #{response.status}"
+          if endpoint(pattern) == :console, do: assert_served(response, label)
 
         {:error, :authentication_required} ->
           # The two page routes send a browser without a session to the login form.
@@ -81,6 +83,18 @@ defmodule Malachi.Console.AccessMatrixTest do
                  label
       end
     end
+  end
+
+  # An admitted `/api/v1` row is served: a row the API has no handler for would crash (500) or fall through
+  # to the generic not found, which names no resource.
+  defp assert_served(response, label) do
+    refute response.status in [405, 500], "#{label}: not served (#{response.status})"
+    refute match?(%{status: 404, json: %{"type" => "errors.http.not_found"}}, response), "#{label}: not served"
+  end
+
+  test "every /api/v1 row is served by the console API, which takes its routes from the table" do
+    rows = for {method, ["api", "v1" | pattern], _level} <- Access.routes(), do: {method, pattern}
+    assert Api.routes() == rows
   end
 
   test "the table covers both endpoints" do

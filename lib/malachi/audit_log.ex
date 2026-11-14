@@ -23,6 +23,8 @@ defmodule Malachi.AuditLog do
   - `:policy_defined` - An administrator defined or replaced a storage policy (`Malachi.Policies`)
   - `:policy_deleted` - An administrator deleted a storage policy
   - `:topic_policy_bound` - An administrator bound a topic to a storage policy, or detached it
+  - `:topic_purged` - An administrator purged a topic up to a point (`Malachi.Purge`): a logical purge,
+    recorded with the point asked for and each range's logical start before and after
   - `:user_role_changed` - An administrator set or removed a user's console role (`Malachi.Auth.set_role/3`)
 
   ## Event Structure

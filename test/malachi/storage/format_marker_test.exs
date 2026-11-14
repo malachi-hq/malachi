@@ -254,8 +254,8 @@ defmodule Malachi.Storage.FormatMarkerTest do
     test "raises to the batch format with the release that first reads it", %{tmp_dir: dir} do
       :ok = FormatMarker.write(dir, 1, "0.12.0")
 
-      assert FormatMarker.raise_to(dir, FormatMarker.batch_format(), version: "0.24.0") == :ok
-      assert {:ok, {:ok, %{format: 2, requires: "0.24.0"}}} = FormatMarker.read(dir)
+      assert FormatMarker.raise_to(dir, FormatMarker.batch_format(), version: "0.25.0") == :ok
+      assert {:ok, {:ok, %{format: 2, requires: "0.25.0"}}} = FormatMarker.read(dir)
       assert FormatMarker.enforce(dir) == :ok
     end
 

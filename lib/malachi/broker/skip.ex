@@ -1,7 +1,7 @@
 defmodule Malachi.Broker.Skip do
   @moduledoc """
   One stretch of a range's history that a consume read moved a consumer past because it was no longer
-  stored: expired by retention, or removed by an operator. `Malachi.Broker.read_consume/5` returns one
+  served: expired by retention, removed by an operator, or purged below the range's logical start (#198). `Malachi.Broker.read_consume/5` returns one
   per stretch it stepped over, so the layers above can tell an operator which reader lost data.
 
   The fields:
@@ -16,6 +16,11 @@ defmodule Malachi.Broker.Skip do
       a split, which starts over its ancestors), `:cursor` when it resumed from one it held. Only the
       second is a reader that fell behind retention.
     * `source` - `:self` or `:ancestor`.
+    * `cause` - `:purged` for a stretch below the source's logical start, set by an operator's purge
+      (#198); `:expired` for a stretch at or above it: data retention or an operator removed, or a hole
+      between segments. A step that crosses the logical start is reported as two skips. The rule is by
+      position: below the start the purge is the cause even where retention had already deleted the
+      segments, and a purged stretch stays `:purged` after retention reclaims its segments.
 
   The count comes from segment boundaries, never from the gaps between record offsets, so a segment
   whose offsets are sparse by design is not reported. It counts OFFSETS, not records lost: reading an
@@ -23,7 +28,7 @@ defmodule Malachi.Broker.Skip do
   child missed (`span/1` says `:upper_bound`).
   """
 
-  @enforce_keys [:range_id, :source_range_id, :from, :offsets, :origin, :source]
+  @enforce_keys [:range_id, :source_range_id, :from, :offsets, :origin, :source, :cause]
   defstruct @enforce_keys
 
   @type t :: %__MODULE__{
@@ -32,8 +37,12 @@ defmodule Malachi.Broker.Skip do
           from: non_neg_integer(),
           offsets: pos_integer() | :unknown,
           origin: :start | :cursor,
-          source: :self | :ancestor
+          source: :self | :ancestor,
+          cause: cause()
         }
+
+  @typedoc "Why the stretch was no longer served."
+  @type cause :: :expired | :purged
 
   @typedoc "How far `offsets` can be trusted as a count of what this reader missed."
   @type span :: :exact | :upper_bound | :unknown

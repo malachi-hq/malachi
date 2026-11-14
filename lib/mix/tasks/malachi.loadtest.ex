@@ -38,7 +38,15 @@ defmodule Mix.Tasks.Malachi.Loadtest do
       an auth storm. bounded keeps at most `--connect-concurrency` (32) connects in flight; stagger
       delays connection i by `i * --connect-stagger-ms` (100); all-at-once opens everything together.
       Each pacing knob is only accepted with the strategy that reads it.
-    * auth: `--user` (admin) `--pass` (admin123), or `--token`, or `--tls`/`--cacert`/`--cert`/`--key`
+    * auth: `--user` (admin), with the password in `MALACHI_PASS` (admin123); or a session token in
+      `MALACHI_TOKEN`; or `--tls`/`--cacert`/`--cert`/`--key`. `MALACHI_USER` names the user when
+      `--user` does not. The secrets come from the environment only, never from a flag: an argument is
+      readable by every local user in `/proc/<pid>/cmdline` for as long as the run lasts, the environment
+      only by its owner. An empty variable counts as unset, as in `scripts/lib/cli.js`. When several are
+      given, one handshake wins: a `MALACHI_TOKEN` over `--cert`/`--key`, and either over the user and
+      password; `MALACHI_PASS` is the password of whichever user is named, `--user` included. A token left
+      exported in the shell therefore overrides the flags typed on the command line, and the recorded
+      command (`meta.command`) names no token: unset it for a certificate or password run.
     * `--tls` verifies the server's certificate and hostname against `--cacert`, or against the system
       trust store when none is given. `--insecure` skips that verification: development only, since it
       makes the connection encrypted but unauthenticated and therefore open to interception.
@@ -92,8 +100,6 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     host: :string,
     port: :integer,
     user: :string,
-    pass: :string,
-    token: :string,
     tls: :boolean,
     insecure: :boolean,
     cacert: :string,
@@ -116,7 +122,9 @@ defmodule Mix.Tasks.Malachi.Loadtest do
         Keyword.replace_lazy(opts, flag, &enum!(flag, choices, &1))
       end)
 
-    Malachi.Loadtest.run(opts)
+    opts
+    |> credentials(System.get_env())
+    |> Malachi.Loadtest.run()
   rescue
     # Both are conditions with a one-line explanation, not bugs: a SetupError is operational (the server
     # would not take the connections) and an ArgumentError is input validation (bad counts, a pacing
@@ -124,6 +132,32 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     # Node generator's clean errors, instead of a crash dump.
     e in Malachi.Loadtest.SetupError -> Mix.raise(Exception.message(e))
     e in ArgumentError -> Mix.raise(Exception.message(e))
+  end
+
+  # Each credential the run may take from the environment, and the variable it comes from.
+  @credential_vars [user: "MALACHI_USER", pass: "MALACHI_PASS", token: "MALACHI_TOKEN"]
+
+  @doc """
+  The environment variables `credentials/2` reads, the one list the task and its tests share
+  (`Malachi.Test.LoadtestEnv` clears exactly these).
+  """
+  @spec credential_vars() :: [String.t()]
+  def credential_vars, do: Keyword.values(@credential_vars)
+
+  @doc """
+  The credentials the run authenticates with, added to `opts` from `env` (a map of environment
+  variables): `:user` from `MALACHI_USER` unless `--user` gave one, `:pass` from `MALACHI_PASS` and
+  `:token` from `MALACHI_TOKEN`. An empty variable counts as unset, as `scripts/lib/cli.js` reads it, and
+  what is unset stays out of `opts`, so `Malachi.Loadtest.Conn` applies its defaults.
+  """
+  @spec credentials(keyword(), %{optional(String.t()) => String.t()}) :: keyword()
+  def credentials(opts, env) do
+    Enum.reduce(@credential_vars, opts, fn {key, var}, opts ->
+      case Map.get(env, var, "") do
+        "" -> opts
+        value -> Keyword.put_new(opts, key, value)
+      end
+    end)
   end
 
   defp enum!(flag, choices, value) do

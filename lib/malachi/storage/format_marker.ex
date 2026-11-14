@@ -73,7 +73,7 @@ defmodule Malachi.Storage.FormatMarker do
   # The oldest release that understands each format. The bridge release is the first that reads the
   # marker at all, so it is the floor for format 1 as far as the marker can express one; format 2 is read
   # from the release that ships the batch frame.
-  @first_release %{1 => "0.12.0", 2 => "0.24.0"}
+  @first_release %{1 => "0.12.0", 2 => "0.25.0"}
 
   @required_keys ["format", "written_by", "requires"]
 

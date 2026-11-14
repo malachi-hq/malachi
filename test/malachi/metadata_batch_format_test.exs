@@ -109,8 +109,8 @@ defmodule Malachi.MetadataBatchFormatTest do
   end
 
   describe "the machine version gate" do
-    @meta8 %{machine_version: 8, index: 1, term: 1, system_time: 0}
     @meta9 %{machine_version: 9, index: 1, term: 1, system_time: 0}
+    @meta10 %{machine_version: 10, index: 1, term: 1, system_time: 0}
 
     defp gated(meta, state, command) do
       MachineVersion.apply(meta, command, state, Metadata.command_versions(), fn _meta, command, state ->
@@ -118,36 +118,36 @@ defmodule Malachi.MetadataBatchFormatTest do
       end)
     end
 
-    test "below version 9 both batch shapes are refused with the state unchanged; at 9 they apply" do
+    test "below version 10 both batch shapes are refused with the state unchanged; at 10 they apply" do
       {state, root} = topic()
       register = Metadata.register_command(root, {root, 0}, [:a], 0, :batch)
 
-      assert {^state, {:error, {:unsupported_command, {:register_segment, 6}, 9, 8}}} = gated(@meta8, state, register)
+      assert {^state, {:error, {:unsupported_command, {:register_segment, 6}, 10, 9}}} = gated(@meta9, state, register)
 
-      assert {^state, {:error, {:unsupported_command, {:seal_segment, 6}, 9, 8}}} =
-               gated(@meta8, state, {:seal_segment, {root, 0}, 1, 1, 1, 1})
+      assert {^state, {:error, {:unsupported_command, {:seal_segment, 6}, 10, 9}}} =
+               gated(@meta9, state, {:seal_segment, {root, 0}, 1, 1, 1, 1})
 
-      assert {_state, :ok} = gated(@meta9, state, register)
+      assert {_state, :ok} = gated(@meta10, state, register)
     end
 
     test "the record shapes stay applicable on an older version" do
       {state, root} = topic()
-      assert {_state, :ok} = gated(@meta8, state, Metadata.register_command(root, {root, 0}, [:a], 0, :record))
+      assert {_state, :ok} = gated(@meta9, state, Metadata.register_command(root, {root, 0}, [:a], 0, :record))
     end
 
-    test "the code version is 9" do
-      assert MachineVersion.code_version() == 9
+    test "the code version is 10" do
+      assert MachineVersion.code_version() == 10
     end
   end
 
   describe "exporting a topic" do
-    test "is format 9 only when it carries a batch segment, so record topics still split under a pin" do
+    test "is format 10 only when it carries a batch segment, so record topics still split under a pin" do
       {state, _root, _id} = registered(:record)
       assert Metadata.export_topic(state, "events").export_format == 0
 
       {state, _root, _id} = registered(:batch)
-      assert Metadata.export_topic(state, "events").export_format == 9
-      assert Metadata.export_format() == 9
+      assert Metadata.export_topic(state, "events").export_format == 10
+      assert Metadata.export_format() == 10
     end
   end
 

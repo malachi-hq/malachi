@@ -40,6 +40,34 @@ defmodule Malachi.MetadataPropertyTest do
     end
   end
 
+  # #198: a range's logical start only moves forward, a refused purge changes nothing, and on a range with
+  # no active segment it never passes the sealed end the control plane knows.
+  property "a range's logical start never moves backward, and never past a known sealed end" do
+    check all(ops <- StreamData.list_of(op(), max_length: 40), max_runs: 200) do
+      Enum.reduce(ops, Metadata.new(), fn op, state ->
+        next = apply_op(state, op)
+
+        for {id, range} <- next.ranges, previous = state.ranges[id], previous != nil do
+          assert Metadata.logical_start(range) >= Metadata.logical_start(previous)
+        end
+
+        for {id, range} <- next.ranges,
+            Metadata.logical_start(range) > Metadata.logical_start(state.ranges[id] || %{}) do
+          assert within_known_end?(next, id, Metadata.logical_start(range))
+        end
+
+        next
+      end)
+    end
+  end
+
+  defp within_known_end?(state, range_id, start) do
+    segments = Metadata.segments_of_range(state, range_id)
+    sealed_ends = for %{length: length} = seg <- segments, is_integer(length), do: seg.start_offset + length
+
+    Enum.any?(segments, &(&1.state == :active)) or sealed_ends == [] or start <= Enum.max(sealed_ends)
+  end
+
   property "the machine is deterministic (same ops -> same state)" do
     check all(ops <- StreamData.list_of(op(), max_length: 30), max_runs: 100) do
       assert run(ops) == run(ops)
@@ -82,7 +110,8 @@ defmodule Malachi.MetadataPropertyTest do
         {StreamData.constant(:register), StreamData.positive_integer(), StreamData.positive_integer(), opened_at()}
       ),
       StreamData.tuple({StreamData.constant(:seal_seg), StreamData.positive_integer()}),
-      StreamData.tuple({StreamData.constant(:delete_seg), StreamData.positive_integer()})
+      StreamData.tuple({StreamData.constant(:delete_seg), StreamData.positive_integer()}),
+      StreamData.tuple({StreamData.constant(:purge), StreamData.positive_integer(), StreamData.integer(0..3)})
     ])
   end
 
@@ -132,7 +161,22 @@ defmodule Malachi.MetadataPropertyTest do
     end
   end
 
+  # A purge of any range, sealed ones included, to an offset that may be behind, at or past what it holds.
+  defp apply_op(state, {:purge, picker, offset}) do
+    case pick_any_range(state, picker) do
+      nil -> state
+      {topic, _seq} = range_id -> command(state, {:set_range_starts, topic, %{range_id => offset}})
+    end
+  end
+
   defp command(state, command), do: state |> Metadata.apply(command) |> elem(0)
+
+  defp pick_any_range(state, picker) do
+    case state.ranges |> Map.keys() |> Enum.sort() do
+      [] -> nil
+      ids -> Enum.at(ids, rem(picker, length(ids)))
+    end
+  end
 
   # The clock a registration stamped, recorded when the op created a segment that did not exist before.
   defp record_registration(opened, before, next, {:register, _picker, _seed, at_ms}) do

@@ -266,6 +266,14 @@ defmodule Malachi.I18n do
       "pt_BR" => "🔗 Tópico %{topic} desvinculado da sua política por %{actor}",
       "en_US" => "🔗 Topic %{topic} detached from its policy by %{actor}"
     },
+    topic_purged: %{
+      "pt_BR" =>
+        "✂️ Tópico %{topic} purgado até %{point} por %{actor}: início lógico movido em %{ranges} range(s) " <>
+          "(purge lógico: os registros continuam em disco até a retenção remover o segmento inteiro)",
+      "en_US" =>
+        "✂️ Topic %{topic} purged up to %{point} by %{actor}: logical start moved on %{ranges} range(s) " <>
+          "(logical purge: the records stay on disk until retention removes their whole segment)"
+    },
     audit_event_logged: %{
       "pt_BR" => "📝 Evento de auditoria registrado: %{event_type}",
       "en_US" => "📝 Audit event logged: %{event_type}"
@@ -1044,8 +1052,188 @@ defmodule Malachi.I18n do
         "⚠️ Group %{group} on topic %{topic} was moved past %{offsets} offsets that are no longer stored " <>
           "(range %{range}, source range %{source_range}, origin %{origin}, span %{span}); " <>
           "%{held} more skips of this reader were counted without a line since the last one"
+    },
+    purge_consumer_skipped: %{
+      "pt_BR" =>
+        "✂️ O grupo %{group} no tópico %{topic} foi movido além de %{offsets} offsets purgados por um " <>
+          "operador (range %{range}, range de origem %{source_range}, origem %{origin}, extensão %{span}); " <>
+          "%{held} outros pulos deste leitor foram contados sem linha desde a última",
+      "en_US" =>
+        "✂️ Group %{group} on topic %{topic} was moved past %{offsets} offsets an operator purged " <>
+          "(range %{range}, source range %{source_range}, origin %{origin}, span %{span}); " <>
+          "%{held} more skips of this reader were counted without a line since the last one"
     }
   }
+
+  # The interface catalog: every key an `/api/v1` response can carry (the `type` of a problem, and the state
+  # words of the payloads), translated for the console, the terminal UI and the desktop build. The server
+  # never translates these itself, since its locale is the node's and not the operator's; a client resolves
+  # the key with `ui_t/3` or from the exported catalog. The values interpolate the problem's members.
+  @ui_translations %{
+    "errors.auth.unauthenticated" => %{
+      "pt_BR" => "Entre para continuar.",
+      "en_US" => "Sign in to continue."
+    },
+    "errors.auth.invalid_credentials" => %{
+      "pt_BR" => "Usuário ou senha incorretos.",
+      "en_US" => "The username or password is wrong."
+    },
+    "errors.auth.session_expired" => %{
+      "pt_BR" => "Sua sessão expirou. Entre novamente.",
+      "en_US" => "Your session expired. Sign in again."
+    },
+    "errors.auth.session_rejected" => %{
+      "pt_BR" => "Esta sessão foi recusada porque está sendo usada por outro cliente.",
+      "en_US" => "This session was rejected because it is being used from another client."
+    },
+    "errors.auth.session_invalid" => %{
+      "pt_BR" => "Esta sessão não é mais válida. Entre novamente.",
+      "en_US" => "This session is no longer valid. Sign in again."
+    },
+    "errors.auth.missing_role" => %{
+      "pt_BR" => "Isto exige o papel %{required_role}.",
+      "en_US" => "This needs the %{required_role} role."
+    },
+    "errors.auth.unavailable" => %{
+      "pt_BR" => "Não foi possível ler sua conta agora. Tente de novo em instantes.",
+      "en_US" => "Your account could not be read right now. Try again shortly."
+    },
+    "errors.http.invalid_request" => %{
+      "pt_BR" => "A requisição não é válida.",
+      "en_US" => "The request is not valid."
+    },
+    "errors.http.not_found" => %{
+      "pt_BR" => "Nada é servido neste endereço.",
+      "en_US" => "Nothing is served at this address."
+    },
+    "errors.http.method_not_allowed" => %{
+      "pt_BR" => "Este endereço não aceita esse método.",
+      "en_US" => "This address does not take that method."
+    },
+    "errors.http.header_fields_too_large" => %{
+      "pt_BR" => "Os cabeçalhos da requisição são grandes demais.",
+      "en_US" => "The request headers are too large."
+    },
+    "errors.http.rate_limited" => %{
+      "pt_BR" => "Requisições demais. Tente de novo em %{retry_after_ms} ms.",
+      "en_US" => "Too many requests. Try again in %{retry_after_ms} ms."
+    },
+    "errors.users.exists" => %{
+      "pt_BR" => "Esse usuário já existe.",
+      "en_US" => "That user already exists."
+    },
+    "errors.users.not_found" => %{
+      "pt_BR" => "Esse usuário não existe.",
+      "en_US" => "That user does not exist."
+    },
+    "errors.users.invalid_permissions" => %{
+      "pt_BR" => "Essas permissões não são válidas.",
+      "en_US" => "Those permissions are not valid."
+    },
+    "errors.users.invalid_role" => %{
+      "pt_BR" => "Esse papel não é válido.",
+      "en_US" => "That role is not valid."
+    },
+    "errors.users.persist_failed" => %{
+      "pt_BR" => "Não foi possível salvar a alteração. Tente de novo em instantes.",
+      "en_US" => "The change could not be saved. Try again shortly."
+    },
+    "errors.acls.invalid_operation" => %{
+      "pt_BR" => "Essa operação de ACL não é válida.",
+      "en_US" => "That ACL operation is not valid."
+    },
+    "errors.acls.invalid" => %{
+      "pt_BR" => "Essa ACL não é válida.",
+      "en_US" => "That ACL is not valid."
+    },
+    "errors.topics.not_found" => %{
+      "pt_BR" => "O tópico %{topic} não existe.",
+      "en_US" => "The topic %{topic} does not exist."
+    },
+    "errors.groups.not_found" => %{
+      "pt_BR" => "O grupo %{group} não tem posição nem membros no tópico %{topic}.",
+      "en_US" => "The group %{group} has no position or members on the topic %{topic}."
+    },
+    "errors.cluster.upgrade_pending" => %{
+      "pt_BR" => "O cluster ainda não terminou de atualizar para uma versão que suporte isto.",
+      "en_US" => "The cluster has not finished upgrading to a version that supports this."
+    },
+    "errors.policies.no_such_policy" => %{
+      "pt_BR" => "Essa política não existe.",
+      "en_US" => "That policy does not exist."
+    },
+    "errors.policies.no_such_topic" => %{
+      "pt_BR" => "Esse tópico não existe.",
+      "en_US" => "That topic does not exist."
+    },
+    "errors.policies.policy_in_use" => %{
+      "pt_BR" => "Essa política ainda está aplicada a tópicos.",
+      "en_US" => "That policy is still applied to topics."
+    },
+    "errors.policies.unsupported_policy_field" => %{
+      "pt_BR" => "O cluster ainda não suporta o campo de política %{field}.",
+      "en_US" => "The cluster does not support the policy field %{field} yet."
+    },
+    "errors.policies.invalid_policy_name" => %{
+      "pt_BR" => "Esse nome de política não é válido.",
+      "en_US" => "That policy name is not valid."
+    },
+    "errors.policies.invalid_topic" => %{
+      "pt_BR" => "Esse nome de tópico não é válido.",
+      "en_US" => "That topic name is not valid."
+    },
+    "errors.policies.invalid_policy" => %{
+      "pt_BR" => "Essa política não é válida.",
+      "en_US" => "That policy is not valid."
+    },
+    "errors.policies.unknown_policy_field" => %{
+      "pt_BR" => "O campo de política %{field} é desconhecido.",
+      "en_US" => "The policy field %{field} is unknown."
+    },
+    "errors.policies.invalid_policy_field" => %{
+      "pt_BR" => "O campo de política %{field} tem um valor inválido.",
+      "en_US" => "The policy field %{field} has an invalid value."
+    },
+    "errors.policies.duplicate_policy_field" => %{
+      "pt_BR" => "O campo de política %{field} foi informado duas vezes.",
+      "en_US" => "The policy field %{field} is given twice."
+    },
+    "errors.policies.timeout" => %{
+      "pt_BR" => "O cluster não respondeu a tempo. Tente de novo em instantes.",
+      "en_US" => "The cluster did not answer in time. Try again shortly."
+    },
+    "errors.http.unavailable" => %{
+      "pt_BR" => "O cluster não pôde responder agora. Tente de novo em instantes.",
+      "en_US" => "The cluster could not answer right now. Try again shortly."
+    }
+  }
+
+  @doc """
+  Every key of the interface catalog: the keys an `/api/v1` response can carry.
+  """
+  @spec ui_keys() :: [String.t()]
+  def ui_keys, do: Map.keys(@ui_translations)
+
+  @doc """
+  The interface text for `key` in `locale`, interpolating `bindings`; the key itself when the catalog has
+  no entry for it, so a missing entry shows as a key rather than as nothing.
+
+  ## Examples
+
+      iex> Malachi.I18n.ui_t("errors.http.not_found", "en_US")
+      "Nothing is served at this address."
+
+      iex> Malachi.I18n.ui_t("errors.auth.missing_role", "pt_BR", required_role: "viewer")
+      "Isto exige o papel viewer."
+
+  """
+  @spec ui_t(String.t(), String.t(), keyword()) :: String.t()
+  def ui_t(key, locale, bindings \\ []) when is_binary(key) do
+    case Map.get(@ui_translations, key) do
+      nil -> key
+      translations -> interpolate(Map.get(translations, locale) || Map.fetch!(translations, "en_US"), bindings)
+    end
+  end
 
   @doc """
   Returns the current locale.

@@ -354,6 +354,19 @@ defmodule Malachi.Console.EndpointTest do
       assert Malachi.Application.console_children(false, 4042) == []
     end
 
+    test "what answers the console's reads runs whether or not this node serves the console" do
+      assert Malachi.Application.console_read_children() == [
+               {Task.Supervisor, name: Malachi.Console.SamplerTasks},
+               Malachi.Console.Sampler,
+               Malachi.Console.StreamHub
+             ]
+
+      # the application starts them apart from the listener: they are running on the test node
+      for name <- [Malachi.Console.SamplerTasks, Malachi.Console.Sampler, Malachi.Console.StreamHub] do
+        assert Process.whereis(name), inspect(name)
+      end
+    end
+
     test "child specs are distinct per name" do
       assert Endpoint.child_spec(4042).id == {Endpoint, Endpoint}
       assert Endpoint.child_spec({0, name: :other}).id == {Endpoint, :other}

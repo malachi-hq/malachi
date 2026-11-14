@@ -1066,7 +1066,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   # FIFO), so a mismatch means this replica is genuinely behind (or ahead via catch-up), not reordered.
   # A push for a record segment keeps the shape every release has applied; a batch segment's push carries its
   # format, so the follower creates the segment with the frames the control plane registered. A batch segment
-  # needs its vnode at machine version 9 (`Malachi.Metadata`), which every member OF THAT VNODE must support.
+  # needs its vnode at machine version 10 (`Malachi.Metadata`), which every member OF THAT VNODE must support.
   # That is not every broker: a segment's replicas are placed over all of them, so a broker on an older release
   # outside the vnode can be one, and it would drop this push. Nothing here prevents that: until the cluster
   # flag of #207 turns the format on only when every member advertises it, `MALACHI_SEGMENT_FORMAT=batch` must

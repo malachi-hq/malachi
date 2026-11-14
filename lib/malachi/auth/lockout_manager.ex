@@ -117,11 +117,19 @@ defmodule Malachi.Auth.LockoutManager do
   @doc "Lists all currently locked accounts as info maps (`username`, `ip`, `locked_until`, ...)."
   @spec list_locked_accounts() :: [map()]
   def list_locked_accounts do
-    case LockoutServer.list_locked(server_id(), now()) do
+    case locked_accounts() do
       {:ok, locked} -> locked
       {:error, _reason} -> []
     end
   end
+
+  @doc """
+  `list_locked_accounts/0`, telling an empty list from one that could not be read: `{:error, reason}` when
+  this node's replica of the lockout store does not answer, for a reader that must not show "nobody is
+  locked out" when it does not know.
+  """
+  @spec locked_accounts() :: {:ok, [map()]} | {:error, term()}
+  def locked_accounts, do: LockoutServer.list_locked(server_id(), now())
 
   ## GenServer Callbacks (cleanup timer only)
 

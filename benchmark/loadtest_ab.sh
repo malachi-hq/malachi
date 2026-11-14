@@ -77,18 +77,25 @@ network() {
   docker inspect -f '{{range $name, $net := .NetworkSettings.Networks}}{{$name}}{{end}}' malachi-bench
 }
 
+# The generators' login: the bench server's dev admin, the only user it has, set here rather than taken
+# from the caller (a login exported for another server would fail every run of one generator only). Both
+# generators read it from the environment, copied into their containers by name (`-e NAME`), so the two
+# authenticate the same way and the password is never an argument of the docker client, where every local
+# user could read it (#180).
+export MALACHI_USER=admin MALACHI_PASS=admin123
+
 # A Node generator run in `image` against the fresh server, its JSON report on stdout.
 node_run() {
   local image=$1; shift
   docker run --rm --cpuset-cpus "$LT_CPUSET" --network "$(network)" -v "$ROOT":/w -w /w \
-    -e MALACHI_HOST=malachi -e MALACHI_PORT=4040 -e MALACHI_USER=admin -e MALACHI_PASS=admin123 \
+    -e MALACHI_HOST=malachi -e MALACHI_PORT=4040 -e MALACHI_USER -e MALACHI_PASS \
     "$image" node scripts/loadtest.js --scenario produce --json --connections "$CONNS" \
     --duration "$DUR" --warmup "$WARM" --record-size 256 "$@"
 }
 
 # The Elixir generator, one scheduler for its one core.
 elixir_run() {
-  $COMPOSE run --rm --no-deps -e ERL_FLAGS="+S 1:1" loadtest --host malachi --scenario produce --json \
+  $COMPOSE run --rm --no-deps -e ERL_FLAGS="+S 1:1" -e MALACHI_USER -e MALACHI_PASS loadtest --host malachi --scenario produce --json \
     --connections "$CONNS" --duration "$DUR" --warmup "$WARM" --record-size 256 "$@"
 }
 

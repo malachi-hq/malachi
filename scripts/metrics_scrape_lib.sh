@@ -1,11 +1,14 @@
 # shellcheck shell=bash
-# Shared plumbing for the benchmark harnesses that read a node's own flush latency off its `/metrics`
-# (scripts/loadtest-ceiling.sh and benchmark/docker-cluster.sh): log in to the dashboard, scrape the
-# Prometheus exposition into a file, and say why when either could not be done. The window itself is
-# computed by `mix malachi.loadtest.ceiling flush-window` from two scrapes (Malachi.Loadtest.FlushWindow).
+# Shared plumbing for every harness that logs in to a dashboard: the benchmark harnesses that read a node's
+# own flush latency off its `/metrics` (scripts/loadtest-ceiling.sh and benchmark/docker-cluster.sh), the
+# Docker image checks (scripts/validate-docker-build.sh, scripts/docker-regression-test.sh) and the image
+# smoke step of .github/workflows/ci.yml. It logs in to the dashboard, scrapes the Prometheus exposition
+# into a file, and says why when either could not be done. The flush window itself is computed by
+# `mix malachi.loadtest.ceiling flush-window` from two scrapes (Malachi.Loadtest.FlushWindow).
 #
-# Transport is the caller's, because the two harnesses reach the dashboard differently (curl on the host,
-# `docker exec ... wget` inside a node). Before calling anything here, define:
+# Transport is the caller's, because the harnesses reach the dashboard differently: curl on the host
+# (scripts/lib/dashboard_curl.sh), or `docker exec -i` inside a node, wget for the login and nc for the
+# scrape (benchmark/docker-cluster.sh). Before calling anything here, define:
 #
 #   ms_http_post PATH JSON    POST JSON to PATH; print the response body and return 0 on a 2xx.
 #   ms_http_get PATH TOKEN    GET PATH with `Authorization: Bearer TOKEN` and `Accept: text/plain`;
@@ -13,6 +16,10 @@
 #
 # On anything else both print one line and return non-zero: `HTTP <status>` when the server answered, or
 # the transport's own reason when it did not.
+#
+# Neither hook may put JSON or TOKEN in a process argument. The JSON carries the password and the token is
+# the session, and `/proc/<pid>/cmdline` is readable by every local user for as long as the process runs
+# (#180). Hand them to the transport on stdin, through the shell's `printf` builtin, which runs no process.
 #
 # Budget: the dashboard rate-limits authenticated requests per client IP (10 a minute by default) and
 # binds a session to the IP that logged in. A login plus one scrape before and one after a window is
@@ -33,10 +40,43 @@ ms_explain() { # ms_explain <transport output>
   esac
 }
 
-# Logs in as USER and prints the session token.
+# For a transport that speaks raw HTTP (busybox nc inside a node): one HTTP/1.x response, the body on a
+# 2xx, else `HTTP <status>`, or why there is no status at all, naming WHO answered. Headers end at the
+# first empty line, CRLF or bare LF alike. The body is everything after it: the dashboard answers with a
+# Content-Length body and then closes, so nothing follows it.
+ms_parse_http_response() { # ms_parse_http_response <who> <response>
+  local response="$2" status_line status body
+  status_line="${response%%$'\n'*}"
+  status_line="${status_line%$'\r'}"
+  if ! [[ "$status_line" =~ ^HTTP/1\.[01]\ ([0-9]{3})(\ |$) ]]; then
+    echo "$1 gave no HTTP status line"
+    return 1
+  fi
+  status="${BASH_REMATCH[1]}"
+  case "$status" in
+    2??) ;;
+    *) echo "HTTP $status"; return 1 ;;
+  esac
+  # Whichever ending comes first is the headers' own; the other may only be inside the body.
+  local crlf="${response%%$'\r\n\r\n'*}" lf="${response%%$'\n\n'*}"
+  if [ "$crlf" != "$response" ] && { [ "$lf" = "$response" ] || [ "${#crlf}" -le "${#lf}" ]; }; then
+    body="${response#"$crlf"$'\r\n\r\n'}"
+  elif [ "$lf" != "$response" ]; then
+    body="${response#"$lf"$'\n\n'}"
+  else
+    echo "$1 gave a response with no end of headers"
+    return 1
+  fi
+  printf '%s\n' "$body"
+}
+
+# Logs in as USER and prints the session token. The password reaches jq on stdin, never as an argument;
+# the user name is not a secret. The token must be base64url, the shape the node issues, because the
+# transports write it into a curl config line or a raw HTTP request where a quote or a line break would
+# change what is sent.
 ms_login() { # ms_login <user> <pass>
   local payload body token
-  payload="$(jq -cn --arg u "$1" --arg p "$2" '{username: $u, password: $p}')" || {
+  payload="$(printf '%s' "$2" | jq -Rsc --arg u "$1" '{username: $u, password: .}')" || {
     echo "login failed: jq could not build the request"
     return 1
   }
@@ -47,6 +87,10 @@ ms_login() { # ms_login <user> <pass>
   token="$(jq -r '.token // empty' 2> /dev/null <<< "$body")"
   if [ -z "$token" ]; then
     echo "login failed: the answer carried no token"
+    return 1
+  fi
+  if ! [[ "$token" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "login failed: the answer carried a malformed token"
     return 1
   fi
   printf '%s\n' "$token"
