@@ -1293,9 +1293,18 @@ defmodule Malachi.I18n do
 
   defp interpolate(template, []), do: template
 
+  # One pass over the template: each placeholder is replaced by its binding's value, and a value is never
+  # scanned again. Replacing the bindings one after another would let a value that holds `%{other}` (a
+  # topic, a group name, anything a client sent) be rewritten by a later binding, forging the line.
+  # A placeholder with no binding is left as it is.
   defp interpolate(template, bindings) do
-    Enum.reduce(bindings, template, fn {key, value}, acc ->
-      String.replace(acc, "%{#{key}}", to_string(value))
+    values = Map.new(bindings, fn {key, value} -> {to_string(key), value} end)
+
+    Regex.replace(~r/%\{(\w+)\}/, template, fn placeholder, name ->
+      case Map.fetch(values, name) do
+        {:ok, value} -> to_string(value)
+        :error -> placeholder
+      end
     end)
   end
 end
