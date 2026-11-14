@@ -776,6 +776,11 @@ defmodule Malachi.Storage.ElixirStore do
 
   defp manifest_path(%Segment{directory: directory, id: id}), do: SegmentFiles.path(directory, to_string(id), :manifest)
 
+  # A segment with no frame and no format has nothing for a manifest to describe (`file_format/2` left it
+  # undecided), and a manifest cannot name a format nothing chose. It seals without one, as a file sealed before
+  # manifests existed does, and its probe scans an empty file.
+  defp persist_manifest(%__MODULE__{format: nil}), do: :ok
+
   defp persist_manifest(%__MODULE__{} = store) do
     Manifest.write(manifest_path(store.segment), %Manifest{
       format: store.format,

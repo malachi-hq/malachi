@@ -194,6 +194,23 @@ defmodule Malachi.Cluster.ReplicationServerBatchFormatTest do
       assert formats_on_disk(pd) == [:batch]
     end
 
+    test "a fence that seals it does not crash the server, and leaves nothing on disk" do
+      # A node preallocates a new segment's file and dies before its first frame; after the restart a failover
+      # or heal fence seals the copy. Nothing decided its format, so it seals without a manifest.
+      {p, pd} = start_at(prealloc_bytes: 4096)
+      :ok = stop_supervised(p)
+      blank_file!(pd, @segment, 0, 4096)
+      start_supervised!({ReplicationServer, [name: p, directory: pd, prealloc_bytes: 4096]}, id: {p, :restarted})
+
+      assert {:ok, 0, 0} = ReplicationServer.seal(p, @segment, 0)
+      assert Process.alive?(Process.whereis(p))
+
+      dir = Layout.segment_directory(pd, @segment)
+      assert File.stat!(SegmentFiles.log_path(dir, 0)).size == 0
+      refute File.exists?(SegmentFiles.path(dir, SegmentFiles.id(0), :manifest))
+      assert {:ok, 0, 0} = ReplicationServer.seal(p, @segment, 0)
+    end
+
     test "after batch files: the log keeps their format, and reads of them still work" do
       {p, pd} = start_at()
       assert {:ok, 1} = ReplicationServer.replicate(p, @segment, [p], 0, records(~w(a b)), :batch)
