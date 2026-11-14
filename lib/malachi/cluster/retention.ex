@@ -19,6 +19,15 @@ defmodule Malachi.Cluster.Retention do
   at (`Malachi.Metadata.topic_policy_name/2`); the definitions come from the cluster's policy store and
   are passed in already resolved, which keeps this module pure. A name the caller could not resolve
   expires nothing rather than falling back to the global limits: see `expired/5`.
+
+  ## Legal hold
+
+  A topic under a legal hold (#307, `Malachi.Metadata.legal_hold/2`) expires nothing, whatever its policy,
+  its age, its size or its purged start say: `plan/5` reports what each rule would have expired as held
+  instead, so the disk a hold keeps is visible, and the first sweep after the hold is released expires
+  the same segments. The control plane refuses a `{:delete_segment, id}` of a held topic too, so a
+  sweep planned before a hold landed cannot delete under it. A hold covers segment data only: it does
+  not stop `ra` from snapshotting and truncating the control plane's own log.
   """
 
   alias Malachi.Cluster.Policy
@@ -51,18 +60,26 @@ defmodule Malachi.Cluster.Retention do
   What an expire answered, as a closed set so it can label a metric: the control plane's own replies to a
   delete, and `:other` for anything else (a Raft timeout, an unexpected term).
   """
-  @type reply_label :: :ok | :no_such_segment | :migrating | :segment_active | :other
+  @type reply_label :: :ok | :no_such_segment | :migrating | :segment_active | :legal_hold | :other
+
+  @typedoc "What a legal hold keeps of one topic in a sweep: the segments the rules would have expired."
+  @type held :: %{segments: pos_integer(), bytes: non_neg_integer()}
+
+  @typedoc "One sweep's decision (`plan/5`): the segments to expire, and what each held topic keeps."
+  @type plan :: %{expired: [Metadata.segment_id()], held: %{Metadata.topic_name() => held()}}
 
   @doc """
   The `reply_label` of an expire's answer. `:ok` deleted the segment; `:no_such_segment` means it was
   already gone (a retried sweep), which is neither an expiry nor a failure; `:migrating` (the topic is
-  moving between vnodes) and `:segment_active` (the segment is still the write head) are refusals.
+  moving between vnodes), `:segment_active` (the segment is still the write head) and `:legal_hold` (a
+  hold landed after the sweep read the metadata) are refusals.
   """
   @spec reply_label(term()) :: reply_label()
   def reply_label(:ok), do: :ok
   def reply_label({:error, :no_such_segment}), do: :no_such_segment
   def reply_label({:error, :migrating}), do: :migrating
   def reply_label({:error, :segment_active}), do: :segment_active
+  def reply_label({:error, :legal_hold}), do: :legal_hold
   def reply_label(_other), do: :other
 
   @doc """
@@ -74,7 +91,7 @@ defmodule Malachi.Cluster.Retention do
   the only retry the files ever get, since a segment gone from the control plane never comes back from
   `expired/3`.
 
-  Every other answer keeps the files. A refusal (`:migrating`, `:segment_active`) leaves the segment
+  Every other answer keeps the files. A refusal (`:migrating`, `:segment_active`, `:legal_hold`) leaves the segment
   listed with its replica set intact, and deleting the bytes under it would leave every replica short
   of its recorded `byte_size`: `Malachi.Cluster.SelfHealing` then finds no intact copy to repair from,
   and a consumer positioned in that segment reads `:eof` until some later sweep finally gets `:ok`.
@@ -86,8 +103,9 @@ defmodule Malachi.Cluster.Retention do
   def delete_replicas?(reply), do: reply_label(reply) in [:ok, :no_such_segment]
 
   @doc """
-  The sealed segment ids to expire at `now_ms` (epoch ms). `global_policy` is the fallback; each
-  range uses its topic's policy retention merged over it (see the module doc).
+  The sealed segment ids to expire at `now_ms` (epoch ms): `plan/5`'s `expired`, which leaves out every
+  segment of a topic under a legal hold. `global_policy` is the fallback; each range uses its topic's
+  policy retention merged over it (see the module doc).
 
   A sealed segment wholly below its range's logical start (#198) expires too, whatever its age and
   size: an operator purged every record in it, and no reader is served any of them. The segment holding
@@ -106,21 +124,67 @@ defmodule Malachi.Cluster.Retention do
           %{Metadata.policy_name() => Policy.t()},
           non_neg_integer() | nil
         ) :: [Metadata.segment_id()]
-  def expired(%Metadata{} = metadata, now_ms, global_policy, policies \\ %{}, unresolved_max_age_ms \\ nil) do
-    metadata.segments
-    |> Map.values()
-    |> Enum.filter(&(&1.state == :sealed))
-    |> Enum.group_by(& &1.range_id)
-    |> Enum.flat_map(fn {range_id, sealed} ->
-      name = Metadata.topic_policy_name(metadata, elem(range_id, 0))
-      retention = bounds(effective(name, policies, global_policy, unresolved_max_age_ms))
-      oldest_first = Enum.sort_by(sealed, & &1.start_offset)
+  def expired(%Metadata{} = metadata, now_ms, global_policy, policies \\ %{}, unresolved_max_age_ms \\ nil),
+    do: plan(metadata, now_ms, global_policy, policies, unresolved_max_age_ms).expired
 
-      expired_by_age(oldest_first, now_ms, Map.get(retention, :max_age_ms)) ++
-        expired_by_size(oldest_first, Map.get(retention, :max_bytes)) ++
-        expired_by_purge(oldest_first, logical_start(metadata, range_id))
-    end)
-    |> Enum.uniq()
+  @doc """
+  One sweep's decision at `now_ms`, in a single pass over the sealed segments: what to expire, and what
+  a legal hold keeps.
+
+  Every range is judged by the same three rules (`expired/5`). The segments a rule picks in a range of a
+  held topic go to `held`, counted with their bytes on disk under the topic, instead of to `expired`; a
+  held topic no rule would touch is not listed. So `expired` without the hold is `expired` with it plus
+  exactly the segments `held` counts.
+  """
+  @spec plan(
+          Metadata.t(),
+          non_neg_integer(),
+          policy(),
+          %{Metadata.policy_name() => Policy.t()},
+          non_neg_integer() | nil
+        ) :: plan()
+  def plan(%Metadata{} = metadata, now_ms, global_policy, policies \\ %{}, unresolved_max_age_ms \\ nil) do
+    by_range =
+      metadata.segments
+      |> Map.values()
+      |> Enum.filter(&(&1.state == :sealed))
+      |> Enum.group_by(& &1.range_id)
+      |> Enum.map(fn {range_id, sealed} ->
+        topic = elem(range_id, 0)
+
+        retention =
+          bounds(effective(Metadata.topic_policy_name(metadata, topic), policies, global_policy, unresolved_max_age_ms))
+
+        {topic, Metadata.legal_hold(metadata, topic) != nil,
+         range_expired(metadata, range_id, sealed, now_ms, retention)}
+      end)
+
+    %{
+      expired: Enum.uniq(for({_topic, false, ids} <- by_range, id <- ids, do: id)),
+      held: held(metadata, by_range)
+    }
+  end
+
+  # The ids the three rules pick in one range, a segment two rules pick listed twice: the sweep dedups
+  # once over every range, as it always has, and only a held range (rare) is deduplicated on its own.
+  defp range_expired(metadata, range_id, sealed, now_ms, retention) do
+    oldest_first = Enum.sort_by(sealed, & &1.start_offset)
+
+    expired_by_age(oldest_first, now_ms, Map.get(retention, :max_age_ms)) ++
+      expired_by_size(oldest_first, Map.get(retention, :max_bytes)) ++
+      expired_by_purge(oldest_first, logical_start(metadata, range_id))
+  end
+
+  defp held(metadata, by_range) do
+    for {topic, true, [_ | _] = ids} <- by_range, reduce: %{} do
+      held ->
+        ids = Enum.uniq(ids)
+        bytes = Enum.reduce(ids, 0, &(bytes(Map.fetch!(metadata.segments, &1)) + &2))
+
+        Map.update(held, topic, %{segments: length(ids), bytes: bytes}, fn so_far ->
+          %{segments: so_far.segments + length(ids), bytes: so_far.bytes + bytes}
+        end)
+    end
   end
 
   @doc """
