@@ -569,7 +569,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:4041/
 | `MALACHI_DASHBOARD_CORS_ENABLED` | `false` | Enable CORS for `/metrics` and `/stream` |
 | `MALACHI_DASHBOARD_CORS_ORIGINS` | `*` | Allowed CORS origins (comma-separated) |
 | `MALACHI_DASHBOARD_SECURE_COOKIE` | `false` | Mark the session cookie `Secure`. Set it only behind a TLS-terminating proxy: the dashboard listener itself serves plain HTTP, and a browser refuses to store a `Secure` cookie from a plain-HTTP origin, which makes login fail with no error. |
-| `MALACHI_DASHBOARD_CSP` | (default) | Custom Content-Security-Policy |
+| `MALACHI_DASHBOARD_CSP` | (strict default, see [CSP](#content-security-policy-csp)) | Replaces the Content-Security-Policy of the dashboard and the console. Unset or blank keeps the default; a policy with `'unsafe-inline'`, `'unsafe-eval'` or `'unsafe-hashes'` is honored but warned about at boot |
 | `MALACHI_DASHBOARD_MAX_HEADER_COUNT` | `50` | Max header lines in one request; past it the dashboard answers 431 |
 | `MALACHI_DASHBOARD_MAX_HEADER_LINE_SIZE` | `10000` | Max bytes in one request or header line, CRLF included; past it the connection is closed without an answer. Each connection reserves a buffer this size, so it is capped at 1048576; a larger value falls back to the default with a warning |
 | `MALACHI_DASHBOARD_MAX_HEADER_SIZE` | `32768` | Max bytes across all header names and values; past it the dashboard answers 431. The three header limits are read when the dashboard starts, and zero or a negative value falls back to its default with a warning |
@@ -748,15 +748,23 @@ Malachi.AuditLog.get_stats()
 
 ### Content Security Policy (CSP)
 
-The default CSP allows `'unsafe-inline'` for compatibility. For maximum security, use a stricter policy:
+The default policy allows no inline script or style:
 
-```bash
-docker run \
-  -e MALACHI_DASHBOARD_CSP="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:" \
-  hectorcardoso/malachi:latest
+```
+default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'
 ```
 
-**Note**: Removing `'unsafe-inline'` requires refactoring dashboard HTML to use external script/style files or nonces. This is planned for a future release.
+The dashboard's script and stylesheet are files of their own (`/app.js`, `/login.js`, `/app.css`), public
+because the login page needs them before there is a session, and no page carries an inline block, an inline event
+handler or a `style` attribute. Each page references its assets by a URL that carries a hash of their content
+(`/app.js?v=<hash>`). A request carrying the node's own version gets `Cache-Control: public, max-age=31536000,
+immutable`; any other version, or none, gets the node's bytes with `no-store`. During a rolling upgrade an asset
+request can reach a node that is not upgraded yet, and that answer is used once and never cached, so a browser
+keeps no stale script once every node runs the new release.
+
+`MALACHI_DASHBOARD_CSP` replaces the policy for the dashboard and the console. A value that brings back
+`'unsafe-inline'`, `'unsafe-eval'` or `'unsafe-hashes'` is honored, and the dashboard logs a warning at boot,
+since it reopens the dashboard to injected script. An empty value counts as unset.
 
 ### Rate Limiting
 

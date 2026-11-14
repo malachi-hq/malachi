@@ -471,10 +471,9 @@ config :malachi,
        nil -> ["*"]
        str -> String.split(str, ",") |> Enum.map(&String.trim/1)
      end),
-  # Security headers
-  dashboard_csp:
-    System.get_env("MALACHI_DASHBOARD_CSP") ||
-      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
+  # Security headers. Unset (or blank) means Malachi.Dashboard.SecurityHeaders.default_csp/0, the one place the
+  # default policy is written.
+  dashboard_csp: System.get_env("MALACHI_DASHBOARD_CSP"),
   # Header limits; see config/config.exs for what happens past each.
   dashboard_max_header_count: parse_int.("MALACHI_DASHBOARD_MAX_HEADER_COUNT", 50),
   dashboard_max_header_line_size: parse_int.("MALACHI_DASHBOARD_MAX_HEADER_LINE_SIZE", 10_000),

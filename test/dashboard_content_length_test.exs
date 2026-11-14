@@ -1,6 +1,7 @@
 defmodule Malachi.DashboardContentLengthTest do
   use ExUnit.Case, async: false
 
+  alias Malachi.Dashboard.Assets
   alias Malachi.Test.DashboardHelper
 
   # Every response is read by its framing (DashboardHelper.recv_framed/2): exactly Content-Length bytes of
@@ -38,6 +39,11 @@ defmodule Malachi.DashboardContentLengthTest do
   @problem_401 Map.put(@problem, "www-authenticate", ~s(Bearer realm="Malachi"))
   @html %{"content-type" => "text/html; charset=utf-8", "cache-control" => "no-store, no-cache, must-revalidate"}
   @to_login %{"location" => "/login", "cache-control" => "no-store"}
+  @asset_js %{
+    "content-type" => "text/javascript; charset=utf-8",
+    "cache-control" => "public, max-age=31536000, immutable"
+  }
+  @asset_css Map.put(@asset_js, "content-type", "text/css; charset=utf-8")
 
   # {label, method, path, credentials, extra request headers, request body, expected status, expected
   # response headers}. The label names the sender under test, so a failure points at the function to look
@@ -67,7 +73,11 @@ defmodule Malachi.DashboardContentLengthTest do
      Map.put(@to_login, "set-cookie", "malachi_token=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0")},
     {"CORS preflight", :OPTIONS, "/metrics", :none, %{"Origin" => "https://app.example"}, nil, 204, %{}},
     {"serve_logo", :GET, "/logo.svg", :none, %{}, nil, 200,
-     %{"content-type" => "image/svg+xml; charset=utf-8", "cache-control" => "public, max-age=86400"}}
+     %{"content-type" => "image/svg+xml; charset=utf-8", "cache-control" => "public, max-age=86400"}},
+    {"serve_asset, stylesheet", :GET, Assets.versioned_path("/app.css"), :none, %{}, nil, 200, @asset_css},
+    {"serve_asset, dashboard script", :GET, Assets.versioned_path("/app.js"), :none, %{}, nil, 200, @asset_js},
+    {"serve_asset, login script", :GET, Assets.versioned_path("/login.js"), :none, %{}, nil, 200, @asset_js},
+    {"serve_asset, unversioned", :GET, "/app.js", :none, %{}, nil, 200, Map.put(@asset_js, "cache-control", "no-store")}
   ]
 
   for {label, method, path, credentials, headers, body, status, expected_headers} <- @framed do

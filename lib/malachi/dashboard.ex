@@ -17,6 +17,7 @@ defmodule Malachi.Dashboard do
   alias Malachi.Cluster.Policy
   alias Malachi.Console.Access
   alias Malachi.Console.Reads
+  alias Malachi.Dashboard.Assets
   alias Malachi.Dashboard.SecurityHeaders
   alias Malachi.HTTP.Limits
   alias Malachi.HTTP.Problem
@@ -81,6 +82,8 @@ defmodule Malachi.Dashboard do
             do: I18n.t(:dashboard_cookie_secure),
             else: I18n.t(:dashboard_cookie_plain)
         )
+
+        warn_on_weak_csp()
 
         send(self(), :accept)
         {:ok, %{socket: socket, port: port, limits: limits}}
@@ -376,6 +379,19 @@ defmodule Malachi.Dashboard do
     :gen_tcp.close(socket)
   end
 
+  # The default policy has no 'unsafe-inline' (#38). An operator may still loosen it through
+  # MALACHI_DASHBOARD_CSP, and that is their call, but it reopens the dashboard to injected script, so it is
+  # said once, at boot, where it is read.
+  defp warn_on_weak_csp do
+    case SecurityHeaders.csp_override() do
+      nil ->
+        :ok
+
+      csp ->
+        if SecurityHeaders.weak_csp?(csp), do: Logger.warning(I18n.t(:dashboard_csp_weak_override, csp: csp))
+    end
+  end
+
   defp handle_login(socket, headers, client_ip) do
     case read_json_body(socket, headers) do
       {:ok, %{"username" => username, "password" => password}} ->
@@ -420,7 +436,12 @@ defmodule Malachi.Dashboard do
     end
   end
 
-  # The two HTML pages, the login form and the dashboard, are never cached.
+  # The asset routes, matched by exact path in handle_route/5; every other path goes on to the routes after them.
+  @asset_paths Assets.paths()
+
+  # The two HTML pages, the login form and the dashboard, are never cached. Each one names its assets by a
+  # versioned URL (Assets.versioned_path/1), and only a request for this build's version is cached, so a
+  # browser keeps no stale script after an upgrade, rolling ones included (Assets.cache_control/2).
   @html_headers [
     {"Content-Type", "text/html; charset=utf-8"},
     {"Cache-Control", "no-store, no-cache, must-revalidate"}
@@ -659,11 +680,11 @@ defmodule Malachi.Dashboard do
     send_response(socket, status, [{"Content-Type", "application/json"}], Jason.encode!(body_map), "/users")
   end
 
-  # Apart from the two senders named below, every response with a non-empty body is framed here, so the
-  # Content-Length a client reads is the size of exactly the bytes that follow the blank line. Callers never
-  # pass Content-Length: this function owns it. The two are serve_logo/1, which frames its own static file
-  # and sends no security headers, and serve_sse/2, which sends a security-headed head with no
-  # Content-Length and then an event stream that the closing connection ends.
+  # Apart from the two senders named below, every response with a non-empty body is framed here, the dashboard
+  # assets included, so the Content-Length a client reads is the size of exactly the bytes that follow the
+  # blank line. Callers never pass Content-Length: this function owns it. The two are serve_logo/1, which
+  # frames its own static file and sends no security headers, and serve_sse/2, which sends a security-headed
+  # head with no Content-Length and then an event stream that the closing connection ends.
   # The security headers go on the head alone, so the body is sent as built and never rewritten.
   defp send_response(socket, status, headers, body, route, request_origin \\ nil) do
     header_lines = Enum.map_join(headers, fn {name, value} -> "#{name}: #{value}\r\n" end)
@@ -709,6 +730,10 @@ defmodule Malachi.Dashboard do
 
   defp handle_route(socket, %{method: :GET, path: "/logo.svg"}, _headers, _client_ip, _session),
     do: serve_logo(socket)
+
+  defp handle_route(socket, %{method: :GET, path: path, query: query}, _headers, _client_ip, _session)
+       when path in @asset_paths,
+       do: serve_asset(socket, path, query)
 
   defp handle_route(socket, %{method: :OPTIONS, path: path}, headers, _client_ip, _session),
     do: serve_cors_preflight(socket, headers, path)
@@ -944,6 +969,16 @@ defmodule Malachi.Dashboard do
     send_clearing_redirect(socket)
   end
 
+  # The script and the stylesheet the two HTML pages load (Malachi.Dashboard.Assets), framed by send_response/6
+  # so they carry the security headers, X-Content-Type-Options: nosniff among them: with it a browser runs
+  # /app.js only while its Content-Type says JavaScript.
+  # The cache policy follows the request's v (Assets.cache_control/2): only this build's own version is cached.
+  defp serve_asset(socket, path, query) do
+    {:ok, %{body: body, content_type: content_type}} = Assets.fetch(path)
+    headers = [{"Content-Type", content_type}, {"Cache-Control", Assets.cache_control(path, query)}]
+    send_response(socket, "200 OK", headers, body, path)
+  end
+
   defp serve_logo(socket) do
     logo_path = Path.join(:code.priv_dir(:malachi), "static/logo.svg")
 
@@ -977,106 +1012,12 @@ defmodule Malachi.Dashboard do
       <meta charset="utf-8">
       <title>Malachi Dashboard</title>
       <link rel="icon" type="image/svg+xml" href="/logo.svg">
-      <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-          font-family: -apple-system, sans-serif;
-          background: #0a0e27;
-          color: #e0e0e0;
-          padding: 20px;
-        }
-        h1 { color: #00d9ff; margin-bottom: 0; }
-        h2 { color: #00d9ff; margin-bottom: 15px; font-size: 1.2em; }
-        .dashboard-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 20px;
-        }
-        .logout-btn {
-          background: transparent;
-          color: #e0e0e0;
-          border: 1px solid #2a3f5f;
-          padding: 8px 18px;
-          border-radius: 6px;
-          cursor: pointer;
-          font-size: 0.9em;
-          text-decoration: none;
-          transition: all 0.2s;
-        }
-        .logout-btn:hover {
-          background: #2a3f5f;
-          border-color: #ff4757;
-          color: #ff4757;
-        }
-        .card {
-          background: #1a1f3a;
-          border: 1px solid #2a3f5f;
-          border-radius: 8px;
-          padding: 20px;
-          margin-bottom: 20px;
-        }
-        .metric { display: flex; justify-content: space-between; padding: 8px 0; }
-        .metric-value { color: #00ff88; font-family: monospace; }
-        .empty-state { text-align: center; color: #666; padding: 20px; font-style: italic; }
-        .topic-card {
-          background: #0f1428;
-          border: 1px solid #2a3f5f;
-          border-left: 4px solid #00d9ff;
-          border-radius: 6px;
-          margin-bottom: 10px;
-        }
-        .topic-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 10px;
-          padding: 12px 14px;
-          cursor: pointer;
-          user-select: none;
-        }
-        .topic-header:hover { background: #141a33; }
-        .topic-name { color: #00ff88; font-family: monospace; font-weight: bold; }
-        .topic-summary { color: #8a97b1; font-size: 0.85em; font-family: monospace; }
-        .badge {
-          display: inline-block;
-          padding: 2px 8px;
-          border-radius: 10px;
-          font-size: 0.75em;
-          font-weight: bold;
-          text-transform: uppercase;
-        }
-        .badge-active { background: #00ff88; color: #0a0e27; }
-        .badge-sealed { background: #6b7280; color: #f0f0f0; }
-        .badge-warn { background: #f59e0b; color: #0a0e27; }
-        .topic-detail { padding: 0 14px 12px 14px; }
-        .range-block { margin-top: 10px; border-top: 1px solid #202844; padding-top: 8px; }
-        .range-head { color: #00d9ff; font-family: monospace; font-size: 0.85em; margin-bottom: 4px; }
-        .seg-row {
-          display: grid;
-          grid-template-columns: 1fr 1fr 1fr auto;
-          gap: 8px;
-          color: #b8c2d9;
-          font-family: monospace;
-          font-size: 0.8em;
-          padding: 2px 0 2px 14px;
-        }
-        .seg-empty { color: #666; font-size: 0.8em; padding: 2px 0 2px 14px; }
-        .group-chip {
-          display: inline-block;
-          background: #2a3f5f;
-          color: #00ff88;
-          padding: 1px 8px;
-          border-radius: 10px;
-          font-size: 0.75em;
-          font-family: monospace;
-          margin: 2px 4px 0 0;
-        }
-      </style>
+      <link rel="stylesheet" href="#{Assets.versioned_path("/app.css")}">
+      <script src="#{Assets.versioned_path("/app.js")}" defer></script>
     </head>
     <body>
       <div class="dashboard-header">
-        <h1><img src="/logo.svg" alt="Malachi" style="height: 42px; vertical-align: middle; margin-right: 10px;">Malachi Dashboard</h1>
+        <h1><img src="/logo.svg" alt="Malachi" class="brand-logo">Malachi Dashboard</h1>
         <a href="/logout" class="logout-btn">Logout</a>
       </div>
       <div class="card">
@@ -1094,138 +1035,15 @@ defmodule Malachi.Dashboard do
         <h2>Topics</h2>
         <div id="topics">Loading...</div>
       </div>
-      <script>
-        // Topic names are user-controlled, so every value interpolated into HTML is escaped.
-        function escapeHtml(unsafe) {
-          return String(unsafe)
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&#039;");
-        }
-
-        function formatBytes(n) {
-          if (!n) return '0 B';
-          const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-          let i = 0, v = n;
-          while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-          return (i === 0 ? v : v.toFixed(1)) + ' ' + units[i];
-        }
-
-        // Drill-down state, keyed by topic name, survives the per-second summary re-render. The heavy
-        // per-range/segment detail is NOT in the stream: it is fetched once, on expand, into topicDetails.
-        const expandedTopics = new Set();
-        const topicDetails = {};
-        let lastTopics = [];
-
-        function toggleTopic(i) {
-          const t = lastTopics[i];
-          if (!t) return;
-          if (expandedTopics.has(t.name)) {
-            expandedTopics.delete(t.name);
-            delete topicDetails[t.name];
-            renderTopics(lastTopics);
-          } else {
-            expandedTopics.add(t.name);
-            renderTopics(lastTopics); // show the header expanded + a loading row immediately
-            loadTopicDetail(t.name);
-          }
-        }
-
-        // Fetch one topic's ranges/segments on demand; re-render only if it is still expanded when it lands.
-        function loadTopicDetail(name) {
-          fetch('/topic?name=' + encodeURIComponent(name))
-            .then(resp => resp.ok ? resp.json() : null)
-            .then(detail => {
-              if (detail && expandedTopics.has(name)) {
-                topicDetails[name] = detail;
-                renderTopics(lastTopics);
-              }
-            })
-            .catch(() => {});
-        }
-
-        function renderSegments(segments) {
-          if (!segments || segments.length === 0) return '<div class="seg-empty">no segments</div>';
-          return segments.map(s => `
-            <div class="seg-row">
-              <span>off ${s.start_offset}</span>
-              <span>len ${s.length == null ? '-' : s.length}</span>
-              <span>${formatBytes(s.byte_size)}</span>
-              <span class="badge badge-${escapeHtml(s.state)}">${escapeHtml(s.state)}</span>
-            </div>
-          `).join('');
-        }
-
-        function renderRanges(ranges) {
-          return (ranges || []).map(r => `
-            <div class="range-block">
-              <div class="range-head">
-                range #${r.seq} · keys [${r.key_start}, ${r.key_end}) ·
-                <span class="badge badge-${escapeHtml(r.state)}">${escapeHtml(r.state)}</span> ·
-                ${r.segments.length} seg${r.segments.length === 1 ? '' : 's'}
-              </div>
-              ${renderSegments(r.segments)}
-            </div>
-          `).join('');
-        }
-
-        function renderTopicCard(t, i) {
-          const open = expandedTopics.has(t.name);
-          const groups = (t.groups || []).map(g => `<span class="group-chip">${escapeHtml(g)}</span>`).join('');
-          let detail = '';
-          if (open) {
-            const d = topicDetails[t.name];
-            const body = d ? renderRanges(d.ranges) : '<div class="seg-empty">loading…</div>';
-            detail = `
-            <div class="topic-detail">
-              ${groups ? '<div style="margin-bottom:6px;">groups: ' + groups + '</div>' : '<div class="seg-empty">no consumer groups</div>'}
-              ${body}
-            </div>`;
-          }
-          return `
-            <div class="topic-card">
-              <div class="topic-header" onclick="toggleTopic(${i})">
-                <span class="topic-name">${open ? '▾' : '▸'} ${escapeHtml(t.name)} <span class="badge badge-${escapeHtml(t.state)}">${escapeHtml(t.state)}</span></span>
-                <span class="topic-summary">${t.active_range_count}/${t.range_count} ranges · ${t.active_segment_count}/${t.segment_count} segs · ${formatBytes(t.total_bytes)} · ${(t.groups || []).length} grp${t.domain_violations > 0 ? ' · <span class="badge badge-warn">⚠ ' + t.domain_violations + ' HA</span>' : ''}</span>
-              </div>
-              ${detail}
-            </div>`;
-        }
-
-        function renderTopics(topics) {
-          lastTopics = topics || [];
-          const el = document.getElementById('topics');
-          if (lastTopics.length === 0) {
-            el.innerHTML = '<div class="empty-state">No topics</div>';
-            return;
-          }
-          el.innerHTML = lastTopics.map(renderTopicCard).join('');
-        }
-
-        // Auth is handled via HttpOnly cookies, sent automatically by the browser.
-        const source = new EventSource('/stream');
-        source.onmessage = (event) => {
-          const data = JSON.parse(event.data);
-          document.getElementById('processes').textContent = data.system.process_count;
-          document.getElementById('memory').textContent = data.system.memory.total_mb.toFixed(2) + ' MB';
-          renderTopics(data.topics);
-        };
-
-        source.onerror = (error) => {
-          console.error('EventSource error:', error);
-          // Session likely expired - redirect to login
-          if (source.readyState === EventSource.CLOSED) {
-            window.location.href = '/login';
-          }
-        };
-      </script>
     </body>
     </html>
     """
   end
 
+  # The form names POST and /login although login.js submits it: if the script ever fails to load (a policy
+  # that blocks it, a network error), the browser falls back to submitting the form itself, and a form with no
+  # method is a GET that puts the password in the URL, where history, proxies and access logs keep it. As a POST
+  # it gets a 400 problem instead.
   defp login_page_html do
     """
     <!DOCTYPE html>
@@ -1234,101 +1052,14 @@ defmodule Malachi.Dashboard do
       <meta charset="utf-8">
       <title>Malachi - Login</title>
       <link rel="icon" type="image/svg+xml" href="/logo.svg">
-      <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-          font-family: -apple-system, sans-serif;
-          background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%);
-          color: #e0e0e0;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          min-height: 100vh;
-          padding: 20px;
-        }
-        .login-container {
-          background: #1a1f3a;
-          border: 1px solid #2a3f5f;
-          border-radius: 12px;
-          padding: 40px;
-          width: 100%;
-          max-width: 400px;
-          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-        }
-        h1 {
-          color: #00d9ff;
-          margin-bottom: 30px;
-          text-align: center;
-          font-size: 2em;
-        }
-        .form-group {
-          margin-bottom: 20px;
-        }
-        label {
-          display: block;
-          color: #00d9ff;
-          margin-bottom: 8px;
-          font-size: 0.9em;
-          font-weight: 500;
-        }
-        input {
-          width: 100%;
-          padding: 12px;
-          background: #0a0e27;
-          border: 1px solid #2a3f5f;
-          border-radius: 6px;
-          color: #e0e0e0;
-          font-size: 1em;
-          transition: border-color 0.3s;
-        }
-        input:focus {
-          outline: none;
-          border-color: #00d9ff;
-        }
-        button {
-          width: 100%;
-          padding: 14px;
-          background: linear-gradient(135deg, #00d9ff 0%, #0099cc 100%);
-          border: none;
-          border-radius: 6px;
-          color: #0a0e27;
-          font-size: 1em;
-          font-weight: bold;
-          cursor: pointer;
-          transition: transform 0.2s, box-shadow 0.2s;
-        }
-        button:hover {
-          transform: translateY(-2px);
-          box-shadow: 0 4px 12px rgba(0, 217, 255, 0.4);
-        }
-        button:active {
-          transform: translateY(0);
-        }
-        button:disabled {
-          opacity: 0.6;
-          cursor: not-allowed;
-          transform: none;
-        }
-        .error {
-          background: rgba(255, 71, 87, 0.2);
-          border: 1px solid #ff4757;
-          border-radius: 6px;
-          padding: 12px;
-          margin-bottom: 20px;
-          color: #ff4757;
-          font-size: 0.9em;
-          display: none;
-        }
-        .error.show {
-          display: block;
-        }
-      </style>
+      <link rel="stylesheet" href="#{Assets.versioned_path("/app.css")}">
+      <script src="#{Assets.versioned_path("/login.js")}" defer></script>
     </head>
-    <body>
+    <body class="login-page">
       <div class="login-container">
-        <h1><img src="/logo.svg" alt="Malachi" style="height: 48px; vertical-align: middle; margin-right: 10px;">Malachi</h1>
+        <h1><img src="/logo.svg" alt="Malachi" class="brand-logo">Malachi</h1>
         <div id="error" class="error"></div>
-        <form id="loginForm">
+        <form id="loginForm" method="post" action="/login">
           <div class="form-group">
             <label for="username">Username</label>
             <input type="text" id="username" name="username" autocomplete="username" required autofocus>
@@ -1340,59 +1071,6 @@ defmodule Malachi.Dashboard do
           <button type="submit" id="loginBtn">Login</button>
         </form>
       </div>
-      <script>
-        const form = document.getElementById('loginForm');
-        const errorDiv = document.getElementById('error');
-        const loginBtn = document.getElementById('loginBtn');
-
-        form.addEventListener('submit', async (e) => {
-          e.preventDefault();
-
-          const username = document.getElementById('username').value;
-          const password = document.getElementById('password').value;
-
-          errorDiv.classList.remove('show');
-          loginBtn.disabled = true;
-          loginBtn.textContent = 'Logging in...';
-
-          try {
-            const response = await fetch('/login', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({ username, password })
-            });
-
-            const data = await response.json();
-
-            if (response.ok && data.s === 'ok') {
-              // Cookie is set automatically by the server (HttpOnly)
-              // Redirect to dashboard
-              window.location.href = '/';
-            } else {
-              // An error is an application/problem+json body: its type is a translation key.
-              throw new Error(data.type || 'Login failed');
-            }
-          } catch (error) {
-            errorDiv.textContent = getErrorMessage(error.message);
-            errorDiv.classList.add('show');
-            loginBtn.disabled = false;
-            loginBtn.textContent = 'Login';
-          }
-        });
-
-        function getErrorMessage(type) {
-          const messages = {
-            'errors.auth.invalid_credentials': 'Invalid username or password',
-            'errors.http.rate_limited': 'Too many attempts. Please try again later.',
-            'errors.http.invalid_request': 'Enter a username and a password.',
-            'errors.http.header_fields_too_large': 'The request was too large. Clear the cookies for this site and try again.'
-          };
-          return messages[type] || 'An error occurred. Please try again.';
-        }
-
-      </script>
     </body>
     </html>
     """

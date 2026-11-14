@@ -1397,8 +1397,8 @@ different ranges are not comparable.
 
 | Concern | Decision |
 |---|---|
-| CSP script | `script-src 'self'`, no `unsafe-inline`, no `unsafe-eval`. Achievable because a Vite build emits no inline script, provided `@vitejs/plugin-legacy` stays out. This closes #38 for scripts |
-| CSP style | `style-src 'self' 'unsafe-inline'` is accepted as the price of shadcn, which injects style at runtime. If that is ever unacceptable, the path is a per request nonce with an `index.html` placeholder, decided **before** components are written, because retrofitting means touching every use site |
+| CSP script | `script-src 'self'`, no `unsafe-inline`, no `unsafe-eval`. Achievable because a Vite build emits no inline script, provided `@vitejs/plugin-legacy` stays out. #38 made this the default for the dashboard and the console, which share one policy (`Malachi.Dashboard.SecurityHeaders`) |
+| CSP style | `style-src 'self'`, the default since #38. Styles a component sets through the DOM (`element.style`, as React does) are not affected by the directive; a `<style>` element or a `style` attribute in markup is. If a bundle ever needs one, that is decided with evidence from the real bundle (the violations a browser reports), and the path is a per request nonce with an `index.html` placeholder, decided **before** components are written, because retrofitting means touching every use site |
 | Rest of CSP | `default-src 'none'`, `img-src 'self' data:`, `font-src 'self' data:`, `connect-src 'self'`, `base-uri 'none'`, `form-action 'self'`, `frame-ancestors 'none'`, `object-src 'none'` |
 | Transport | The console gets TLS. Today it is plain HTTP (#70), which also caps the browser at HTTP/1.1 and its six connections per origin |
 | Auth | `Authorization: Bearer` as the single primary mechanism for all three clients, with SSE consumed through `fetch` rather than the native `EventSource`, which cannot set a header. The cookie remains a browser login convenience |
