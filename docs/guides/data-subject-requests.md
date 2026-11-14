@@ -88,12 +88,12 @@ run.
 Each run writes these entries to the audit log:
 
 1. `purge_request_recorded`, before the purge runs: the request id, the reason, the topic, the point, and
-   the user who ran it (`cli@<node>` for the mix task, the session user on the wire). The audit log is
-   flushed before the purge is sent, so with file output the entry is normally on disk first, and a node
-   killed right after the purge commits still leaves the request in the trail. Three cases leave it
-   short of that, and the purge still goes on: an audit log that is restarting drops the entry without a
-   trace; a flush that does not answer within 5 s is logged as a warning and the entry is written later,
-   if the node lives; and a flush that rotates the audit file rewrites it without a sync to disk.
+   the user who ran it (`cli@<node>` for the mix task, the session user on the wire). The purge waits
+   until this entry is written out: with file output it is synced to disk first, so a node killed right
+   after the purge commits still leaves the request in the trail. When the audit log cannot write it (the
+   log is restarting, does not answer within 5 s, or fails to write), the purge is refused with
+   `audit_unavailable` and never sent; check the audit log and run the same command again. With
+   `MALACHI_AUDIT_LOG_OUTPUT=ets_only` the entry is only in memory, so ship the log as described below.
 2. `topic_purge_planned`, when the purge is about to move something: the same request id, and each
    range's logical start as the node sees it and the start it is about to move to. It is written after
    the point is resolved and before the command is sent, so it is there even when the control plane

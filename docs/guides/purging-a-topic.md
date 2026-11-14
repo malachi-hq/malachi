@@ -92,6 +92,7 @@ leaves purged stretches out, so a client alerting on it does not page on a purge
 | `invalid_purge_point` | a negative time, a position token that is empty or over 1024 bytes, a group name that is empty, over 255 bytes or holds a control, format, line separator or paragraph separator character, or no point at all; a group with such a name can still be purged by time or by position |
 | `invalid_topic` | a topic name the control plane would never accept (`[A-Za-z0-9._-]`, at most 255 bytes) |
 | `invalid_request` | a data subject request whose id or reason is missing or out of bounds ([Data subject requests](data-subject-requests.md)) |
+| `audit_unavailable` | the audit log could not write a data subject request's entry, so the purge was not sent; check the audit log and retry |
 | `invalid_position` | the token does not decode, names another topic, or a range or source the topic does not have |
 | `cursor_in_ancestor` | the position is inside a range a split retired; purge by time or by group instead |
 | `start_past_end` | the point is past what the node knows of the range's end; retry once it has caught up |

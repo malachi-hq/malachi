@@ -315,7 +315,7 @@ defmodule Malachi.PurgeTest do
       assert recorded?.(:topic_purged)
     end
 
-    test "the audit log is flushed after the request's entry, before the broker is asked, and after the purge's",
+    test "the request's entry is written durably before the broker is asked, and the log flushed after the purge's",
          ctx do
       audit = Process.whereis(Malachi.AuditLog)
       broker = DataPlaneRouter.shard_for(ctx.topic)
@@ -330,11 +330,10 @@ defmodule Malachi.PurgeTest do
 
       try do
         try do
-          assert_receive {:trace, ^audit, :receive, {:"$gen_cast", {:log_event, :purge_request_recorded, _, _, _, _}}},
+          # one durable call from the purge's own process, answered before the broker (suspended) is asked
+          assert_receive {:trace, ^audit, :receive,
+                          {:"$gen_call", {^caller, _tag}, {:log_event_durably, :purge_request_recorded, _, _, _, _}}},
                          2_000
-
-          # the broker is suspended, so this flush happened before the purge reached it
-          assert_receive {:trace, ^audit, :receive, {:"$gen_call", {^caller, _tag}, :flush_now}}, 2_000
         after
           :ok = :sys.resume(broker)
         end
@@ -394,6 +393,27 @@ defmodule Malachi.PurgeTest do
       assert Enum.all?(refused, &String.starts_with?(&1.reason, "invalid_request: "))
       refute inspect(refused) =~ "%{actor}"
       refute Enum.any?(audited(ctx.actor), &(&1.event_type == :purge_request_recorded))
+    end
+
+    test "a request whose entry the audit log cannot write is refused before the broker is asked", ctx do
+      pid = Process.whereis(Malachi.AuditLog)
+      point = {:position, Position.encode(ctx.root, {0, 3})}
+      true = Process.unregister(Malachi.AuditLog)
+
+      log =
+        try do
+          purge_log(fn ->
+            assert Purge.purge(ctx.topic, point, ctx.actor, ctx.request) == {:error, :audit_unavailable}
+          end)
+        after
+          true = Process.register(pid, Malachi.AuditLog)
+        end
+
+      assert log =~ "Request #{ctx.request.id} by #{ctx.actor} for topic #{ctx.topic} could not be written"
+      refute log =~ "Purge request #{ctx.request.id} recorded"
+      # nothing was sent: every record is still readable
+      assert {["v0", "v1", "v2", "v3", "v4"], []} = values(ctx.shard, ctx.root)
+      assert Purge.reason_string(:audit_unavailable) =~ "audit_unavailable: the audit log could not write"
     end
 
     test "a purge without a request records no request", ctx do
