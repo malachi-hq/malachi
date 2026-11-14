@@ -488,21 +488,30 @@ defmodule Malachi.Log do
 
   # A clean scan's numbers, kept as the file's manifest so the next question about it is a stat instead of a
   # scan: a follower's copy is never sealed by its own store, so without this every probe of it after a restart
-  # would scan the whole file again, inside the replication server's loop. Only for a file that ends exactly
-  # where its frames do (a preallocated tail would never match `stored_bytes`), and without an fsync: it is
-  # derived, believed only while the file keeps that size (`Malachi.Log.Manifest.trusted/2`), and rewritten by
-  # the next scan when it is lost. A failure to write it costs only the next scan.
+  # would scan the whole file again, inside the replication server's loop.
+  #
+  # It is a cache, and it is written as one. It records the file's size as it is now, a preallocated tail
+  # included, so it is believed exactly while the file keeps that size (`Malachi.Log.Manifest.trusted/2`): a copy
+  # that is caught up, cut or rewritten is scanned again and cached again. It goes through a temporary file and
+  # a rename, so a reader never sees half of one, and without an fsync, since losing it costs one scan. The scrub
+  # does not judge it: it checks only the manifest of a file its own store sealed (`Malachi.Storage.ElixirStore`).
   defp cache_manifest(directory, base_offset, log_path, counts) do
-    with {:ok, %{size: size}} when size == counts.bytes <- File.stat(log_path) do
+    id = segment_id_for(base_offset)
+
+    with {:ok, %{size: size}} <- File.stat(log_path) do
       manifest = %Manifest{
         format: counts.format,
         record_count: counts.records,
         logical_bytes: counts.logical_bytes,
         logical_hash: counts.logical_hash,
-        stored_bytes: counts.bytes
+        stored_bytes: size
       }
 
-      File.write(SegmentFiles.path(directory, segment_id_for(base_offset), :manifest), Manifest.encode(manifest))
+      temporary = SegmentFiles.path(directory, id, :manifest_cache)
+
+      with :ok <- File.write(temporary, Manifest.encode(manifest)) do
+        File.rename(temporary, SegmentFiles.path(directory, id, :manifest))
+      end
     end
   end
 

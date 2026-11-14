@@ -159,4 +159,66 @@ defmodule Malachi.Log.ManifestTest do
       assert {:ok, %{records: 2}} = ElixirStore.verify(dir, "s", [])
     end
   end
+
+  describe "the manifest a probe caches on a copy its own store never sealed" do
+    # A follower's copy: written as a batch segment, never sealed by its store, so no marker and no manifest.
+    defp follower_copy(dir, values, opts \\ []) do
+      {:ok, store} = ElixirStore.open(dir, SegmentFiles.id(0), [format: :batch] ++ opts)
+      {:ok, store, _, _} = ElixirStore.append(store, Enum.map(values, &Record.new(&1, timestamp: 1)))
+      {:ok, store} = ElixirStore.sync(store)
+      store
+    end
+
+    defp logical(dir), do: Malachi.Log.directory_logical_bytes(dir, [])
+    defp manifest_path(dir), do: SegmentFiles.path(dir, SegmentFiles.id(0), :manifest)
+
+    test "a copy that kept its preallocated tail is cached too, and then answered without a scan", %{tmp_dir: dir} do
+      # A crash leaves the tail: the store trims it only when it seals or closes.
+      store = follower_copy(dir, ~w(a b c), prealloc_bytes: 8192)
+      log = SegmentFiles.log_path(dir, 0)
+      assert File.stat!(log).size == 8192
+      expected = ElixirStore.logical_bytes(store)
+
+      assert logical(dir) == {:ok, expected}
+      assert {:ok, %Manifest{stored_bytes: 8192, logical_bytes: ^expected}} = Manifest.read(manifest_path(dir))
+      refute File.exists?(SegmentFiles.path(dir, SegmentFiles.id(0), :manifest_cache))
+
+      # Answered from the cache: the frames are not read again while the size holds.
+      File.write!(log, :binary.copy(<<0xAB>>, 8192))
+      assert logical(dir) == {:ok, expected}
+    end
+
+    test "a copy that grows after it was cached is scanned and cached again", %{tmp_dir: dir} do
+      store = follower_copy(dir, ~w(a))
+      first = ElixirStore.logical_bytes(store)
+      assert logical(dir) == {:ok, first}
+
+      {:ok, store, _, _} = ElixirStore.append(store, [Record.new("b", timestamp: 1)])
+      {:ok, store} = ElixirStore.sync(store)
+      grown = ElixirStore.logical_bytes(store)
+      assert grown > first
+
+      assert logical(dir) == {:ok, grown}
+      assert {:ok, %Manifest{logical_bytes: ^grown}} = Manifest.read(manifest_path(dir))
+    end
+
+    test "the scrub does not judge a cache: a stale or torn one on an unsealed copy is not damage", %{tmp_dir: dir} do
+      store = follower_copy(dir, ~w(a b))
+      :ok = ElixirStore.close(store)
+      assert logical(dir) == {:ok, ElixirStore.logical_bytes(store)}
+
+      # Stale: what a catch-up leaves behind before the next probe.
+      {:ok, cached} = Manifest.read(manifest_path(dir))
+      File.write!(manifest_path(dir), Manifest.encode(%{cached | record_count: 1}))
+      assert {:ok, %{records: 2}} = ElixirStore.verify(dir, SegmentFiles.id(0), [])
+
+      # Torn: what a power loss can leave of an unsynced write.
+      File.write!(manifest_path(dir), <<>>)
+      assert {:ok, %{records: 2}} = ElixirStore.verify(dir, SegmentFiles.id(0), [])
+
+      # And the next probe replaces it with a good one.
+      assert logical(dir) == {:ok, ElixirStore.logical_bytes(store)}
+      assert {:ok, %Manifest{record_count: 2}} = Manifest.read(manifest_path(dir))
+    end
+  end
 end

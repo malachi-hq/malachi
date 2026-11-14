@@ -743,7 +743,16 @@ defmodule Malachi.Storage.ElixirStore do
   # The manifest is derived from the file like the index, so it is checked the same way: against a scan.
   # Absent is fine (a file sealed before manifests, or not sealed at all); present, every number it
   # carries must be what the scan just found, or it is reported for a local rewrite.
+  #
+  # Only a file its own store sealed carries a manifest that vouches for it (`seal/1` writes the manifest, then
+  # the marker). Any other manifest is a cache a probe left on a copy it measured (`Malachi.Log`), believed
+  # only while the file keeps the size it recorded and rewritten by the next scan, so it is not this check's to
+  # judge: a cache that went stale as the copy was caught up, or that a power loss left torn, is not damage.
   defp verify_manifest(segment, counts) do
+    if File.exists?(Segment.seal_marker_path(segment)), do: verify_sealed_manifest(segment, counts), else: {:ok, counts}
+  end
+
+  defp verify_sealed_manifest(segment, counts) do
     manifest_path = manifest_path(segment)
 
     case Manifest.read(manifest_path) do

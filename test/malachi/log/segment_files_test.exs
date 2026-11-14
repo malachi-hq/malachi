@@ -19,13 +19,16 @@ defmodule Malachi.Log.SegmentFilesTest do
       assert SegmentFiles.path("/d", id, :index) == "/d/#{id}.idx"
       assert SegmentFiles.path("/d", id, :seal_marker) == "/d/#{id}.sealed"
       assert SegmentFiles.path("/d", id, :manifest) == "/d/#{id}.manifest"
+      assert SegmentFiles.path("/d", id, :manifest_cache) == "/d/#{id}.manifest.tmp"
       assert SegmentFiles.path("/d", id, :rewrite) == "/d/#{id}.log.rewrite"
       assert SegmentFiles.log_path("/d", 7) == "/d/#{id}.log"
     end
 
     test "the data file is removed last" do
       assert List.last(SegmentFiles.removal_order()) == :log
-      assert Enum.sort(SegmentFiles.removal_order()) == Enum.sort([:log, :index, :seal_marker, :manifest, :rewrite])
+
+      assert Enum.sort(SegmentFiles.removal_order()) ==
+               Enum.sort([:log, :index, :seal_marker, :manifest, :manifest_cache, :rewrite])
     end
   end
 

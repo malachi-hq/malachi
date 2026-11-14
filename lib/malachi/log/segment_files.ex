@@ -3,8 +3,9 @@ defmodule Malachi.Log.SegmentFiles do
   The one place that knows how a segment's files are named on disk.
 
   A log directory holds, per segment, a data file (`<id>.log`) and its sidecars: the sparse index
-  (`<id>.idx`), the per-file seal marker (`<id>.sealed`), the manifest (`<id>.manifest`) and, only while a
-  truncation rewrites the file, `<id>.log.rewrite`. The id is the segment's base offset, zero padded to
+  (`<id>.idx`), the per-file seal marker (`<id>.sealed`), the manifest (`<id>.manifest`) and, only while one
+  is being written, a temporary file for a cached manifest (`<id>.manifest.tmp`) or a truncation's rewrite
+  (`<id>.log.rewrite`). The id is the segment's base offset, zero padded to
   20 digits, so names sort in offset order.
 
   Every reader that lists or builds these names goes through here: the log, the replication server, the
@@ -20,7 +21,7 @@ defmodule Malachi.Log.SegmentFiles do
   @log_name ~r/\A(\d{20})\.log\z/
 
   @typedoc "What a path is for."
-  @type kind :: :log | :index | :seal_marker | :manifest | :rewrite
+  @type kind :: :log | :index | :seal_marker | :manifest | :manifest_cache | :rewrite
 
   @doc "The id of the segment that starts at `base_offset`: the offset, zero padded to #{@id_width} digits."
   @spec id(non_neg_integer()) :: String.t()
@@ -43,7 +44,7 @@ defmodule Malachi.Log.SegmentFiles do
   and then failing on a sidecar would hide the segment from every later pass while its leftovers stay.
   """
   @spec removal_order() :: [kind()]
-  def removal_order, do: [:rewrite, :manifest, :seal_marker, :index, :log]
+  def removal_order, do: [:rewrite, :manifest_cache, :manifest, :seal_marker, :index, :log]
 
   @doc "The base offset named by a data file name, or `:error` for any other name."
   @spec base_offset(String.t()) :: {:ok, non_neg_integer()} | :error
@@ -94,5 +95,6 @@ defmodule Malachi.Log.SegmentFiles do
   defp extension(:index), do: ".idx"
   defp extension(:seal_marker), do: ".sealed"
   defp extension(:manifest), do: ".manifest"
+  defp extension(:manifest_cache), do: ".manifest.tmp"
   defp extension(:rewrite), do: ".log.rewrite"
 end
