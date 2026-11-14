@@ -69,12 +69,17 @@ defmodule Malachi.AdminCall do
   @doc """
   Like `audit/6`, for an entry the caller must not act without: it answers `:ok` only once the entry is
   written out (`Malachi.AuditLog.log_event_durably/6`), and `{:error, :audit_unavailable}` when the audit
-  log is not running, does not answer within `timeout`, or fails while writing it.
+  log is not running, does not answer within `timeout`, fails while writing it, or, with file output,
+  has no file to write it to.
   """
   @spec audit_durably(atom(), actor(), String.t(), result, map(), timeout()) :: :ok | {:error, :audit_unavailable}
   def audit_durably(event, actor, action, result, metadata, timeout \\ 5_000) do
     {status, metadata} = entry(result, metadata, &reason_string/1)
-    AuditLog.log_event_durably(event, %{username: actor}, action, status, metadata, timeout)
+
+    case AuditLog.log_event_durably(event, %{username: actor}, action, status, metadata, timeout) do
+      :ok -> :ok
+      {:error, _not_written} -> {:error, :audit_unavailable}
+    end
   catch
     :exit, _reason -> {:error, :audit_unavailable}
   end

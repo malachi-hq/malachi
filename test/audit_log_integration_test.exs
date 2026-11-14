@@ -33,6 +33,11 @@ defmodule Malachi.AuditLogIntegrationTest do
       Application.put_env(:malachi, :audit_log_max_size_mb, original_max_size || 1)
       File.rm(@test_log_file)
 
+      # Always give the next modules a log started from the restored configuration. A test that leaves
+      # its own log running (one with a 1 KB limit on a file removed above, say) would otherwise crash
+      # on its next rotation, losing the ETS tables other modules read.
+      _ = Supervisor.terminate_child(Malachi.Supervisor, Malachi.AuditLog)
+
       # Ensure AuditLog is running for subsequent tests.
       # Tests in this file use Supervisor.terminate_child which prevents
       # automatic restart. Without this, all tests in other files that
@@ -197,6 +202,54 @@ defmodule Malachi.AuditLogIntegrationTest do
       assert content =~ "DSR-ROTATED"
       assert byte_size(content) < 2048
       for line <- String.split(content, "\n", trim: true), do: assert({:ok, _} = Jason.decode(line))
+    end
+  end
+
+  describe "durable events refused or ordered (#308)" do
+    test "with file output and no file to write to, a durable event is refused, not answered :ok" do
+      Application.put_env(:malachi, :audit_log_output, :file)
+      # a directory under a regular file can never be created
+      Application.put_env(:malachi, :audit_log_file, "/dev/null/malachi/audit.log")
+      _pid = restart_audit_log()
+
+      assert Malachi.AuditLog.log_event_durably(:purge_request_recorded, %{username: "u"}, "r", :success, %{}) ==
+               {:error, :no_audit_file}
+
+      assert Malachi.AdminCall.audit_durably(:purge_request_recorded, "u", "r", :ok, %{}) ==
+               {:error, :audit_unavailable}
+    end
+
+    test "with memory-only output there is no file to answer for, so a durable event is :ok" do
+      Application.put_env(:malachi, :audit_log_output, :ets_only)
+      _pid = restart_audit_log()
+
+      assert Malachi.AuditLog.log_event_durably(:purge_request_recorded, %{username: "u"}, "r", :success, %{}) == :ok
+    end
+
+    test "an event cast after a durable call is not written before it" do
+      Application.put_env(:malachi, :audit_log_output, :file)
+      Application.put_env(:malachi, :audit_log_file, @test_log_file)
+      _pid = restart_audit_log()
+
+      :ok = :sys.suspend(Malachi.AuditLog)
+
+      durable =
+        Task.async(fn ->
+          Malachi.AuditLog.log_event_durably(:purge_request_recorded, %{username: "first"}, "r", :success, %{})
+        end)
+
+      # the call is in the mailbox before the cast below
+      Process.sleep(50)
+      Malachi.AuditLog.log_event(:topic_purged, %{username: "second"}, "p", :failure, %{})
+      :ok = :sys.resume(Malachi.AuditLog)
+
+      assert Task.await(durable) == :ok
+      :ok = Malachi.AuditLog.flush()
+
+      content = File.read!(@test_log_file)
+      {first, _} = :binary.match(content, "\"first\"")
+      {second, _} = :binary.match(content, "\"second\"")
+      assert first < second
     end
   end
 
