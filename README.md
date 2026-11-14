@@ -345,6 +345,7 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | `MALACHI_DASHBOARD_PORT` | 4041 | Dashboard port |
 | `MALACHI_CONSOLE_PORT` | 4042 | Operator console port |
 | `MALACHI_CONSOLE_ENABLED` | true | `false` starts no console listener |
+| `MALACHI_CONSOLE_SAMPLE_MS` | 1000 | How old a sample of costly state the console API reads may be before it is taken again |
 | `MALACHI_LOCALE` | en_US | Language (en_US, pt_BR) |
 | `MALACHI_ADMIN_PASS` | admin123 | Admin password |
 | `MALACHI_PRODUCER_PASS` | producer123 | Producer password |

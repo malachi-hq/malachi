@@ -725,6 +725,24 @@ defmodule Malachi.MetadataTest do
     end
   end
 
+  describe "broker_ref_string/1" do
+    test "a replica is named by its node, a single node's pid included, never as an inspected pid" do
+      assert Metadata.broker_ref_string({Malachi.LogReplication, :"malachi@10.0.0.1"}) == "malachi@10.0.0.1"
+      assert Metadata.broker_ref_string(self()) == Atom.to_string(node())
+      assert Metadata.broker_ref_string(:repl) == "repl"
+      assert Metadata.broker_ref_string(nil) == nil
+      refute Metadata.broker_ref_string(self()) =~ "#PID"
+    end
+
+    test "the topic drill-down names a pid replica set by its node" do
+      {state, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "pids", 4})
+      {state, :ok} = Metadata.apply(state, {:register_segment, root, {root, 0}, [self()], 0})
+      name = Atom.to_string(node())
+
+      assert %{ranges: [%{segments: [%{primary: ^name, replica_set: [^name]}]}]} = Metadata.topic_detail(state, "pids")
+    end
+  end
+
   describe "topic_detail/2" do
     test "returns the topic's ranges (by seq), each with its segments (by start_offset)" do
       {state, left_id} = events_with_segments()

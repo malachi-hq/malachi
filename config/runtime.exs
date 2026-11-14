@@ -353,6 +353,15 @@ if config_env() != :test do
     console_port: String.to_integer(System.get_env("MALACHI_CONSOLE_PORT") || "4042"),
     # Off starts no console listener; the dashboard and the broker are unaffected either way.
     console_enabled: System.get_env("MALACHI_CONSOLE_ENABLED") != "false",
+    # How old a sample of costly state the console reads may be before it is taken again
+    # (`Malachi.Console.Sampler`): the most each such read costs is one per interval, however many look.
+    console_sample_ms:
+      Malachi.Config.checked(
+        parse_int.("MALACHI_CONSOLE_SAMPLE_MS", 1_000),
+        :console_sample_ms,
+        1_000,
+        &(is_integer(&1) and &1 > 0)
+      ),
     # Rate limiting configuration
     auth_rate_limit: parse_int.("MALACHI_AUTH_RATE_LIMIT", 10),
     auth_rate_window_ms: parse_int.("MALACHI_AUTH_RATE_WINDOW_MS", 60_000),

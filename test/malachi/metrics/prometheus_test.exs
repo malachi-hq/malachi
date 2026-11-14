@@ -362,4 +362,36 @@ defmodule Malachi.Metrics.PrometheusTest do
       assert render([]) =~ "# HELP malachi_storage_flush_duration_seconds_created Unix time the flush latency histogram"
     end
   end
+
+  describe "machine versions" do
+    defp member(machine, member, effective, supported \\ 2),
+      do: %{machine: machine, member: member, effective: effective, supported: supported, stuck: effective > supported}
+
+    defp render_versions(versions) do
+      MetricsFixtures.system()
+      |> Prometheus.export([], flush(), Prometheus.empty_retention(), versions)
+      |> IO.iodata_to_binary()
+    end
+
+    test "one series per machine, the worst member deciding, and none without members" do
+      out =
+        render_versions([
+          member("metadata", "vnode_1", 2),
+          member("metadata", "vnode_2", 3),
+          member("ring", "ring", 2)
+        ])
+
+      assert out =~ ~s(malachi_ra_machine_version{machine="metadata",kind="effective"} 3\n)
+      assert out =~ ~s(malachi_ra_machine_version{machine="metadata",kind="supported"} 2\n)
+      assert out =~ ~s(malachi_ra_machine_version{machine="ring",kind="effective"} 2\n)
+      assert out =~ ~s(malachi_ra_machine_version_stuck{machine="metadata"} 1\n)
+      assert out =~ ~s(malachi_ra_machine_version_stuck{machine="ring"} 0\n)
+      assert out =~ "# TYPE malachi_ra_machine_version gauge"
+      # one series per machine, never per member
+      refute out =~ "vnode_1"
+
+      refute render_versions([]) =~ "malachi_ra_machine_version"
+      refute render([]) =~ "malachi_ra_machine_version"
+    end
+  end
 end

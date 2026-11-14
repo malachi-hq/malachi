@@ -32,6 +32,11 @@ answers `503` as described below.
   every console request answers `503` saying the console was not built into the release.
 - **Switch it off** with `MALACHI_CONSOLE_ENABLED=false`, which starts no listener at all, for a node run
   headless against a console served elsewhere.
+- **Reads of costly state are sampled.** The read API under `/api/v1` takes what it reads from processes
+  that serve clients (the broker's metadata, the membership's gossip loop, the ring and lease leaders) at
+  most once per `MALACHI_CONSOLE_SAMPLE_MS` (1000 by default) on each node, however many operators are
+  looking, and nothing at all while nobody is. Each answer carries `sampled_at` and says when it is a stale
+  sample, so a slow read shows as an old value rather than a hung page.
 - **A port it cannot open does not stop the broker.** The error is logged and the node runs without a
   console until the port is freed and the node restarts.
 - **Plain HTTP only, for now.** TLS for the console is #70. Put it behind a TLS-terminating proxy, like

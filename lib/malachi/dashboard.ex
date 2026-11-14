@@ -16,6 +16,7 @@ defmodule Malachi.Dashboard do
   alias Malachi.BrokerServer
   alias Malachi.Cluster.Policy
   alias Malachi.Console.Access
+  alias Malachi.Console.Reads
   alias Malachi.Dashboard.SecurityHeaders
   alias Malachi.HTTP.Limits
   alias Malachi.HTTP.Problem
@@ -788,7 +789,12 @@ defmodule Malachi.Dashboard do
   defp serve_prometheus(socket, request_origin) do
     text =
       Metrics.get_system_metrics()
-      |> Prometheus.export(topics_overview(), Metrics.storage_flush_histogram(), Metrics.retention_snapshot())
+      |> Prometheus.export(
+        topics_overview(),
+        Metrics.storage_flush_histogram(),
+        Metrics.retention_snapshot(),
+        Reads.machine_versions()
+      )
       |> IO.iodata_to_binary()
 
     headers = [{"Content-Type", Prometheus.content_type()}, {"Cache-Control", "no-cache"}]

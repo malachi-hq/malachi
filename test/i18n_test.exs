@@ -2,6 +2,7 @@ defmodule Malachi.I18nTest do
   # async: false because set_locale modifies global Application env
   use ExUnit.Case, async: false
 
+  alias Malachi.HTTP.Problem
   alias Malachi.I18n
 
   doctest Malachi.I18n
@@ -10,6 +11,33 @@ defmodule Malachi.I18nTest do
     original_locale = I18n.locale()
     on_exit(fn -> I18n.set_locale(original_locale) end)
     :ok
+  end
+
+  describe "the interface catalog" do
+    test "every key an /api/v1 response can carry has text in both locales" do
+      for key <- Map.keys(Problem.types()) do
+        assert key in I18n.ui_keys(), "#{key} has no interface text"
+      end
+
+      for key <- I18n.ui_keys(), locale <- I18n.available_locales() do
+        text = I18n.ui_t(key, locale)
+        refute text == key, "#{key} has no #{locale} text"
+        assert String.trim(text) != "", "#{key} is empty in #{locale}"
+      end
+    end
+
+    test "the two locales interpolate the same members" do
+      placeholders = fn text -> ~r/%\{(\w+)\}/ |> Regex.scan(text) |> Enum.map(&List.last/1) |> Enum.sort() end
+
+      for key <- I18n.ui_keys() do
+        assert placeholders.(I18n.ui_t(key, "en_US")) == placeholders.(I18n.ui_t(key, "pt_BR")), key
+      end
+    end
+
+    test "a key the catalog lacks reads as the key, and an unknown locale as English" do
+      assert I18n.ui_t("errors.nothing.here", "pt_BR") == "errors.nothing.here"
+      assert I18n.ui_t("errors.http.not_found", "fr_FR") == I18n.ui_t("errors.http.not_found", "en_US")
+    end
   end
 
   describe "I18n translations" do

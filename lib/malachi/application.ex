@@ -155,6 +155,7 @@ defmodule Malachi.Application do
           {Malachi.TCPAcceptorPool, port},
           {Malachi.Dashboard, dashboard_port}
         ] ++
+        console_read_children() ++
         console_children(
           Application.get_env(:malachi, :console_enabled, true),
           Application.get_env(:malachi, :console_port, 4042)
@@ -162,6 +163,22 @@ defmodule Malachi.Application do
 
     opts = [strategy: :one_for_one, name: Malachi.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  @doc """
+  What answers the console's reads on this node, started whether or not this node serves the console: the
+  sampler its costly reads go through (`Malachi.Console.Sampler`, with the tasks each read runs in) and the
+  stream hub (`Malachi.Console.StreamHub`). A console on another node asks every alive node for its part
+  (`Malachi.Console.Fanout`), so a node with `MALACHI_CONSOLE_ENABLED=false` still has to answer; neither
+  child does any work while nobody asks.
+  """
+  @spec console_read_children() :: [Supervisor.child_spec() | {module(), term()} | module()]
+  def console_read_children do
+    [
+      {Task.Supervisor, name: Malachi.Console.SamplerTasks},
+      Malachi.Console.Sampler,
+      Malachi.Console.StreamHub
+    ]
   end
 
   @doc """

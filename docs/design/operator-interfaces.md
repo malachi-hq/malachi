@@ -139,9 +139,10 @@ This section is the vocabulary. Every interface uses these nouns, in these words
 | `next_range_seq` | integer | The per topic range id counter |
 | `policy` | policy name or nil | Storage policy. Nil means the global policy applies |
 
-SOURCE: `GET /metrics` (JSON) and `GET /stream` carry the overview shape per topic: `name`, `state`,
-`policy`, `keyspace_size`, `groups`, `range_count`, `active_range_count`, `segment_count`,
-`active_segment_count`, `total_bytes`, `domain_violations`.
+SOURCE: `GET /api/v1/topics` (#230), paged by name, carries per topic `name`, `state`, `keyspace_size`,
+`policy`, ranges and segments as active of total, `bytes` and `groups`, from the answering node's sampled
+metadata. The legacy `GET /metrics` (JSON) and `GET /stream` also carry `domain_violations`, which the
+read API does not yet.
 
 GAP: there is no way to delete a topic. `{:delete_topic, name}` and `{:seal_topic, name}` exist as
 metadata commands (`metadata.ex:136-137`) with **no caller anywhere in `lib/`**.
@@ -167,11 +168,11 @@ segment**; a merge requires both to be active buddies with no write head.
 **A child range restarts its offsets at zero.** This is the single most dangerous fact for an
 interface to render carelessly, and section 6.4 specifies how it is made visible.
 
-SOURCE: `GET /topic?name=<t>` returns per range `seq`, `key_start`, `key_end`, `state`, `parents`
-(as a **count**, not the ids) and the segment list.
+SOURCE: `GET /api/v1/topics/:topic/ranges` (#230) returns per range `range` (its sequence), `key_start`,
+`key_end`, `state` and `parents`, the sequences of the ranges it was split or merged from, so lineage can
+be drawn. The legacy `GET /topic?name=<t>` still reduces them to a count.
 
-GAP: the parent ids are reduced to a count by the private `range_detail/1`, so lineage cannot be
-drawn. Nothing exposes range size or load. Issue #29 states the harder problem plainly: **there is no
+GAP: nothing exposes range size or load. Issue #29 states the harder problem plainly: **there is no
 per range load signal anywhere**, because telemetry carries only `%{topic}` and the reporter drops
 even that. `BrokerServer.split_range/2` and `merge_ranges/3` exist and are reachable from no
 surface at all (#30).
@@ -209,10 +210,15 @@ whole log `SEALED` marker written with fsync of the directory (`log.ex:186-199`)
 | Short copy | Stored bytes below the sealed `byte_size` (`SelfHealing`) |
 | Ahead of sealed end | #175, a copy holding a record past the sealed length |
 
-GAP: every one of those per copy facts is reachable only by cross node Erlang. `Scrubber.damaged/1`
-(`scrubber.ex:141`), described in its own docstring as a gauge for operators, has no route.
-`ReplicaTracker` instances, which hold the commit offset and each replica's match offset, live in a
-private field with no accessor at all.
+SOURCE: `GET /api/v1/topics/:topic/segments` (#230) reports, per copy, `failed` (the failure latch) and
+`damaged` (`Scrubber.damaged/1`), each node answering for its own copies, and per segment whether it is
+under replicated (`Placement.under_replicated/3`).
+
+GAP: the damaged tail, the integrity verdict, the tail classification, the short copy and the copy ahead
+of the sealed end are still reachable only by cross node Erlang. `fenced_segments/3` can stat a marker or
+fsync a directory, so it is not read on a GET. `ReplicaTracker` instances, which hold the commit offset
+and each replica's match offset, live in a private field with no accessor at all, so a copy's `behind`
+and `ahead` are not served.
 
 ### 3.4 Cursor
 
@@ -251,15 +257,15 @@ token) against a sources list whose shape changes on every split, and the range'
 
 | Object | Module | Reachability today |
 |---|---|---|
-| Membership (SWIM) | `Malachi.Cluster.Membership` | Cross node Erlang only. No node list anywhere |
-| Ring topology | `RingTopology`, version plus placements plus pending split | `mix malachi.ring --show`, tab separated text, no JSON |
-| Lease | `Malachi.Cluster.Lease`, holder plus fence | Cross node Erlang only |
-| Vnodes | `DSRSM`, `ReplicatedDSRSM` | Only through `mix malachi.ring` |
-| Machine version | `MachineVersion`, `@code_version 1`, six machines | `version_status/1`, cross node only. The `[:malachi, :ra, :machine_version]` event feeds **no metric** |
-| Format marker | `malachi.format`, `format=` / `written_by=` / `requires=` | Boot log only |
+| Membership (SWIM) | `Malachi.Cluster.Membership` | `GET /api/v1/cluster` (#230): every member with status, incarnation, attributes, capabilities, advertised address |
+| Ring topology | `RingTopology`, version plus placements plus pending split | `GET /api/v1/cluster` (version, fence, vnode count, pending split) and `GET /api/v1/ring/vnodes`; also `mix malachi.ring --show` |
+| Lease | `Malachi.Cluster.Lease`, holder plus fence | `GET /api/v1/cluster` |
+| Vnodes | `DSRSM`, `ReplicatedDSRSM` | `GET /api/v1/ring/vnodes`, with the nodes holding each |
+| Machine version | `MachineVersion`, eight machines | `GET /api/v1/cluster`, per member on every node (read from `ra`'s counters), and the Prometheus gauges `malachi_ra_machine_version{machine,kind}` and `malachi_ra_machine_version_stuck{machine}` |
+| Format marker | `malachi.format`, `format=` / `written_by=` / `requires=` | `GET /api/v1/cluster`, per node |
 
-The six versioned Raft machines are metadata, lease, ring, users, lockouts and ACLs. Every command
-in all six was introduced at version 0 and the code version is 1.
+The eight versioned Raft machines are metadata, ring, lease, storage policies, cluster flags, users,
+lockouts and ACLs.
 
 ### 3.7 Kafka to Malachi, and what does not translate
 
@@ -502,8 +508,12 @@ Panels: produce and consume rate over the last hour; storage flush latency p50, 
 `system.storage_flush`, which are **the only precomputed latency numbers the server has**; disk by
 topic as a treemap; and the signal summary.
 
-SOURCE: `GET /metrics` JSON and `GET /stream` cover the rates, the flush percentiles and the topic
-totals. GAP: the node count, the health score and the signal summary.
+SOURCE (#230): `GET /api/v1/cluster` gives the nodes alive of total; `GET /api/v1/topics` the topic,
+range and segment totals and bytes; `GET /api/v1/metrics/history` the produce and consume counters and the
+flush p50, p99 and p999 over the last five minutes per node, from which the rates are the differences
+between points, with the flush count for the panel's footer; and `GET /api/v1/stream` the same series and
+topic totals as deltas. GAP: the failure tolerance under the node count, the health score, the signal
+summary, and the flush panel's maximum.
 
 ### 6.3 Topics
 
@@ -516,9 +526,13 @@ The column is omitted rather than filled with an expensive scan or a wrong numbe
 
 Detail tabs: Overview, Ranges, Segments, Groups, Retention, ACLs, Records, Produce.
 
-SOURCE: the overview fields listed in 3.1, and `GET /topic?name=` for ranges and segments. Note that
-`/topic` has **no paging**, and returned nineteen segments in one response for a one gigabyte topic
-on the dev node; a topic with thousands of segments returns them all. GAP: a paged segment endpoint.
+SOURCE (#230): `GET /api/v1/topics` for the list, `GET /api/v1/topics/:topic/ranges` and
+`GET /api/v1/topics/:topic/segments` for the detail, every one paged by token. The legacy `/topic` has
+**no paging** and returned nineteen segments in one response for a one gigabyte topic on the dev node.
+The page size was measured on Linux over 5000 segments of three replicas: building and encoding a page
+costs about 8.8 µs and 500 bytes per segment with no knee, about 1 ms and 50 KB for the default of 100,
+and about 9 ms (p99 16.5 ms) and 500 KB for the maximum of 1000. GAP: the domain violations column on this
+route (it is in the Prometheus series and the legacy JSON), and activity.
 
 ### 6.4 Ranges: the keyspace map
 
@@ -553,8 +567,8 @@ rail marks the reset on every child edge.
 Pixelation happens **server side**, in Elixir, and the browser receives a small matrix. TiDB splits
 the work this way for the same reason.
 
-SOURCE: `key_start`, `key_end`, `state` and a parent count. GAP: everything else. The parent ids, the
-range size, and above all the per range load signal, which #29 records as not existing at all. The
+SOURCE: `key_start`, `key_end`, `state` and the parent sequences (`GET /api/v1/topics/:topic/ranges`,
+#230). GAP: everything else. The range size, and above all the per range load signal, which #29 records as not existing at all. The
 heatmap is specified here and **cannot be built until that signal exists**; it is the largest single
 item in the API gap list.
 
@@ -578,8 +592,14 @@ The seek control is a five option radio group, copied from Kinesis shard iterato
 resume options: earliest, latest, at timestamp, at cursor, after cursor. **No free text numeric
 field anywhere**, which enforces the cursor contract in the interface itself.
 
-SOURCE: the list of group names per topic, and nothing else. GAP: members, assignment, generation,
-committed positions, and every one of the four numbers above.
+SOURCE (#230): `GET /api/v1/groups` lists every group its coordinator or the control plane knows, with
+the coordinator's node, the generation, the member count, the committed range count and the fence epoch;
+`GET /api/v1/groups/:group?topic=` adds each member with how long it has been silent and its ranges, and
+each range's committed position (`GroupCoordinator.describe/2` and the metadata's committed offsets). The
+position is served decomposed, as `start` or a source index and offset, not as the cursor token of 3.4,
+which a broker mints for its range (#232 settles the token on the read API). GAP: the four numbers above:
+time lag, records and bytes behind, and headroom, which the API returns as `null` because nothing records
+when a position was committed or measures how far behind it is.
 
 ### 6.6 Segments and copies
 
@@ -616,10 +636,13 @@ bug report. Grafana's distinction decides the encoding per screen: a state timel
 consecutive values answers "how long was this copy in this state", and a status history that never
 merges answers "how did each scrub pass turn out". Both exist, on different screens.
 
-SOURCE: the sealed segment list with `start_offset`, `length`, `byte_size`, `state`, `sealed_at`,
-`primary` and `replica_set`, where primary and replica set arrive as **inspected PID strings** such
-as `"#PID<0.807.0>"`, which is not an operator facing identifier. GAP: node names instead of PIDs,
-and all per copy health.
+SOURCE (#230): `GET /api/v1/topics/:topic/segments`, paged, with `range`, `segment`, `state`,
+`start_offset`, `length`, `byte_size`, `opened_at`, `sealed_at`, `primary` and `replica_set` **as node
+names** (a single node's pid replicas included, which used to arrive as `"#PID<0.807.0>"`), each copy with
+its conditions from the vocabulary above that the cluster can tell today (`active`, `sealed`, `failed`,
+`damaged`, `unknown`), `under_replicated`, and a resolved `health` label and severity. GAP: `fenced`,
+`behind` and `ahead` per copy (3.3), per copy length and digest, rebuild progress, explain placement and
+the lifecycle timeline.
 
 ### 6.7 Records
 
@@ -739,15 +762,22 @@ already knows the screen.
 
 **The version table is inverted**, the way `nodetool describecluster` does it: group by version and
 list the nodes, with a separate unreachable bucket, so divergence is a one glance count of groups.
-Six rows, one per state machine.
+Eight rows, one per state machine.
 
 **Upgrade** follows Consul's autopilot model: a named status from a small ordered set, members
 bucketed by version as a stacked segmented bar, and current failure tolerance as a first class number
 beside it, so the operator sees the fault tolerance the upgrade is temporarily consuming.
 
-GAP: every field on this screen. The node list, the ring, the lease, the vnode placement and the
-machine versions are all cross node Erlang only today, and `mix malachi.ring --show` is the sole
-existing read, in tab separated text with no JSON mode.
+SOURCE (#230): `GET /api/v1/cluster` gives each member's SWIM status, incarnation, attributes,
+capabilities and advertised address, and for each alive node that answered its uptime, binary version,
+format marker and the effective and supported machine version of every member it hosts; with the ring
+(version, fence, vnode count, pending split) and the lease (holder, fence, renewal) on a sharded control
+plane, each with the time it was sampled. `GET /api/v1/ring/vnodes` pages the vnodes with the nodes
+holding each. A node that does not answer, or runs a release without the read, is named rather than left
+out. GAP: segments held and disk per node (vnodes per node the client counts from `/ring/vnodes`), the
+leader, term, commit index and unreachable members of each state machine (the API serves only its
+versions), the compatibility page's feature flag states, the upgrade status and failure tolerance, and
+the rollback floor sentence, which needs the oldest binary the format markers still allow.
 
 ### 6.8.1 Producers
 
@@ -763,12 +793,14 @@ unbounded string in front of an operator. NorthGuard keeps track of its clients 
 management layer (its Conductor); here the node a producer is connected to answers for it, from the
 connection that holds the stream (`Malachi.ProducerDirectory`).
 
-SOURCE: `GET /api/v1/producers` (row 14 of table 10.3), the streams of the node that answers, paged with
-a page token, with a total that is a lower bound when a connection did not answer within the listing's
-bound and `complete: false` on a walk that may have missed streams for that reason; and the
-Prometheus series `malachi_producer_streams_total{event}` and `malachi_producer_streams_open`. GAP: the
-whole cluster's streams in one listing, which is each node's listing gathered across nodes, and
-per-stream rates, which the connection would have to count.
+SOURCE: `GET /api/v1/producers` (row 14 of table 10.3), the streams of every alive node (#230 gathers each
+node's listing), paged with a page token, each naming the node its producer is connected to, with a total
+that is a lower bound when a node or a connection did not answer within its bound and `complete: false`
+on a walk that may have missed streams for that reason; and the Prometheus series
+`malachi_producer_streams_total{event}` and `malachi_producer_streams_open`. GAP: per-stream rates, which
+the connection would have to count; the stream's principal, codec and compression ratio; rejects by
+reason; the granted window against the requested one and why it shrank; and the per node panel the
+design system shows (group commit queue, parked records, replication lag).
 
 ### 6.9 Signals
 
@@ -786,7 +818,7 @@ permanently and meaninglessly here.
 | Replicas in one failure domain | Warning | `malachi_domain_violations{topic}` |
 | Consumer lost data to retention | Warning | `malachi_retention_skips_total{origin="cursor"}` |
 | Retention sweep not running | Warning | `malachi_retention_sweep_duration_seconds_count` flat on every node |
-| Control plane version stuck | Warning | `[:malachi, :ra, :machine_version]` with `stuck: true` |
+| Control plane version stuck | Warning | `malachi_ra_machine_version_stuck{machine}` (#230) |
 | Rollback floor above this binary | Warning | `malachi.format` |
 | Vnode without coordinators | Warning | #217 |
 | Unexpected messages rising | Info | `malachi_unexpected_messages_total{server,kind}` |
@@ -843,9 +875,13 @@ read the cluster's operational state. This landed with #228: `Malachi.Auth.Conso
 roles, `Malachi.Console.Access` holds the one route table both endpoints read, and `GET /api/v1/me`
 reports the role and its capabilities.
 
-SOURCE: `GET /users` (with each user's console role), `PUT /users/:u/role`, `GET /users/:u/acls`, and
-the counters. GAP: `AclStore.list_all/0` has no surface, sessions and lockouts expose only a count, and a
-user's `created_at` and `updated_at` are never returned by any of the three existing surfaces.
+SOURCE: `GET /users` (with each user's console role), `PUT /users/:u/role`, `GET /users/:u/acls`, the
+counters, and, at the `admin` role (#230), `GET /api/v1/sessions` (every node's active sessions, each
+named by its digest and never by any part of its token) and `GET /api/v1/lockouts` (the cluster's locked
+accounts). GAP: `AclStore.list_all/0` has no surface, revoking a session and clearing a lockout are
+mutations (#234), a lockout serves when it ends but not when it began, a user's MFA state and last seen
+time are not recorded, and a user's `created_at` and `updated_at` are never returned by any of the three
+existing surfaces.
 
 ### 6.11 States
 
@@ -1140,7 +1176,13 @@ Auth is the console role each route requires (#228, `Malachi.Console.Access.rout
 | `PUT`/`DELETE /policies/:name`, `/topics/:t/policy` | Editor | |
 | `GET /users`, `/users/:u/acls`, `PUT /users/:u/role` | Admin | Full CRUD |
 | `GET /api/v1/me` | Any session | Role, capabilities, permissions, locale, cluster identity |
-| `GET /api/v1/producers` | Viewer | The node's open producer streams, paged (6.8.1) |
+| `GET /api/v1/producers` | Viewer | The cluster's open producer streams, paged (6.8.1) |
+| `GET /api/v1/cluster`, `/api/v1/ring/vnodes` | Viewer | Nodes, ring, lease, machine versions, format markers; the vnodes, paged (6.8) |
+| `GET /api/v1/topics`, `/topics/:t/ranges`, `/topics/:t/segments` | Viewer | Topics, ranges and segments with per copy health, paged (6.3, 6.6) |
+| `GET /api/v1/groups`, `/groups/:g?topic=` | Viewer | Consumer groups, members, assignment, committed positions (6.5) |
+| `GET /api/v1/metrics/history` | Viewer | Per node per second series, as columns (6.2) |
+| `GET /api/v1/stream` | Viewer | SSE: overview deltas with resumable ids (10.5) |
+| `GET /api/v1/sessions`, `/api/v1/lockouts` | Admin | Active sessions by digest, locked accounts (6.10) |
 | `GET /health`, `/ready` | Public | |
 
 ### 10.2 The rate limiter, which blocks everything else
@@ -1169,22 +1211,57 @@ Pagination follows AIP-158 literally: an opaque, non parseable page token, an em
 Elasticsearch's contract, `{count, relation: "eq" | "gte"}`, rendered as `10,000+` when the relation
 is `gte`. **No page numbers, no "N of M", and no scrollbar proportional to the dataset.**
 
+Two more members recur, and the client renders both (#230):
+
+- **A read that each node holds for itself is gathered from every alive node** (`Malachi.Console.Fanout`),
+  the way NorthGuard's metadata layer gives "a unified view" of what is beneath it. A node that did not
+  answer is named in `unanswered_nodes` and one whose release lacks the read (a rolling upgrade) in
+  `unsupported_nodes`; either makes a total `gte` and a walk `complete: false`. So does a membership view
+  that could not be read (`"membership": {"state": "unavailable"}`), since the nodes it would have named were
+  not asked.
+- **A read of a process that serves clients is sampled** (`Malachi.Console.Sampler`): the broker's
+  metadata, the membership's gossip loop, the ring and lease leaders, the scrubber, the replication
+  server's failure latch, the group coordinators and the lockout store are read at most once per
+  `MALACHI_CONSOLE_SAMPLE_MS` (1000 by default) per node, however many operators look, and not at all
+  while nobody does. A response from a sample carries `sampled_at`, and `stale: true` when a newer read
+  failed and an older sample is all there is.
+
 | # | Endpoint | Unblocks | Note |
 |---|---|---|---|
 | 1 | Split the rate limit buckets | Everything | Not an endpoint, a precondition |
 | 2 | `GET /api/v1/me` | The whole shell | Role, permissions, locale, cluster identity. **Delivered (#228)** |
 | 3 | `GET /api/v1/records` | 6.7, the largest gap | Seek by the five modes, filter, key lookup. Nothing exists |
 | 4 | `GET /api/v1/ranges/blocked`, `POST .../seal` | 6.4, #91 | #91 already carries the plan, including sealing at an offset the **caller states explicitly**, so a stale view fails instead of discarding more than the operator saw |
-| 5 | `GET /api/v1/cluster` | 6.8 entirely | Nodes, ring, vnodes, lease, six machine versions, format marker |
-| 6 | `GET /api/v1/groups` | 6.5 | Members, assignment, generation, committed positions, the four position numbers |
+| 5 | `GET /api/v1/cluster` | 6.8 entirely | Nodes, ring, vnodes, lease, eight machine versions, format marker. **Delivered (#230)**, with `GET /api/v1/ring/vnodes` |
+| 6 | `GET /api/v1/groups` | 6.5 | Members, assignment, generation, committed positions. **Delivered (#230)**; the four position numbers are a gap |
 | 7 | `GET/PUT /api/v1/topics/:t/retention` | #194 | Zero is a real budget; unset, inherited and zero stay distinct |
 | 8 | `POST /api/v1/ranges/:id/split` | #30 | Plus the range map with sizes |
-| 9 | `GET /api/v1/segments`, `.../copies` | 6.6 | Damaged list, per copy health, `ReplicaTracker` state |
-| 10 | `GET /api/v1/sessions`, `/lockouts` | 6.10 | List and revoke; only counts exist |
-| 11 | `GET /api/v1/metrics/history` | Sparklines without waiting | The data already sits in ETS |
+| 9 | `GET /api/v1/topics/:t/segments` | 6.6 | Damaged and failed copies, under replication. **Delivered (#230)** under the topic; `ReplicaTracker` state is a gap |
+| 10 | `GET /api/v1/sessions`, `/lockouts` | 6.10 | **Listing delivered (#230)**; revoking is #234 |
+| 11 | `GET /api/v1/metrics/history` | Sparklines without waiting | **Delivered (#230)**: columns per node, a closed list of series |
 | 12 | `GET /api/v1/i18n?locale=` | 12.2 | |
 | 13 | Per range load signal | 6.4's heatmap | #29. The hardest one: the measurement does not exist |
-| 14 | `GET /api/v1/producers` | 6.8.1 | The open producer streams of the answering node. **Delivered for one node (#275)**; the cluster wide listing is a gap |
+| 14 | `GET /api/v1/producers` | 6.8.1 | The open producer streams. **Delivered (#275)**, across the cluster since #230 |
+
+#### The design system's screens against the read API
+
+Every field the console prototype in the design system shows (page Malachi Console Prototype) was checked
+against the routes above for #230. The screens of other issues are left out: Records (#232), the mutation
+dialogs (#234), Settings and the shell's controls (#231), and Users, ACLs and Audit, which have their own
+routes. A field the client derives from what a route returns counts as served.
+
+| Screen | Served | GAP |
+|---|---|---|
+| Shell | Cluster name, colour and icon, user, role, locale (`/me`); node count and release (`/cluster`); live state (`/stream`) | |
+| Overview | Nodes alive of total; topics, ranges, segments and bytes; produce and consume rates (from the counters); flush p50, p99, p999 and count; disk by topic | Failure tolerance, health score, signal summary, flush maximum |
+| Topics | Name, state, policy, ranges and segments active of total, bytes, groups, keyspace | Domain violations, the activity sparkline, retention in force, its source and last sweep (#194) |
+| Ranges | Key slice, state, lineage | Blocked ranges (#91), split and merge history, the keyspace map (#29) |
+| Segments | Seg, range, records, bytes, copies, primary by node name, age (from `opened_at` and `sealed_at`), composite health, under replicated and damaged counts, scrub verified per hour (from its counter) | `behind`; per copy records, bytes, tail, digest and the authoritative copy; rebuild progress; explain placement |
+| Consumers | Group, topic, members, generation, a restarted coordinator, positions per range | The cursor token the cursor chip shows (#232), time lag, records behind, headroom |
+| Producers | Open streams; per stream label, topic, node, client address, opened at, sequences, window, in flight | Principal, codec, accepted rate, rejects by reason, shrunk and idle states, the per node window panel |
+| Cluster | Members and SWIM status, attributes, uptime, binary and machine versions, vnodes per node (from `/ring/vnodes`), lease, format marker, effective version | Failure tolerance, leader, term and commit per state machine, segments and disk per node, compatibility, upgrade status |
+| Signals | | The whole screen: no signal route yet |
+| Access (sessions, lockouts) | Principal, address, started, last request; locked principal, reason (from the attempt count), expiry | When a lockout began; MFA and last seen; strict ACL impact |
 
 ### 10.4 Mutations
 
@@ -1204,7 +1281,10 @@ open tabs do not exhaust the six connection per origin limit that HTTP/1.1 impos
 Required corrections to the current stream:
 
 - `id:` on every event, `retry:` set explicitly, and a `:` comment heartbeat every 15 to 30 seconds.
-- Deltas, not a whole snapshot every second.
+  **Delivered (#230)**: `retry: 5000`, and a `: heartbeat` comment after 15 s with nothing else sent.
+- Deltas, not a whole snapshot every second. **Delivered (#230)**: an `overview` event names the system
+  series that changed, the topics that changed or appeared (in full) and the topics that went away; a
+  tick that changed nothing sends nothing.
 - **Before the stream is established, a refusal keeps its HTTP status**: a missing or invalid
   token is a 401 and a missing permission a 403, both `application/problem+json`, because the
   client reads the stream through `fetch` with a Bearer header (section 11), which sees the status
@@ -1216,11 +1296,23 @@ Required corrections to the current stream:
   others, and the client reads it through `fetch` (section 11), which sends nothing back on its own.
   The requirement is that a reconnect lets the server resume every subscribed tail without skipping a
   record that is still stored or replaying one; history retention removed in the meantime arrives as
-  a gap event, below. How it does, what `id:` carries and what the client keeps and sends back, is
-  settled with the stream itself in #230: either the client keeps each tail's cursor and sends them
-  all, or the stream carries a replay id the server maps back to every tail's position.
+  a gap event, below. **Settled in #230: the stream carries a replay id the server maps back.** Every
+  event's `id:` is `<epoch>.<sequence>`, the sequence numbering the node's stream events and the epoch a
+  random name taken when the node's stream hub starts, so an id from before a restart, or from another
+  node, is never taken for a current one. The server keeps the last events in a bounded ring
+  (300 events by default). A reconnect with `Last-Event-ID` inside the ring
+  replays exactly the events after it. One older than the ring is a `gap` event with reason `expired` and
+  `dropped` the exact count lost, and one the server does not recognise a `gap` with reason `unknown` and
+  `dropped: null`; both are followed by a `snapshot` to resynchronise from. A client without an id starts
+  from a `snapshot` whose id is the sequence it is current as of. One id is enough for the overview, and a
+  record tail (#232) puts its position in the events the ring keeps, so the same id resumes it. While no
+  stream is open the node samples nothing, so a client that returns after a quiet period receives what
+  changed during it as one delta.
 - A single sampler broadcasting through `:pg` or a `Registry`, replacing today's per connection
-  `GenServer.call` into `Malachi.LogBroker` on every tick. That call is on the hot produce and
+  `GenServer.call` into `Malachi.LogBroker` on every tick. **Delivered (#230)** as
+  `Malachi.Console.StreamHub`, one per node, sending each event to its subscribers directly; a subscriber
+  that falls 100 events behind drops what is queued and resumes from the ring. The legacy dashboard
+  `/stream` keeps its per connection call until #231 retires the dashboard. That call is on the hot produce and
   consume path, so today every open tab taxes the data plane once a second, and it does so hardest
   during an incident, when the most people are watching.
 
@@ -1405,7 +1497,7 @@ Each phase ends with something an operator can use, and each is a separate pull 
 |---|---|---|
 | **0. Preconditions** | Split the rate limit buckets; fix the `Content-Length` overrun; bound header parsing; `COPY priv priv` in the Dockerfile; pin CI Node to 22.12 or later | The existing dashboard still passes its 120 security tests |
 | **1. Transport** | `Malachi.Console.Endpoint` on Bandit with Plug, on a second port, leaving `dashboard.ex` untouched | Static assets, keep alive, ETag, precompressed `.br` and `.gz`, and the SPA fallback all serve correctly |
-| **2. Read API** | `/api/v1/me`, `/cluster`, `/topics`, `/ranges`, `/segments`, `/groups`, `/metrics/history`, and the corrected stream | The terminal UI could be written against it |
+| **2. Read API** | `/api/v1/me`, `/cluster`, `/topics` with its ranges and segments, `/groups`, `/metrics/history`, and the corrected stream. **Delivered by #228 and #230** | The terminal UI could be written against it |
 | **3. Web console** | Sections 6.1 to 6.3, 6.6, 6.8 to 6.11 | It replaces `/` and the legacy page is deleted |
 | **4. Records** | The read by cursor API and section 6.7 | An operator can find a record without writing a consumer |
 | **5. Terminal UI** | `malachi-tui-core`, then the sections in number order | A single static musl binary ships in the release tarball |
