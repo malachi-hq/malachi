@@ -313,6 +313,77 @@ defmodule Malachi.LogProtocolTest do
     end
   end
 
+  describe "admin legal hold (api keys 36 to 38, #307)" do
+    setup do
+      %{topic: "wire-hold-#{System.unique_integer([:positive])}"}
+    end
+
+    defp set_hold(socket, topic, reason),
+      do: TCPHelper.request(socket, Wire.set_topic_hold_key(), 8, Wire.encode_set_topic_hold_req(topic, reason))
+
+    defp release_hold(socket, topic),
+      do: TCPHelper.request(socket, Wire.release_topic_hold_key(), 9, Wire.encode_topic_hold_topic_req(topic))
+
+    defp get_hold(socket, topic),
+      do: TCPHelper.request(socket, Wire.get_topic_hold_key(), 10, Wire.encode_topic_hold_topic_req(topic))
+
+    test "an admin places, reads and releases a hold; the actor is the session's user", ctx do
+      with_session("admin", "admin123", fn socket ->
+        assert {0, _} = create_topic(socket, ctx.topic)
+        assert {0, payload} = get_hold(socket, ctx.topic)
+        assert Wire.decode_topic_hold_resp(payload) == nil
+
+        assert {0, <<>>} = set_hold(socket, ctx.topic, "case 7")
+        assert {0, payload} = get_hold(socket, ctx.topic)
+        assert %{reason: "case 7", actor: "admin", since_ms: since} = Wire.decode_topic_hold_resp(payload)
+        assert since > 0
+
+        # held: a purge is refused with the hold's reason
+        assert {code, payload} = purge(socket, ctx.topic, {:before, 0})
+        refute ok?(code)
+        assert reason(payload) =~ "legal_hold"
+
+        assert {0, <<>>} = release_hold(socket, ctx.topic)
+        assert {0, payload} = get_hold(socket, ctx.topic)
+        assert Wire.decode_topic_hold_resp(payload) == nil
+      end)
+    end
+
+    test "a refusal comes back as its reason string", ctx do
+      with_session("admin", "admin123", fn socket ->
+        assert {code, payload} = set_hold(socket, ctx.topic, "r")
+        refute ok?(code)
+        assert reason(payload) == "no_such_topic"
+
+        assert {0, _} = create_topic(socket, ctx.topic)
+        assert {code, payload} = release_hold(socket, ctx.topic)
+        refute ok?(code)
+        assert reason(payload) =~ "not_held"
+
+        assert {code, payload} = set_hold(socket, ctx.topic, "a\nb")
+        refute ok?(code)
+        assert reason(payload) =~ "invalid_hold"
+
+        assert {code, payload} = get_hold(socket, "wire-hold-ghost")
+        refute ok?(code)
+        assert reason(payload) == "no_such_topic"
+      end)
+    end
+
+    test "a session without :admin is refused on every hold key", ctx do
+      with_session("producer", "producer123", fn socket ->
+        for {code, payload} <- [
+              set_hold(socket, ctx.topic, "r"),
+              release_hold(socket, ctx.topic),
+              get_hold(socket, ctx.topic)
+            ] do
+          refute ok?(code)
+          assert reason(payload) == "permission_denied"
+        end
+      end)
+    end
+  end
+
   describe "admin storage policies (api keys 17 to 21)" do
     setup do
       suffix = System.unique_integer([:positive])

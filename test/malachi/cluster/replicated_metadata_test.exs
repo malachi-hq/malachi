@@ -172,6 +172,24 @@ defmodule Malachi.Cluster.ReplicatedMetadataTest do
     assert Malachi.Metadata.committed_offsets(cache, "g", "events") == %{}
   end
 
+  test "a legal hold's refusal stays out of a cache that has not seen the hold" do
+    # The hold committed through another node; this cache lags and holds no hold. The log refuses the purge,
+    # the segment delete and the topic delete, and the cache must not apply them either, or this node would
+    # move its readers past held records, or drop what the log kept, until its next re-seed (#307).
+    replicated = start()
+    {{:ok, root}, replicated} = ReplicatedMetadata.command(replicated, {:create_topic, "events", 4})
+    {:ok, replicated} = ReplicatedMetadata.command(replicated, {:register_segment, root, "seg1", [:a], 0})
+    {:ok, replicated} = ReplicatedMetadata.command(replicated, {:seal_segment, "seg1", 10, 100, 1})
+    stale = ReplicatedMetadata.metadata(replicated)
+    {:ok, replicated} = ReplicatedMetadata.command(replicated, {:set_topic_hold, "events", %{reason: "r", actor: "a"}})
+
+    for command <- [{:set_range_starts, "events", %{root => 5}}, {:delete_segment, "seg1"}, {:delete_topic, "events"}] do
+      assert {^stale, {:error, :legal_hold}} =
+               ReplicatedMetadata.apply_command(replicated.server_id, stale, command),
+             inspect(command)
+    end
+  end
+
   test "the cache equals the replicated state (refresh is a no-op for the sole writer)" do
     replicated = start()
     {{:ok, root_id}, replicated} = ReplicatedMetadata.command(replicated, {:create_topic, "events", 4})
@@ -235,6 +253,23 @@ defmodule Malachi.Cluster.ReplicatedMetadataTest do
       {elapsed_us, result} = :timer.tc(fn -> ReplicatedMetadata.apply_command({silent, node()}, cache, command) end)
       assert result == {cache, {:error, :timeout}}, inspect(command)
       assert elapsed_us < 2_000_000, "#{inspect(command)} waited #{div(elapsed_us, 1000)} ms"
+    end
+  end
+
+  test "a legal hold and a topic delete wait for their commit at most 2 s, like every operator command" do
+    silent = :"rm_mute_#{System.unique_integer([:positive])}"
+    {:ok, _pid} = SilentRaMember.start_link(silent)
+    on_exit(fn -> SilentRaMember.stop(silent) end)
+    cache = Metadata.new()
+
+    for command <- [
+          {:set_topic_hold, "t", %{reason: "r", actor: "a"}},
+          {:set_topic_hold, "t", nil},
+          {:delete_topic, "t"}
+        ] do
+      {elapsed_us, result} = :timer.tc(fn -> ReplicatedMetadata.apply_command({silent, node()}, cache, command) end)
+      assert result == {cache, {:error, :timeout}}, inspect(command)
+      assert elapsed_us < 3_000_000, "#{inspect(command)} waited #{div(elapsed_us, 1000)} ms"
     end
   end
 

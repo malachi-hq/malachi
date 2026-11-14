@@ -161,6 +161,61 @@ defmodule Malachi.Cluster.RetentionMultinodeTest do
     assert offsets == length(expired)
   end
 
+  # #307 across real nodes: a held topic keeps every remote copy through a sweep that would expire it, and
+  # releasing the hold lets the next sweep delete the same segments from the same replicas.
+  test "a legal hold keeps the remote copies through a sweep, and the next sweep after release deletes them" do
+    replicas = [start_peer_replica(), start_peer_replica()]
+
+    name = :"retention_hold_broker_#{System.unique_integer([:positive])}"
+    start_supervised!({SkipReporter, name: SkipReporter.name_for(name)})
+    directory = Path.join(System.tmp_dir!(), "#{name}_data")
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    {:ok, broker} =
+      BrokerServer.start_link(directory, name: name, brokers: replicas, replication_factor: 2, segment_max_bytes: 1)
+
+    on_exit(fn -> if Process.alive?(broker), do: BrokerServer.stop(broker) end)
+
+    {:ok, _root} = BrokerServer.create_topic(name, "events", 8)
+
+    for value <- ["v0", "v1", "v2"],
+        do: {:ok, _placements} = BrokerServer.produce(name, "events", [Record.new(value, key: value)])
+
+    [root_id] = BrokerServer.active_range_ids(name, "events")
+    assert eventually(fn -> Enum.count(segments(name, root_id), &(&1.state == :sealed)) >= 2 end)
+    sealed = Enum.filter(segments(name, root_id), &(&1.state == :sealed))
+
+    on_every_replica? = fn segment ->
+      Enum.all?(
+        segment.replica_set,
+        &match?({:ok, [_ | _]}, ReplicationServer.read(&1, segment.id, segment.start_offset, 10))
+      )
+    end
+
+    assert Enum.all?(sealed, on_every_replica?)
+    :ok = BrokerServer.set_topic_hold(name, "events", %{reason: "case 7", actor: "admin"})
+
+    {:ok, coordinator} =
+      RetentionCoordinator.start_link(
+        metadata_source: fn -> BrokerServer.metadata(name) end,
+        expire_segment: &Malachi.Application.expire_segment(&1, name),
+        policy: %{max_age_ms: 0},
+        clock: fn -> System.system_time(:millisecond) + 60_000 end,
+        interval: 3_600_000
+      )
+
+    assert RetentionCoordinator.run_now(coordinator) == []
+    assert Enum.all?(sealed, on_every_replica?)
+
+    :ok = BrokerServer.set_topic_hold(name, "events", nil)
+    expired = RetentionCoordinator.run_now(coordinator)
+    assert Enum.all?(sealed, &(&1.id in expired))
+
+    for segment <- sealed,
+        replica <- segment.replica_set,
+        do: assert(ReplicationServer.read(replica, segment.id, segment.start_offset, 10) == :eof)
+  end
+
   # #197 across real nodes: the sweeping node is not the one producing. Two frontends on this node share
   # one Raft control plane; the segment's replicas, and so its primary, live on the peers. The sweep reads
   # the control plane and asks ITS frontend to roll, which fences the remote primary; the producing

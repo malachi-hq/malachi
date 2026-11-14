@@ -277,6 +277,24 @@ defmodule Malachi.Broker do
   end
 
   @doc """
+  Places a legal hold on `topic` (`request` is `%{reason, actor}`) or releases it (`nil`), through the
+  topic's own vnode (`{:set_topic_hold, topic, request}`, machine version 11, #307). The vnode validates
+  the request and stamps the hold with the log entry's time.
+  """
+  @spec set_topic_hold(t(), Metadata.topic_name(), Metadata.hold_request()) :: {t(), term()}
+  def set_topic_hold(%__MODULE__{} = broker, topic, request) do
+    apply_metadata(broker, {:set_topic_hold, topic, request})
+  end
+
+  @doc """
+  Deletes `topic` with its ranges and segments from the control plane (`{:delete_topic, topic}`); the
+  replicas' directories are reclaimed afterwards by `Malachi.Retention.OrphanSweeper`. A held topic is
+  refused by the vnode itself (`{:error, :legal_hold}`), so no view this frontend holds can get around it.
+  """
+  @spec delete_topic(t(), Metadata.topic_name()) :: {t(), term()}
+  def delete_topic(%__MODULE__{} = broker, topic), do: apply_metadata(broker, {:delete_topic, topic})
+
+  @doc """
   Moves the logical start of ranges of `topic` forward (#198): `starts` maps a range id to the offset no
   reader of it is served below, through the topic's own vnode in one command
   (`{:set_range_starts, topic, starts}`, machine version 9), so the purge is all or nothing.
@@ -325,10 +343,16 @@ defmodule Malachi.Broker do
     end
   end
 
+  # A held topic is refused here, before a point is resolved, so a purge that would move nothing on a held
+  # topic is still a refusal rather than an `{:ok, %{}}` that reads as a purge allowed. The vnode refuses
+  # the command itself as well (`Malachi.Metadata`), which is the check a stale view cannot get around.
   defp purge_view(broker, topic) do
     case DSRSM.get_topic(broker.dsrsm, topic) do
       nil ->
         {:error, :no_such_topic}
+
+      %{legal_hold: _hold} ->
+        {:error, :legal_hold}
 
       _topic ->
         ranges = broker.dsrsm |> DSRSM.ranges_of_topic(topic) |> Map.new(&{&1.id, &1})
@@ -370,6 +394,15 @@ defmodule Malachi.Broker do
     case DSRSM.get_topic(broker.dsrsm, topic) do
       nil -> {:error, :no_such_topic}
       _topic -> {:ok, DSRSM.topic_policy_name(broker.dsrsm, topic)}
+    end
+  end
+
+  @doc "The legal hold on `topic` (`nil` for none), or `{:error, :no_such_topic}`."
+  @spec legal_hold(t(), Metadata.topic_name()) :: {:ok, Metadata.legal_hold() | nil} | {:error, :no_such_topic}
+  def legal_hold(%__MODULE__{} = broker, topic) do
+    case DSRSM.get_topic(broker.dsrsm, topic) do
+      nil -> {:error, :no_such_topic}
+      topic_meta -> {:ok, Map.get(topic_meta, :legal_hold)}
     end
   end
 

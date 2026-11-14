@@ -144,8 +144,9 @@ SOURCE: `GET /api/v1/topics` (#230), paged by name, carries per topic `name`, `s
 metadata. The legacy `GET /metrics` (JSON) and `GET /stream` also carry `domain_violations`, which the
 read API does not yet.
 
-GAP: there is no way to delete a topic. `{:delete_topic, name}` and `{:seal_topic, name}` exist as
-metadata commands (`metadata.ex:136-137`) with **no caller anywhere in `lib/`**.
+GAP: there is no way to delete a topic from a surface. `Malachi.Topics.delete/2` (#307) audits a delete and
+is refused for a topic under a legal hold, but no wire key, CLI or route calls it yet, and
+`{:seal_topic, name}` still has no caller in `lib/`.
 
 ### 3.2 Range
 

@@ -37,7 +37,19 @@ defmodule Malachi.Metadata do
   @type segment_id :: term()
   @type broker :: term()
 
+  @typedoc """
+  A legal hold on a topic (#307): who placed it, why, and when the control plane committed it
+  (`since_ms`, the timestamp the leader wrote into the log entry, so every replica stores the same one).
+  """
+  @type legal_hold :: %{reason: String.t(), actor: String.t(), since_ms: non_neg_integer()}
+
+  @typedoc "What `{:set_topic_hold, topic, request}` asks for: a hold to place, or `nil` to release one."
+  @type hold_request :: %{reason: String.t(), actor: String.t()} | nil
+
+  # A held topic carries `:legal_hold`; one that is not held lacks the key entirely rather than holding
+  # `nil`, so a topic never held has exactly the shape it had before holds existed (`legal_hold/2`).
   @type topic_meta :: %{
+          optional(:legal_hold) => legal_hold(),
           name: topic_name(),
           keyspace_size: pos_integer(),
           state: :active | :sealed,
@@ -162,6 +174,7 @@ defmodule Malachi.Metadata do
           | {:open_group, group(), topic_name()}
           | {:bind_topic_policy, topic_name(), policy_name() | nil}
           | {:set_range_starts, topic_name(), %{range_id() => non_neg_integer()}}
+          | {:set_topic_hold, topic_name(), hold_request()}
           | {:extract_topic, topic_name()}
           | {:insert_topic, topic_export()}
           | {:begin_migration, topic_name()}
@@ -194,7 +207,11 @@ defmodule Malachi.Metadata do
   # 10 adds batch segments (`:format` and `:stored_bytes`, #202). An export is format 10 only when one of its
   # segments is a batch segment, so a topic of record segments still splits while an upgrade holds the
   # control plane below 10.
-  @export_format 10
+  #
+  # 11 adds the legal hold (`:legal_hold` on a topic, #307). A member below 11 would store the field and
+  # never act on it, expiring, purging and deleting a held topic, so an export of a held topic is refused
+  # there. An export of a topic that is not held keeps the lower format.
+  @export_format 11
 
   @behaviour Malachi.Cluster.MachineVersion
 
@@ -244,6 +261,9 @@ defmodule Malachi.Metadata do
       {:bind_topic_policy, 3} => 4,
       # The manual purge (#198): moves the logical start of one or more ranges of a topic forward.
       {:set_range_starts, 3} => 9,
+      # The legal hold (#307): places or releases a hold that keeps a topic's data from retention, purge
+      # and deletion. A member below 11 would store nothing and go on deleting, so it refuses the command.
+      {:set_topic_hold, 3} => 11,
       {:extract_topic, 2} => 0,
       {:insert_topic, 2} => 0,
       {:begin_migration, 2} => 0,
@@ -337,6 +357,7 @@ defmodule Malachi.Metadata do
   def command_target_topic({:delete_topic, name}), do: name
   def command_target_topic({:bind_topic_policy, name, _policy}), do: name
   def command_target_topic({:set_range_starts, name, _starts}), do: name
+  def command_target_topic({:set_topic_hold, name, _request}), do: name
   def command_target_topic({:commit_offset, _group, topic, _offsets}), do: topic
   def command_target_topic({:commit_offset, _group, topic, _offsets, _generation}), do: topic
   def command_target_topic({:open_group, _group, topic}), do: topic
@@ -441,18 +462,27 @@ defmodule Malachi.Metadata do
   def apply(%__MODULE__{} = state, command, at_ms \\ nil) do
     # migration fence (seal-first, à la NorthGuard's range split): a mutating command targeting a topic
     # that is being migrated to another vnode is rejected, so the split's snapshot is never raced.
+    #
+    # legal hold (#307): a command that would remove a held topic's data is refused here, beside the
+    # migration fence, so it reuses the topic the fence already resolved and every other command pays one
+    # tag comparison. Only a v11 command places a hold, so a log written before holds existed replays
+    # exactly as it did.
     case command_topic(state, command) do
       topic when is_binary(topic) ->
-        if Map.has_key?(state.migrating, topic),
-          do: {state, {:error, :migrating}},
-          else: apply_unfenced(state, command, at_ms)
+        cond do
+          Map.has_key?(state.migrating, topic) -> {state, {:error, :migrating}}
+          refused_while_held?(state, command, topic) -> {state, {:error, :legal_hold}}
+          true -> apply_unfenced(state, command, at_ms)
+        end
 
       nil ->
         apply_unfenced(state, command, at_ms)
     end
   end
 
-  # The one command that reads the clock; every other command is a function of the state alone.
+  # The commands that read the clock; every other command is a function of the state alone.
+  defp apply_unfenced(state, {:set_topic_hold, topic, request}, at_ms), do: set_topic_hold(state, topic, request, at_ms)
+
   defp apply_unfenced(state, {:register_segment, range_id, segment_id, replica_set, start_offset}, at_ms),
     do: apply_unfenced(state, {:register_segment, range_id, segment_id, replica_set, start_offset, :record}, at_ms)
 
@@ -481,6 +511,7 @@ defmodule Malachi.Metadata do
   defp command_topic(_state, {:delete_topic, name}), do: name
   defp command_topic(_state, {:bind_topic_policy, name, _policy}), do: name
   defp command_topic(_state, {:set_range_starts, name, _starts}), do: name
+  defp command_topic(_state, {:set_topic_hold, name, _request}), do: name
   defp command_topic(_state, {:commit_offset, _group, topic, _offsets}), do: topic
   defp command_topic(_state, {:commit_offset, _group, topic, _offsets, _generation}), do: topic
   defp command_topic(_state, {:open_group, _group, topic}), do: topic
@@ -1029,6 +1060,97 @@ defmodule Malachi.Metadata do
     end
   end
 
+  # --- legal hold (#307) ---
+
+  # The commands a hold refuses: every one that removes a held topic's data from the control plane.
+  # `:delete_segment` is here although retention never expires a held topic, because a sweep computes
+  # its plan from a read that can predate the hold: refusing the delete is what makes a hold the cluster
+  # acknowledged keep the data from that moment on, whatever a sweep in flight decided earlier.
+  @refused_while_held [:delete_topic, :set_range_starts, :delete_segment]
+
+  # The longest text a hold stores in its reason or actor, in bytes. Both end up in the audit trail and
+  # in log lines; a bound keeps either from carrying a document into every replica's state.
+  @max_hold_text_bytes 1024
+
+  @doc """
+  The legal hold on `topic`, or `nil` when it is not held or is unknown.
+
+  A held topic's data stays: retention expires none of its segments
+  (`Malachi.Cluster.Retention.plan/5`), and the control plane refuses to delete the topic, to delete one
+  of its segments or to move its logical start (`{:error, :legal_hold}`) until the hold is released.
+  """
+  @spec legal_hold(t(), topic_name()) :: legal_hold() | nil
+  def legal_hold(%__MODULE__{} = state, topic) do
+    case Map.get(state.topics, topic) do
+      %{legal_hold: hold} -> hold
+      _not_held_or_unknown -> nil
+    end
+  end
+
+  @doc """
+  Whether `text` is acceptable as a hold's reason or actor: valid UTF-8 of 1 to #{@max_hold_text_bytes}
+  bytes with no control, format or line/paragraph separator character.
+
+  The text is written verbatim into the audit trail and log lines, so a newline (or any character that
+  renders as one, or reorders what follows it) would let a caller forge an entry there.
+
+  ## Examples
+
+      iex> Malachi.Metadata.valid_hold_text?("case 2026-114, retain until released")
+      true
+
+      iex> Malachi.Metadata.valid_hold_text?("line one\\nforged line")
+      false
+
+      iex> Malachi.Metadata.valid_hold_text?("")
+      false
+
+  """
+  @spec valid_hold_text?(term()) :: boolean()
+  def valid_hold_text?(text) when is_binary(text) and byte_size(text) in 1..@max_hold_text_bytes//1,
+    do: String.valid?(text) and not String.match?(text, ~r/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u)
+
+  def valid_hold_text?(_text), do: false
+
+  defp refused_while_held?(state, command, topic),
+    do: elem(command, 0) in @refused_while_held and legal_hold(state, topic) != nil
+
+  defp set_topic_hold(state, topic, request, at_ms) do
+    with {:ok, current} <- fetch_topic(state, topic),
+         {:ok, updated} <- change_hold(current, request, at_ms) do
+      {%{state | topics: Map.put(state.topics, topic, updated)}, :ok}
+    else
+      {:error, _reason} = error -> {state, error}
+    end
+  end
+
+  defp fetch_topic(state, topic) do
+    case Map.fetch(state.topics, topic) do
+      {:ok, current} -> {:ok, current}
+      :error -> {:error, :no_such_topic}
+    end
+  end
+
+  # Releasing removes the key, so a released topic is again exactly the shape of one never held.
+  defp change_hold(current, nil, _at_ms) do
+    if Map.has_key?(current, :legal_hold),
+      do: {:ok, Map.delete(current, :legal_hold)},
+      else: {:error, :not_held}
+  end
+
+  defp change_hold(current, %{reason: reason, actor: actor} = request, at_ms)
+       when map_size(request) == 2 and is_integer(at_ms) and at_ms >= 0 do
+    cond do
+      Map.has_key?(current, :legal_hold) -> {:error, :already_held}
+      not (valid_hold_text?(reason) and valid_hold_text?(actor)) -> {:error, :invalid_hold}
+      true -> {:ok, Map.put(current, :legal_hold, %{reason: reason, actor: actor, since_ms: at_ms})}
+    end
+  end
+
+  # No timestamp from the log entry, or a request of any other shape: nothing every replica could store
+  # identically, so nothing is stored.
+  defp change_hold(_current, _request, _at_ms), do: {:error, :invalid_hold}
+
   # --- migration (vnode split) ---
 
   @doc """
@@ -1052,14 +1174,15 @@ defmodule Malachi.Metadata do
 
         export = %{topic: topic, ranges: ranges, segments: segments, offsets: offsets}
         export = if fences == %{}, do: export, else: Map.put(export, :fences, fences)
-        Map.put(export, :export_format, topic_export_format(ranges, segments, fences))
+        Map.put(export, :export_format, topic_export_format(topic, ranges, segments, fences))
     end
   end
 
   # The lowest format whose reader understands everything this export carries: a member below it would
   # store state it cannot act on (see `@export_format`).
-  defp topic_export_format(ranges, segments, fences) do
+  defp topic_export_format(topic, ranges, segments, fences) do
     cond do
+      Map.has_key?(topic, :legal_hold) -> 11
       Enum.any?(segments, fn {_id, segment} -> segment_format(segment) == :batch end) -> 10
       Enum.any?(ranges, fn {_id, range} -> logical_start(range) > 0 end) -> 9
       fences != %{} -> 8

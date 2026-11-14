@@ -25,6 +25,11 @@ defmodule Malachi.AuditLog do
   - `:topic_policy_bound` - An administrator bound a topic to a storage policy, or detached it
   - `:topic_purged` - An administrator purged a topic up to a point (`Malachi.Purge`): a logical purge,
     recorded with the point asked for and each range's logical start before and after
+  - `:topic_hold_set` - An administrator placed a legal hold on a topic (`Malachi.LegalHold`), recorded with
+    its reason
+  - `:topic_hold_released` - An administrator released a topic's legal hold
+  - `:topic_deleted` - An administrator deleted a topic (`Malachi.Topics.delete/2`); a topic under a legal
+    hold is refused, and the refusal is recorded like any other
   - `:user_role_changed` - An administrator set or removed a user's console role (`Malachi.Auth.set_role/3`)
 
   ## Event Structure

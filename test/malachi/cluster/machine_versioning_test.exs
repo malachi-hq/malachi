@@ -63,10 +63,10 @@ defmodule Malachi.Cluster.MachineVersioningTest do
         # `Malachi.Auth.UserRegistry` introduced the console roles, 6 where `Malachi.Cluster.Policy`
         # introduced `retention.segment_max_age_ms`, 7 where `Malachi.Metadata` made `{:set_segment_replicas, ...}`
         # a compare-and-swap on the expected replica set, 8 where `Malachi.Metadata` introduced the group
-        # fence, 9 where `Malachi.Metadata` introduced the manual purge, and 10 where `Malachi.Metadata`
-        # introduced the batch storage format; each time the others moved with it, paying nothing but a no-op
-        # `{:machine_version, n - 1, n}`.
-        assert unquote(machine).version() == 10
+        # fence, 9 where `Malachi.Metadata` introduced the manual purge, 10 where `Malachi.Metadata`
+        # introduced the batch storage format, and 11 where `Malachi.Metadata` introduced the legal hold; each
+        # time the others moved with it, paying nothing but a no-op `{:machine_version, n - 1, n}`.
+        assert unquote(machine).version() == 11
 
         for version <- 0..unquote(machine).version(),
             do: assert(unquote(machine).which_module(version) == unquote(machine))
@@ -158,9 +158,14 @@ defmodule Malachi.Cluster.MachineVersioningTest do
     export = Metadata.export_topic(state, "events")
     assert export.export_format == 9
 
-    # a batch segment is what the current format, 10, adds
+    # a batch segment is what format 10 adds
     {batch_state, :ok} = Metadata.apply(state, Metadata.register_command(root, {root, 0}, [:a], 1, :batch), 1)
-    assert Metadata.export_topic(batch_state, "events").export_format == Metadata.export_format()
+    assert Metadata.export_topic(batch_state, "events").export_format == 10
+
+    # a legal hold is what the current format, 11, adds
+    {held_state, :ok} = Metadata.apply(state, {:set_topic_hold, "events", %{reason: "r", actor: "admin"}}, 1)
+    assert Metadata.export_topic(held_state, "events").export_format == Metadata.export_format()
+    assert Metadata.export_format() == 11
 
     assert {_without, ^export} = Metadata.extract_topic(state, "events")
 
@@ -182,6 +187,20 @@ defmodule Malachi.Cluster.MachineVersioningTest do
     assert inserted.ranges[{"events", 0}] |> Metadata.logical_start() == 1
   end
 
+  test "a held topic's export is refused by a vnode below version 11, and keeps its hold at 11" do
+    {state, {:ok, _root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 2})
+    {state, :ok} = Metadata.apply(state, {:set_topic_hold, "events", %{reason: "case 7", actor: "admin"}}, 42)
+    export = Metadata.export_topic(state, "events")
+    empty = Metadata.new()
+
+    assert {^empty, {:error, {:unsupported_export_format, 11, 10}}} =
+             MetadataMachine.apply(meta(10), {:insert_topic, export}, empty)
+
+    {inserted, :ok} = MetadataMachine.apply(meta(11), {:insert_topic, export}, empty)
+    assert Metadata.legal_hold(inserted, "events") == %{reason: "case 7", actor: "admin", since_ms: 42}
+    assert {_inserted, {:error, :legal_hold}} = MetadataMachine.apply(meta(11), {:delete_topic, "events"}, inserted)
+  end
+
   test "an export above the group's effective version is refused by the metadata machine" do
     {state, {:ok, _root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 2})
     newer = %{Metadata.export_topic(state, "events") | export_format: 2}
@@ -194,6 +213,13 @@ defmodule Malachi.Cluster.MachineVersioningTest do
   # --- command generators: plausible commands for each pure module, plus unknown ones ---
 
   defp command(pure), do: StreamData.one_of([known_command(pure), unknown_command()])
+
+  defp hold_request do
+    StreamData.one_of([
+      StreamData.constant(nil),
+      StreamData.fixed_map(%{reason: StreamData.member_of(["case 1", "", "a\nb"]), actor: StreamData.constant("admin")})
+    ])
+  end
 
   defp unknown_command do
     StreamData.one_of([
@@ -210,6 +236,7 @@ defmodule Malachi.Cluster.MachineVersioningTest do
       StreamData.tuple({StreamData.constant(:create_topic), topic, StreamData.integer(1..3)}),
       StreamData.tuple({StreamData.constant(:seal_topic), topic}),
       StreamData.tuple({StreamData.constant(:delete_topic), topic}),
+      StreamData.tuple({StreamData.constant(:set_topic_hold), topic, hold_request()}),
       StreamData.tuple({StreamData.constant(:begin_migration), topic}),
       StreamData.tuple({StreamData.constant(:end_migration), topic}),
       StreamData.tuple({StreamData.constant(:extract_topic), topic}),

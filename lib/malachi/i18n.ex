@@ -284,6 +284,18 @@ defmodule Malachi.I18n do
         "✂️ Topic %{topic} purged up to %{point} by %{actor}: logical start moved on %{ranges} range(s) " <>
           "(logical purge: the records stay on disk until retention removes their whole segment)"
     },
+    legal_hold_set: %{
+      "pt_BR" => "🔒 Legal hold colocado no tópico %{topic} por %{actor}: %{reason}",
+      "en_US" => "🔒 Legal hold placed on topic %{topic} by %{actor}: %{reason}"
+    },
+    legal_hold_released: %{
+      "pt_BR" => "🔓 Legal hold liberado no tópico %{topic} por %{actor}; a próxima varredura aplica a retenção de novo",
+      "en_US" => "🔓 Legal hold released on topic %{topic} by %{actor}; the next sweep applies retention again"
+    },
+    topic_deleted: %{
+      "pt_BR" => "🗑️ Tópico %{topic} removido por %{actor}",
+      "en_US" => "🗑️ Topic %{topic} deleted by %{actor}"
+    },
     audit_event_logged: %{
       "pt_BR" => "📝 Evento de auditoria registrado: %{event_type}",
       "en_US" => "📝 Audit event logged: %{event_type}"

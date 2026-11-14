@@ -209,7 +209,8 @@ defmodule Malachi.Metrics.Prometheus do
       orphans_left: [],
       orphans_removed: 0,
       unresolved_policies: [],
-      failures: %{migrating: 0, segment_active: 0, other: 0},
+      held: [],
+      failures: Map.new(Malachi.Metrics.retention_failure_replies(), &{&1, 0}),
       sweeps: %{buckets: Enum.map(Histogram.edges(), &{&1, 0}), count: 0, sum_us: 0, created: 0.0}
     }
   end
@@ -286,7 +287,19 @@ defmodule Malachi.Metrics.Prometheus do
         "malachi_retention_expire_failures_total",
         :counter,
         "Segment deletes the control plane refused during a retention sweep, by reply",
-        Enum.map([:migrating, :segment_active, :other], &{[reply: &1], Map.get(retention.failures, &1, 0)})
+        Enum.map(Malachi.Metrics.retention_failure_replies(), &{[reply: &1], Map.get(retention.failures, &1, 0)})
+      ),
+      metric(
+        "malachi_retention_held_segments",
+        :gauge,
+        "Sealed segments a legal hold kept from the latest retention sweep, per held topic",
+        Enum.map(retention.held, &{[topic: &1.topic], &1.segments})
+      ),
+      metric(
+        "malachi_retention_held_bytes",
+        :gauge,
+        "Bytes on disk a legal hold kept from the latest retention sweep, per held topic",
+        Enum.map(retention.held, &{[topic: &1.topic], &1.bytes})
       ),
       histogram(
         "malachi_retention_sweep_duration_seconds",

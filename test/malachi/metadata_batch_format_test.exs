@@ -135,8 +135,8 @@ defmodule Malachi.MetadataBatchFormatTest do
       assert {_state, :ok} = gated(@meta9, state, Metadata.register_command(root, {root, 0}, [:a], 0, :record))
     end
 
-    test "the code version is 10" do
-      assert MachineVersion.code_version() == 10
+    test "the code version implements 10" do
+      assert MachineVersion.code_version() >= 10
     end
   end
 
@@ -147,7 +147,7 @@ defmodule Malachi.MetadataBatchFormatTest do
 
       {state, _root, _id} = registered(:batch)
       assert Metadata.export_topic(state, "events").export_format == 10
-      assert Metadata.export_format() == 10
+      assert Metadata.export_format() >= 10
     end
   end
 

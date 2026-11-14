@@ -341,12 +341,125 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
       assert snapshot.failures.other == before.other
     end
 
+    test "a refusal for a legal hold counts under its own reply" do
+      before = Metrics.retention_snapshot().failures
+      Telemetry.retention_expire(unique_topic(), "s0", 10, :legal_hold)
+      assert Metrics.retention_snapshot().failures.legal_hold == before.legal_hold + 1
+    end
+
+    test "what a hold kept replaces the previous report, so a released topic leaves the gauge" do
+      [held, other] = [unique_topic(), unique_topic()]
+      held_rows = fn -> Enum.filter(Metrics.retention_snapshot().held, &(&1.topic in [held, other])) end
+
+      Telemetry.retention_held(%{held => %{segments: 2, bytes: 300}, other => %{segments: 1, bytes: 5}})
+
+      assert held_rows.() ==
+               Enum.sort([%{topic: held, segments: 2, bytes: 300}, %{topic: other, segments: 1, bytes: 5}])
+
+      Telemetry.retention_held(%{held => %{segments: 3, bytes: 400}})
+      assert held_rows.() == [%{topic: held, segments: 3, bytes: 400}]
+
+      Telemetry.retention_held(%{})
+      assert held_rows.() == []
+    end
+
+    # A sharded node runs one retention coordinator per vnode it leads, each sweeping only its own topics.
+    # One coordinator reporting nothing held must not erase what another coordinator's vnode holds.
+    test "each coordinator replaces only its own report" do
+      [first, second] = [unique_topic(), unique_topic()]
+      held_rows = fn -> Enum.filter(Metrics.retention_snapshot().held, &(&1.topic in [first, second])) end
+
+      {vnode_a, stop_a} = reporter()
+      {vnode_b, stop_b} = reporter()
+      on_exit(fn -> Enum.each([stop_a, stop_b], & &1.()) end)
+
+      vnode_a.(%{first => %{segments: 2, bytes: 300}})
+      vnode_b.(%{second => %{segments: 1, bytes: 7}})
+      vnode_b.(%{})
+
+      assert held_rows.() == [%{topic: first, segments: 2, bytes: 300}]
+    end
+
+    test "a coordinator that stops takes its report with it" do
+      topic = unique_topic()
+      {report, stop} = reporter()
+
+      report.(%{topic => %{segments: 1, bytes: 9}})
+      assert Enum.any?(Metrics.retention_snapshot().held, &(&1.topic == topic))
+
+      # The first report asks Metrics, by a cast, to monitor the reporter. A call after it is ordered after
+      # that cast, so the monitor is in place before the reporter exits; without this, a monitor set on a
+      # pid already dead would queue its DOWN behind the call below and the check could run too early.
+      _ = :sys.get_state(Malachi.Metrics)
+
+      stop.()
+      # The DOWN reaches Metrics after the exit; a call to it afterwards is ordered after that message.
+      _ = :sys.get_state(Malachi.Metrics)
+      refute Enum.any?(Metrics.retention_snapshot().held, &(&1.topic == topic))
+    end
+
+    test "a topic two coordinators report is counted once, at the larger report" do
+      [larger_first, larger_last] = [unique_topic(), unique_topic()]
+      {vnode_a, stop_a} = reporter()
+      {vnode_b, stop_b} = reporter()
+      on_exit(fn -> Enum.each([stop_a, stop_b], & &1.()) end)
+
+      # Both orders, one topic each. The two rows of a topic come back in the hash order of the reporters'
+      # pids, not in write order, so only a snapshot that picks the larger report shows 3/30 for both: one
+      # that kept the first row, the last row, the last write or the smaller report fails on one of them.
+      vnode_a.(%{larger_first => %{segments: 3, bytes: 30}, larger_last => %{segments: 1, bytes: 10}})
+      vnode_b.(%{larger_first => %{segments: 1, bytes: 10}, larger_last => %{segments: 3, bytes: 30}})
+
+      assert Enum.filter(Metrics.retention_snapshot().held, &(&1.topic in [larger_first, larger_last])) ==
+               Enum.sort([
+                 %{topic: larger_first, segments: 3, bytes: 30},
+                 %{topic: larger_last, segments: 3, bytes: 30}
+               ])
+    end
+
     test "a sweep lands in the duration histogram" do
       before = Metrics.retention_snapshot().sweeps.count
 
       Telemetry.retention_sweep(2_500, 1, 0)
 
       assert Metrics.retention_snapshot().sweeps.count == before + 1
+    end
+
+    # A process standing for one retention coordinator: `report` emits a held report from it and waits until
+    # it is recorded; `stop` ends it.
+    defp reporter do
+      parent = self()
+
+      pid =
+        spawn(fn ->
+          receive_loop = fn loop ->
+            receive do
+              {:report, held, ref} ->
+                Telemetry.retention_held(held)
+                send(parent, {:reported, ref})
+                loop.(loop)
+
+              :stop ->
+                :ok
+            end
+          end
+
+          receive_loop.(receive_loop)
+        end)
+
+      report = fn held ->
+        ref = make_ref()
+        send(pid, {:report, held, ref})
+        assert_receive {:reported, ^ref}
+      end
+
+      stop = fn ->
+        ref = Process.monitor(pid)
+        send(pid, :stop)
+        assert_receive {:DOWN, ^ref, :process, _pid, _reason}
+      end
+
+      {report, stop}
     end
 
     defp restore_env(key, nil), do: Application.delete_env(:malachi, key)

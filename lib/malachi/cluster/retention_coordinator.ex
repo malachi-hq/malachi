@@ -29,7 +29,7 @@ defmodule Malachi.Cluster.RetentionCoordinator do
       membership leader sweeps, so N nodes do not redo the same work (1C); a non-leader still ticks but
       skips the sweep.
 
-  Each sweep asks `Retention.expired/5` which sealed segments to drop, resolves each to its metadata
+  Each sweep asks `Retention.plan/5` which sealed segments to drop, resolves each to its metadata
   (for its replica set), and calls `expire_segment` on it; then it asks `SegmentRoll.due/5` which
   active segments are old enough to roll, from the same metadata and policies, and hands them to
   `roll_segments`. `run_now/1` runs one sweep synchronously,
@@ -37,7 +37,11 @@ defmodule Malachi.Cluster.RetentionCoordinator do
 
   Every segment it tries emits `[:malachi, :retention, :expire]` and every sweep that runs emits
   `[:malachi, :retention, :sweep]` (see `Malachi.Telemetry`), so an operator can tell whether the sweep
-  runs, how much it deleted and whether the control plane refused any of it.
+  runs, how much it deleted and whether the control plane refused any of it. Every completed sweep also
+  emits `[:malachi, :retention, :held]` with what each topic under a legal hold kept from it, and a tick
+  where this coordinator does not lead emits it empty, so the disk a hold keeps is visible. A sweep skipped
+  because the policies or the metadata could not be read emits nothing: the last report stands until a
+  sweep completes.
   """
 
   use GenServer
@@ -99,7 +103,15 @@ defmodule Malachi.Cluster.RetentionCoordinator do
 
   # The gate belongs to the tick alone: `run_now/1` is a manual trigger and ignores it.
   defp sweep_if_leader(state) do
-    if state.leader?.(), do: state |> run() |> elem(1), else: state
+    if state.leader?.() do
+      state |> run() |> elem(1)
+    else
+      # Only the leader sweeps, so only the leader knows what a hold keeps. A coordinator that is not (or
+      # no longer) the leader reports nothing held, so the rows it set while it led do not go stale.
+      # `Malachi.Metrics` keeps each coordinator's rows apart, so this clears only its own.
+      Telemetry.retention_held(%{})
+      state
+    end
   end
 
   defp run(state) do
@@ -130,7 +142,11 @@ defmodule Malachi.Cluster.RetentionCoordinator do
   defp sweep(state, policies, metadata) do
     started = System.monotonic_time()
     now_ms = state.clock.()
-    expired_ids = Retention.expired(metadata, now_ms, state.policy, policies, state.unresolved_policy_max_age_ms)
+
+    %{expired: expired_ids, held: held} =
+      Retention.plan(metadata, now_ms, state.policy, policies, state.unresolved_policy_max_age_ms)
+
+    Telemetry.retention_held(held)
 
     for topic <- Retention.unresolved_policies(metadata, policies), do: Telemetry.retention_unresolved_policy(topic)
 

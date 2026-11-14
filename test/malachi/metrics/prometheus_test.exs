@@ -304,7 +304,8 @@ defmodule Malachi.Metrics.PrometheusTest do
         orphans_left: [%{topic: "orders", directories: 3}],
         orphans_removed: 2,
         unresolved_policies: [%{topic: "orders", sweeps: 4}],
-        failures: %{migrating: 1, segment_active: 0, other: 2},
+        held: [%{topic: "audit", segments: 7, bytes: 7_000}],
+        failures: %{migrating: 1, segment_active: 0, legal_hold: 3, other: 2},
         sweeps: sweeps(5, 1_789_000_100.5)
       }
     end
@@ -373,6 +374,16 @@ defmodule Malachi.Metrics.PrometheusTest do
       assert out =~ ~s(malachi_retention_expire_failures_total{reply="migrating"} 1\n)
       assert out =~ ~s(malachi_retention_expire_failures_total{reply="segment_active"} 0\n)
       assert out =~ ~s(malachi_retention_expire_failures_total{reply="other"} 2\n)
+      assert out =~ ~s(malachi_retention_expire_failures_total{reply="legal_hold"} 3\n)
+    end
+
+    test "what a legal hold kept is a gauge per held topic" do
+      out = render_retention(retention())
+
+      assert out =~ "# TYPE malachi_retention_held_segments gauge\n"
+      assert out =~ "# TYPE malachi_retention_held_bytes gauge\n"
+      assert out =~ ~s(malachi_retention_held_segments{topic="audit"} 7\n)
+      assert out =~ ~s(malachi_retention_held_bytes{topic="audit"} 7000\n)
     end
 
     test "the sweep duration is a histogram in seconds whose count is the number of sweeps" do
