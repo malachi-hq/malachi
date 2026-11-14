@@ -61,6 +61,31 @@ defmodule Malachi.MetadataPropertyTest do
     end
   end
 
+  # #307: while a topic is held, no command removes its ranges or segments or moves its logical start, and
+  # only a release (the one command that changes the hold) lifts that.
+  property "no sequence of operations removes a held topic's data or moves its start" do
+    check all(ops <- StreamData.list_of(op(), max_length: 40), max_runs: 300) do
+      Enum.reduce(ops, Metadata.new(), fn op, state ->
+        next = apply_op(state, op)
+
+        for {topic, _meta} <- state.topics, Metadata.legal_hold(state, topic) != nil do
+          assert Map.has_key?(next.topics, topic)
+
+          for {id, %{topic: ^topic} = range} <- state.ranges do
+            assert Map.has_key?(next.ranges, id)
+            assert Metadata.logical_start(next.ranges[id]) == Metadata.logical_start(range)
+          end
+
+          for {id, segment} <- state.segments, elem(segment.range_id, 0) == topic do
+            assert Map.has_key?(next.segments, id)
+          end
+        end
+
+        next
+      end)
+    end
+  end
+
   defp within_known_end?(state, range_id, start) do
     segments = Metadata.segments_of_range(state, range_id)
     sealed_ends = for %{length: length} = seg <- segments, is_integer(length), do: seg.start_offset + length
@@ -111,7 +136,8 @@ defmodule Malachi.MetadataPropertyTest do
       ),
       StreamData.tuple({StreamData.constant(:seal_seg), StreamData.positive_integer()}),
       StreamData.tuple({StreamData.constant(:delete_seg), StreamData.positive_integer()}),
-      StreamData.tuple({StreamData.constant(:purge), StreamData.positive_integer(), StreamData.integer(0..3)})
+      StreamData.tuple({StreamData.constant(:purge), StreamData.positive_integer(), StreamData.integer(0..3)}),
+      StreamData.tuple({StreamData.constant(:hold), StreamData.member_of(@topic_pool), StreamData.boolean()})
     ])
   end
 
@@ -168,6 +194,12 @@ defmodule Malachi.MetadataPropertyTest do
       {topic, _seq} = range_id -> command(state, {:set_range_starts, topic, %{range_id => offset}})
     end
   end
+
+  # Places (`true`) or releases (`false`) a hold; either may be refused (already held, not held, no topic).
+  defp apply_op(state, {:hold, topic, true}),
+    do: state |> Metadata.apply({:set_topic_hold, topic, %{reason: "r", actor: "a"}}, 1) |> elem(0)
+
+  defp apply_op(state, {:hold, topic, false}), do: state |> Metadata.apply({:set_topic_hold, topic, nil}, 1) |> elem(0)
 
   defp command(state, command), do: state |> Metadata.apply(command) |> elem(0)
 

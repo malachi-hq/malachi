@@ -68,10 +68,13 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
       {:ok, reply} ->
         # A compare-and-swap the log refused was decided against a view this cache may not hold (the set moved, or the
         # segment is gone from the log), and so was a group member's fenced commit; the cache must not apply either.
-        # Other refusals from the metadata are deterministic and still applied, so a stale cache converges on them.
-        if MachineVersion.refusal?(reply) or cas_refused?(command, reply) or refused_commit?(command, reply),
-          do: {metadata, reply},
-          else: {elem(Metadata.apply(metadata, command, System.system_time(:millisecond)), 0), reply}
+        # So was a legal hold's refusal (#307): the hold may have committed through another node, and a cache that
+        # has not seen it would delete, purge or drop what the log kept. Other refusals from the metadata are
+        # deterministic and still applied, so a stale cache converges on them.
+        if MachineVersion.refusal?(reply) or cas_refused?(command, reply) or refused_commit?(command, reply) or
+             reply == {:error, :legal_hold},
+           do: {metadata, reply},
+           else: {elem(Metadata.apply(metadata, command, System.system_time(:millisecond)), 0), reply}
 
       {:error, reason} ->
         {metadata, {:error, reason}}
@@ -90,7 +93,8 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
   # produce and fetch of the shard waits behind the call. The data path's commands keep ra's default,
   # which the produce path's own timeouts are sized around. An operator's binding has nobody waiting on
   # it but the operator, and must not hold the loop when the topic's vnode has lost quorum or is
-  # electing; `Malachi.Policies.bind/3` turns the timeout into an answer.
+  # electing; `Malachi.Policies.bind/3` turns the timeout into an answer. The same holds for every operator
+  # command: the purge, the legal hold (`Malachi.LegalHold`) and the topic delete (`Malachi.Topics`).
   #
   # For the binding it is a deadline on the whole command, not ra's timeout: ra follows a redirect with a
   # fresh full timeout (`ra_server_proc:statem_call/3`), so a member that queues the call through an
@@ -114,6 +118,8 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
 
   defp deadline({:bind_topic_policy, _topic, _name}), do: @admin_command_deadline_ms
   defp deadline({:set_range_starts, _topic, _starts}), do: @admin_command_deadline_ms
+  defp deadline({:set_topic_hold, _topic, _request}), do: @admin_command_deadline_ms
+  defp deadline({:delete_topic, _topic}), do: @admin_command_deadline_ms
   defp deadline({:open_group, _group, _topic}), do: @group_command_deadline_ms
   defp deadline({:commit_offset, _group, _topic, _offsets, _generation}), do: @group_command_deadline_ms
   defp deadline(_data_path), do: nil

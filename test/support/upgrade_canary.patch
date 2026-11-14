@@ -1,8 +1,8 @@
 diff --git a/lib/malachi/application.ex b/lib/malachi/application.ex
-index d6514f2..161c808 100644
+index 931266ab..556cb401 100644
 --- a/lib/malachi/application.ex
 +++ b/lib/malachi/application.ex
-@@ -338,7 +338,28 @@ defmodule Malachi.Application do
+@@ -355,7 +355,28 @@ defmodule Malachi.Application do
  
      reconcile = fn ->
        if length(nodes) > 1, do: ClusterFlagsServer.reconcile(@log_flags, nodes)
@@ -32,7 +32,7 @@ index d6514f2..161c808 100644
      end
  
      opts = [
-@@ -350,6 +371,11 @@ defmodule Malachi.Application do
+@@ -367,6 +388,11 @@ defmodule Malachi.Application do
      %{id: Malachi.LogClusterFlagsReconciler, start: {LeaseReconciler, :start_link, [opts]}}
    end
  
@@ -45,16 +45,16 @@ index d6514f2..161c808 100644
    Switches the cluster feature flag named `name` on, from this running node. The entry point
    `mix malachi.flag` reaches over RPC.
 diff --git a/lib/malachi/broker.ex b/lib/malachi/broker.ex
-index 6c1c5db..eec6257 100644
+index 19ee988a..1f065fa1 100644
 --- a/lib/malachi/broker.ex
 +++ b/lib/malachi/broker.ex
-@@ -352,6 +352,13 @@ defmodule Malachi.Broker do
+@@ -410,6 +410,13 @@ defmodule Malachi.Broker do
    @spec topics_bound_to(t(), Metadata.policy_name()) :: [Metadata.topic_name()]
    def topics_bound_to(%__MODULE__{} = broker, name), do: DSRSM.topics_bound_to(broker.dsrsm, name)
  
 +  @doc """
 +  UPGRADE CANARY (test/support/upgrade_canary.patch): writes `note` into `topic`'s metadata through the
-+  control plane, a command introduced at machine version 11.
++  control plane, a command introduced at machine version 12.
 +  """
 +  @spec canary_note(t(), Metadata.topic_name(), term()) :: {t(), term()}
 +  def canary_note(%__MODULE__{} = broker, topic, note), do: apply_metadata(broker, {:canary_note, topic, note})
@@ -63,10 +63,10 @@ index 6c1c5db..eec6257 100644
    Routes each record to the active range that owns its key and replicates the batch to that
    range's active segment via `replicate_fun`. Returns `{broker, {:ok, placements}}`, or
 diff --git a/lib/malachi/broker_server.ex b/lib/malachi/broker_server.ex
-index 4f16b4d..6f5d585 100644
+index b2a9824b..bd1711ad 100644
 --- a/lib/malachi/broker_server.ex
 +++ b/lib/malachi/broker_server.ex
-@@ -651,6 +651,12 @@ defmodule Malachi.BrokerServer do
+@@ -693,6 +693,12 @@ defmodule Malachi.BrokerServer do
      {:reply, Broker.topics_bound_to(state.broker, name), state}
    end
  
@@ -80,7 +80,7 @@ index 4f16b4d..6f5d585 100644
    # led: a node that does not lead it answers where it is, so the client talks to the primary directly.
    def handle_call({:open_stream, range_id, pid}, _from, state), do: do_open_stream(range_id, pid, state)
 diff --git a/lib/malachi/cluster/capabilities.ex b/lib/malachi/cluster/capabilities.ex
-index 6919733..05c3649 100644
+index 69197337..05c36494 100644
 --- a/lib/malachi/cluster/capabilities.ex
 +++ b/lib/malachi/cluster/capabilities.ex
 @@ -66,7 +66,9 @@ defmodule Malachi.Cluster.Capabilities do
@@ -95,25 +95,26 @@ index 6919733..05c3649 100644
    @typedoc "A capability, which is also the name of the flag that requires it."
    @type capability :: atom()
 diff --git a/lib/malachi/cluster/machine_version.ex b/lib/malachi/cluster/machine_version.ex
+index 25f0f782..cea78a6e 100644
 --- a/lib/malachi/cluster/machine_version.ex
 +++ b/lib/malachi/cluster/machine_version.ex
-@@ -104,7 +104,10 @@ defmodule Malachi.Cluster.MachineVersion do
-   # and the topic export format that carries a range's logical start.
-   # 10 introduces the batch storage format in `Malachi.Metadata` (#202): `{:register_segment, range, id,
+@@ -106,7 +106,10 @@ defmodule Malachi.Cluster.MachineVersion do
    # replicas, start, format}` and `{:seal_segment, id, length, byte_size, stored_bytes, at}`.
--  @code_version 10
+   # 11 introduces the legal hold in `Malachi.Metadata` (#307): `{:set_topic_hold, topic, request}`, and the
+   # topic export format that carries a topic's hold.
+-  @code_version 11
 +  # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
-+  # scripts/docker-upgrade-chaos.sh, never into a release. Version 11 introduces
++  # scripts/docker-upgrade-chaos.sh, never into a release. Version 12 introduces
 +  # `{:canary_note, topic, note}` in `Malachi.Metadata`.
-+  @code_version 11
++  @code_version 12
  
    @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
    @type command_key :: {atom(), non_neg_integer()}
 diff --git a/lib/malachi/cluster/replication_server.ex b/lib/malachi/cluster/replication_server.ex
-index 9cf5398..24a38ee 100644
+index d11c67b0..a60107ed 100644
 --- a/lib/malachi/cluster/replication_server.ex
 +++ b/lib/malachi/cluster/replication_server.ex
-@@ -651,6 +651,8 @@ defmodule Malachi.Cluster.ReplicationServer do
+@@ -669,6 +669,8 @@ defmodule Malachi.Cluster.ReplicationServer do
        unexpected_shapes: MapSet.new()
      }
  
@@ -122,7 +123,7 @@ index 9cf5398..24a38ee 100644
      {:ok, state}
    end
  
-@@ -1059,6 +1061,10 @@ defmodule Malachi.Cluster.ReplicationServer do
+@@ -1106,6 +1108,10 @@ defmodule Malachi.Cluster.ReplicationServer do
      {:noreply, state}
    end
  
@@ -133,7 +134,7 @@ index 9cf5398..24a38ee 100644
    # A push or an ack in a shape this build does not know, which is what a newer primary sends an older
    # follower during a rolling upgrade. Dropping it costs that one batch its ack (the primary waits out its
    # replication timeout for it); crashing would cost every log on this node (see "Storage failures").
-@@ -1147,6 +1153,16 @@ defmodule Malachi.Cluster.ReplicationServer do
+@@ -1194,6 +1200,16 @@ defmodule Malachi.Cluster.ReplicationServer do
      {:noreply, state}
    end
  
@@ -151,10 +152,10 @@ index 9cf5398..24a38ee 100644
    # no_quorum the synchronous path returned. A batch already resolved by acks is simply gone.
    def handle_info({:replicate_timeout, segment_id, batch_ref}, state) do
 diff --git a/lib/malachi/metadata.ex b/lib/malachi/metadata.ex
-index 1258dcf..1183399 100644
+index 03a51c32..581342e0 100644
 --- a/lib/malachi/metadata.ex
 +++ b/lib/malachi/metadata.ex
-@@ -227,7 +227,10 @@ defmodule Malachi.Metadata do
+@@ -267,7 +267,10 @@ defmodule Malachi.Metadata do
        {:extract_topic, 2} => 0,
        {:insert_topic, 2} => 0,
        {:begin_migration, 2} => 0,
@@ -162,11 +163,11 @@ index 1258dcf..1183399 100644
 +      {:end_migration, 2} => 0,
 +      # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
 +      # scripts/docker-upgrade-chaos.sh, never into a release.
-+      {:canary_note, 3} => 11
++      {:canary_note, 3} => 12
      }
    end
  
-@@ -266,6 +269,8 @@ defmodule Malachi.Metadata do
+@@ -361,6 +364,8 @@ defmodule Malachi.Metadata do
    def command_target_topic({:commit_offset, _group, topic, _offsets}), do: topic
    def command_target_topic({:commit_offset, _group, topic, _offsets, _generation}), do: topic
    def command_target_topic({:open_group, _group, topic}), do: topic
@@ -175,7 +176,7 @@ index 1258dcf..1183399 100644
    def command_target_topic(command), do: List.first(routed_range_topics(command))
  
    @doc """
-@@ -645,6 +650,17 @@ defmodule Malachi.Metadata do
+@@ -754,6 +759,17 @@ defmodule Malachi.Metadata do
    # unknown command must not raise. Inside ra, `Malachi.Cluster.MachineVersion` refuses an unknown or
    # not-yet-effective command before it gets here, so an older replica never skips a command that a
    # newer one applies.
@@ -194,6 +195,7 @@ index 1258dcf..1183399 100644
  
    # Retiring a range requires its write head to be closed FIRST, and this is the only place that
 diff --git a/lib/malachi/storage/format_marker.ex b/lib/malachi/storage/format_marker.ex
+index 0afff30e..8bcde938 100644
 --- a/lib/malachi/storage/format_marker.ex
 +++ b/lib/malachi/storage/format_marker.ex
 @@ -68,12 +68,16 @@ defmodule Malachi.Storage.FormatMarker do
