@@ -153,13 +153,16 @@ defmodule Malachi.Wire do
   @join_group 32
   @group_heartbeat 33
   @commit_offsets 34
+  # admin manual purge (#198): move a topic's logical start up to a time, an opaque position or a group's
+  # commit. Requires the wire :admin permission.
+  @purge_topic 35
 
   # error codes (responses): 0 = ok, 1 = error with the reason as a string payload
   @ok 0
   @error 1
 
-  @typedoc "A request operation: 0 and 1, then 7 to 34 (2 to 6 are retired)."
-  @type api_key :: 0..1 | 7..34
+  @typedoc "A request operation: 0 and 1, then 7 to 35 (2 to 6 are retired)."
+  @type api_key :: 0..1 | 7..35
   @type error_code :: non_neg_integer()
 
   @spec auth_key() :: api_key()
@@ -193,6 +196,7 @@ defmodule Malachi.Wire do
   def join_group_key, do: @join_group
   def group_heartbeat_key, do: @group_heartbeat
   def commit_offsets_key, do: @commit_offsets
+  def purge_topic_key, do: @purge_topic
   def ok_code, do: @ok
   def error_code, do: @error
 
@@ -496,6 +500,53 @@ defmodule Malachi.Wire do
     {name, <<>>} = take_str(rest)
     {topic, name}
   end
+
+  @typedoc "What a purge is up to, as purge_topic carries it (`t:Malachi.Broker.purge_point/0`)."
+  @type purge_point :: {:before, non_neg_integer()} | {:position, binary()} | {:group, String.t()}
+
+  @doc """
+  purge_topic (35): `<<put_str(topic), kind::8, point>>`. Kind 0 is a time, `epoch_ms::64`; kind 1 an
+  opaque position, `put_str(token)`; kind 2 a consumer group, `put_str(group)`.
+  """
+  @spec encode_purge_topic_req(String.t(), purge_point()) :: binary()
+  def encode_purge_topic_req(topic, {:before, time_ms}), do: <<put_str(topic)::binary, 0::8, time_ms::64>>
+  def encode_purge_topic_req(topic, {:position, token}), do: <<put_str(topic)::binary, 1::8, put_str(token)::binary>>
+  def encode_purge_topic_req(topic, {:group, group}), do: <<put_str(topic)::binary, 2::8, put_str(group)::binary>>
+
+  @spec decode_purge_topic_req(binary()) :: {String.t() | nil, purge_point()}
+  def decode_purge_topic_req(payload) do
+    {topic, rest} = take_str(payload)
+    {topic, take_purge_point(rest)}
+  end
+
+  defp take_purge_point(<<0::8, time_ms::64>>), do: {:before, time_ms}
+
+  defp take_purge_point(<<1::8, rest::binary>>) do
+    {token, <<>>} = take_str(rest)
+    true = is_binary(token)
+    {:position, token}
+  end
+
+  defp take_purge_point(<<2::8, rest::binary>>) do
+    {group, <<>>} = take_str(rest)
+    true = is_binary(group)
+    {:group, group}
+  end
+
+  @doc """
+  purge_topic response: `<<count::32, (range_seq::32, from::64, to::64)*>>`, each range of the topic whose
+  logical start the purge set, with its start before and after, in range order. Empty when the point
+  moved nothing.
+  """
+  @spec encode_purge_topic_resp([{non_neg_integer(), non_neg_integer(), non_neg_integer()}]) :: binary()
+  def encode_purge_topic_resp(moves) do
+    body = for {seq, from, to} <- moves, into: <<>>, do: <<seq::32, from::64, to::64>>
+    <<length(moves)::32, body::binary>>
+  end
+
+  @spec decode_purge_topic_resp(binary()) :: [{non_neg_integer(), non_neg_integer(), non_neg_integer()}]
+  def decode_purge_topic_resp(<<count::32, body::binary-size(count * 20)>>),
+    do: for(<<seq::32, from::64, to::64 <- body>>, do: {seq, from, to})
 
   @doc "get_topic_policy (21): `put_str(topic)`."
   @spec encode_get_topic_policy_req(String.t()) :: binary()
@@ -805,8 +856,8 @@ defmodule Malachi.Wire do
   starts twice, as the token a reader resumes from and commits (`next`) and as the raw position it acks
   with (`ack`, see `encode_consume_ack_req/1`), how many leading records of the batch the reader already
   had (`skip`, for a position inside a stored batch), how many records the range still holds past this page
-  (`backlog`), the records retention removed before this page (`expired`, exact or an upper bound), and the
-  batch of positioned records.
+  (`backlog`), the records retention removed before this page (`expired`, exact or an upper bound; a
+  stretch an operator purged is not counted there), and the batch of positioned records.
 
       <<len::8, next::binary-size(len), ack_source::16, ack_offset::64, skip::32, backlog::64, expired::64,
         expired_exact::8, batch::binary>>

@@ -165,8 +165,9 @@ defmodule Malachi.Metrics do
 
   @doc """
   Records one skip (from the retention skip telemetry event): a reader of `group` on `topic` was moved
-  past `offsets` offsets no longer stored. Counted as one event and as the offsets, under the reader's
-  `origin` and the skip's `span`.
+  past `offsets` offsets no longer served. Counted as one event and as the offsets, under the reader's
+  `origin`, the skip's `span` and its `cause` (`:expired` or `:purged`, see `Malachi.Broker.Skip`), so a
+  loss to retention is never counted together with an operator's purge.
 
   The series carry WHICH KIND of reader they count (`reader`) beside the name (`group`): `:group` with
   the name as it is, `:none` with an empty name for a fetch outside a group (`group` is `nil`), and
@@ -180,10 +181,10 @@ defmodule Malachi.Metrics do
   is check-then-insert across the few processes that report (one skip reporter per data-plane shard), so
   concurrent first skips can admit a pair or two past the cap: a bound, not an exact limit.
   """
-  @spec record_retention_skip(String.t(), String.t() | nil, atom(), atom(), non_neg_integer()) :: :ok
-  def record_retention_skip(topic, group, origin, span, offsets) do
+  @spec record_retention_skip(String.t(), String.t() | nil, atom(), atom(), atom(), non_neg_integer()) :: :ok
+  def record_retention_skip(topic, group, origin, span, cause, offsets) do
     {reader, label} = retention_reader(topic, group)
-    key = {:retention_skip, topic, reader, label, origin, span}
+    key = {:retention_skip, topic, reader, label, origin, span, cause}
     :ets.update_counter(@metrics_table, key, [{2, 1}, {3, offsets}], {key, 0, 0})
     :ok
   end
@@ -280,7 +281,7 @@ defmodule Malachi.Metrics do
 
   @doc """
   The retention counters as the Prometheus exporter needs them: every skip series (`topic`, `reader`,
-  `group`, `origin`, `span`, with its `events` and `offsets`), the expired `segments` and `bytes` per topic, the
+  `group`, `origin`, `span`, `cause`, with its `events` and `offsets`), the expired `segments` and `bytes` per topic, the
   refusals per reply (every known reply, zero included), the replica directories expiries left behind per
   topic, the ones the sweeper reclaimed, and the sweep duration histogram in the shape
   of `storage_flush_histogram/0` (its `count` is the number of sweeps). Read only at scrape time.
@@ -296,9 +297,21 @@ defmodule Malachi.Metrics do
         }
   def retention_snapshot do
     skips =
-      for [topic, reader, group, origin, span, events, offsets] <-
-            :ets.match(@metrics_table, {{:retention_skip, :"$1", :"$2", :"$3", :"$4", :"$5"}, :"$6", :"$7"}) do
-        %{topic: topic, reader: reader, group: group, origin: origin, span: span, events: events, offsets: offsets}
+      for [topic, reader, group, origin, span, cause, events, offsets] <-
+            :ets.match(
+              @metrics_table,
+              {{:retention_skip, :"$1", :"$2", :"$3", :"$4", :"$5", :"$6"}, :"$7", :"$8"}
+            ) do
+        %{
+          topic: topic,
+          reader: reader,
+          group: group,
+          origin: origin,
+          span: span,
+          cause: cause,
+          events: events,
+          offsets: offsets
+        }
       end
 
     expired =

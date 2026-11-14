@@ -31,7 +31,8 @@ defmodule Malachi.Retention.SkipReporterTest do
         from: 3,
         offsets: 2,
         origin: :cursor,
-        source: :self
+        source: :self,
+        cause: :expired
       },
       overrides
     )
@@ -52,8 +53,33 @@ defmodule Malachi.Retention.SkipReporterTest do
              range: {"orders", 0},
              source_range: {"orders", 0},
              origin: :cursor,
-             span: :exact
+             span: :exact,
+             cause: :expired
            }
+  end
+
+  test "a purged skip is logged with the purge line, not the retention one", %{reporter: reporter} do
+    log =
+      capture_log(fn ->
+        SkipReporter.report(reporter, "orders", "billing", [skip(cause: :purged)])
+        flush(reporter)
+      end)
+
+    assert log =~ "an operator purged"
+    refute log =~ "no longer stored"
+  end
+
+  test "a purge line does not hold back the warning for a retention loss on the same reader",
+       %{reporter: reporter} do
+    # The two skips one step across the logical start produces, in the same window.
+    log =
+      capture_log(fn ->
+        SkipReporter.report(reporter, "orders", "billing", [skip(cause: :purged), skip(from: 5, cause: :expired)])
+        flush(reporter)
+      end)
+
+    assert log =~ "an operator purged"
+    assert log =~ "no longer stored"
   end
 
   test "the same skip reported again (a re-read before the commit) is counted once", %{reporter: reporter} do

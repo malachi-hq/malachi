@@ -12,6 +12,7 @@ defmodule Malachi.BrokerTest do
   alias Malachi.Keyspace
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Position
   alias Malachi.Test.FakeSegmentStore
 
   setup do
@@ -937,7 +938,8 @@ defmodule Malachi.BrokerTest do
                from: 0,
                offsets: 2,
                origin: :cursor,
-               source: :self
+               source: :self,
+               cause: :expired
              }
 
       assert Skip.span(skip) == :exact
@@ -1003,7 +1005,8 @@ defmodule Malachi.BrokerTest do
                from: 0,
                offsets: 1,
                origin: :start,
-               source: :ancestor
+               source: :ancestor,
+               cause: :expired
              }
 
       assert Skip.span(skip) == :upper_bound
@@ -1092,6 +1095,387 @@ defmodule Malachi.BrokerTest do
         {:ok, records, next, more} ->
           drain(broker, store, range_id, page, next, delivered ++ Enum.map(records, & &1.offset), skipped ++ more)
       end
+    end
+  end
+
+  describe "logical start (the manual purge, #198)" do
+    # Produces and records the batch as stored, as `Malachi.BrokerServer` does once a quorum answers.
+    defp produce_durable(broker, store, topic, records) do
+      {broker, {:ok, placements}} = produce(broker, store, topic, records)
+      Broker.mark_durable(broker, placements)
+    end
+
+    defp purge(broker, topic, starts) do
+      {broker, {:ok, _moves}} = Broker.set_range_starts(broker, topic, starts)
+      broker
+    end
+
+    test "a consumer below the start is clamped to it inside a segment, and told it was purged",
+         %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      broker = produce_durable(broker, store, "events", for(i <- 0..4, do: record("v#{i}", "k#{i}")))
+      broker = purge(broker, "events", %{root_id => 2})
+
+      assert {:ok, records, {0, 5}, [skip]} = Broker.read_consume(broker, root_id, {0, 0}, 100, read_fun(store))
+      assert Enum.map(records, & &1.value) == ["v2", "v3", "v4"]
+
+      assert skip == %Skip{
+               range_id: root_id,
+               source_range_id: root_id,
+               from: 0,
+               offsets: 2,
+               origin: :cursor,
+               source: :self,
+               cause: :purged
+             }
+    end
+
+    test "the clamp holds across segments, and a reader at or past the start is not moved", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 5)
+      broker = purge(broker, "events", %{root_id => 3})
+
+      assert {:ok, [%{value: "v3"}, %{value: "v4"}], {0, 5}, [%Skip{from: 1, offsets: 2, cause: :purged}]} =
+               Broker.read_consume(broker, root_id, {0, 1}, 100, read_fun(store))
+
+      assert {:ok, [%{value: "v4"}], {0, 5}, []} = Broker.read_consume(broker, root_id, {0, 4}, 100, read_fun(store))
+    end
+
+    test "a start above an expired head wins the floor: one skip, purged", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 5)
+      [s0 | _] = segments(broker, root_id)
+      broker = broker |> delete_segments([s0]) |> purge("events", %{root_id => 3})
+
+      assert {:ok, [_, _], {0, 5}, [%Skip{from: 0, offsets: 3, cause: :purged}]} =
+               Broker.read_consume(broker, root_id, :start, 100, read_fun(store))
+    end
+
+    test "a start below an expired head splits the step at the start", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 5)
+      [s0, s1 | _] = segments(broker, root_id)
+      broker = broker |> delete_segments([s0, s1]) |> purge("events", %{root_id => 1})
+
+      assert {:ok, [_, _, _], {0, 5},
+              [%Skip{from: 0, offsets: 1, cause: :purged}, %Skip{from: 1, offsets: 1, cause: :expired}]} =
+               Broker.read_consume(broker, root_id, :start, 100, read_fun(store))
+    end
+
+    test "a purged stretch stays purged once retention reclaims its segments", %{store: store} do
+      # The stored floor rises to meet the start; the reader was still moved by the purge, not by a loss.
+      {broker, root_id} = one_record_segments(store, 5)
+      [s0, s1 | _] = segments(broker, root_id)
+      broker = broker |> purge("events", %{root_id => 2}) |> delete_segments([s0, s1])
+
+      assert {:ok, [_, _, _], {0, 5}, [%Skip{from: 0, offsets: 2, cause: :purged}]} =
+               Broker.read_consume(broker, root_id, {0, 0}, 100, read_fun(store))
+    end
+
+    test "a purged reader paused at the tail is still moved, and reported", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      broker = produce_durable(broker, store, "events", for(i <- 0..2, do: record("v#{i}", "k#{i}")))
+      broker = purge(broker, "events", %{root_id => 3})
+
+      assert {:ok, [], {0, 3}, [%Skip{from: 1, offsets: 2, cause: :purged}]} =
+               Broker.read_consume(broker, root_id, {0, 1}, 100, read_fun(store))
+    end
+
+    test "the history read is clamped too", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 4)
+      broker = purge(broker, "events", %{root_id => 2})
+
+      assert {:ok, values} = Broker.read_history(broker, root_id, read_fun(store))
+      assert Enum.map(values, & &1.value) == ["v2", "v3"]
+    end
+
+    test "a child's read of a purged ancestor is clamped there, and the skip is an upper bound",
+         %{store: store} do
+      {broker, root_id} = one_record_segments(store, 4)
+      broker = seal_active(broker, store, root_id)
+      {broker, {:ok, left_id, right_id}} = Broker.split_range(broker, root_id)
+      broker = purge(broker, "events", %{root_id => 2})
+
+      for child <- [left_id, right_id] do
+        {:ok, records, _cursor, skips} = Broker.read_consume(broker, child, :start, 100, read_fun(store))
+        assert Enum.all?(records, &(&1.offset >= 2))
+        assert [%Skip{source_range_id: ^root_id, from: 0, offsets: 2, cause: :purged, source: :ancestor}] = skips
+        assert Skip.span(hd(skips)) == :upper_bound
+      end
+    end
+
+    test "an ancestor purged to its very end is skipped whole, with nothing re-read", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 3)
+      broker = seal_active(broker, store, root_id)
+      {broker, {:ok, left_id, _right_id}} = Broker.split_range(broker, root_id)
+      broker = purge(broker, "events", %{root_id => 3})
+
+      assert {:ok, [], {1, 0}, [%Skip{source_range_id: ^root_id, from: 0, offsets: 3, cause: :purged}]} =
+               Broker.read_consume(broker, left_id, :start, 100, read_fun(store))
+    end
+
+    test "the backlog does not count what a reader is never served", %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      broker = produce_durable(broker, store, "events", for(i <- 0..4, do: record("v#{i}", "k#{i}")))
+      assert Broker.consume_backlog(ReadView.new(broker, [root_id]), root_id, {0, 0}) == 5
+
+      broker = purge(broker, "events", %{root_id => 3})
+      view = ReadView.new(broker, [root_id])
+      assert ReadView.logical_start(view, root_id) == 3
+      assert Broker.consume_backlog(view, root_id, {0, 0}) == 2
+      assert Broker.consume_backlog(view, root_id, {0, 4}) == 1
+    end
+
+    test "the physical read is not clamped (it is no consumer's path)", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 3)
+      broker = purge(broker, "events", %{root_id => 2})
+      assert {:ok, [%{value: "v0"} | _]} = Broker.read(broker, root_id, 0, 100, read_fun(store))
+    end
+
+    test "never moves backward, and an equal start is a no-op", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 3)
+      broker = purge(broker, "events", %{root_id => 2})
+
+      assert {_broker, {:ok, %{^root_id => {2, 2}}}} = Broker.set_range_starts(broker, "events", %{root_id => 1})
+      assert {_broker, {:ok, %{^root_id => {2, 2}}}} = Broker.set_range_starts(broker, "events", %{root_id => 2})
+    end
+
+    test "a start past the durable end is refused, inside the active segment up to it is accepted",
+         %{store: store} do
+      {broker, root_id} = broker_with_topic()
+      # planned and replicated, but not yet answered as stored: the offsets are reserved, not durable
+      {broker, {:ok, placements}} = produce(broker, store, "events", for(i <- 0..4, do: record("v#{i}", "k#{i}")))
+      assert [%{state: :active}] = segments(broker, root_id)
+      assert Broker.range_end(broker, root_id) == 5
+
+      # a produce in flight can fail and be sealed below its reservation, whose offsets the next produce
+      # takes again: a start inside the reservation would hide those acknowledged records
+      assert {^broker, {:error, :start_past_end}} = Broker.set_range_starts(broker, "events", %{root_id => 3})
+
+      broker = Broker.mark_durable(broker, placements)
+      assert {^broker, {:error, :start_past_end}} = Broker.set_range_starts(broker, "events", %{root_id => 6})
+      assert {_broker, {:ok, %{^root_id => {0, 5}}}} = Broker.set_range_starts(broker, "events", %{root_id => 5})
+    end
+
+    test "a range the broker does not know is left to the control plane to refuse" do
+      {broker, _root_id} = broker_with_topic()
+
+      assert {_broker, {:error, :no_such_range}} =
+               Broker.set_range_starts(broker, "events", %{{"events", 99} => 1})
+
+      assert {_broker, {:error, :no_such_range}} = Broker.set_range_starts(broker, "events", %{:bogus => 1})
+    end
+
+    test "a view taken before a purge is clamped by it on its next read, not only by a new view",
+         %{store: store} do
+      # A consume stream reads page after page from the view it holds until it catches up; the start a
+      # purge publishes reaches those reads at once.
+      {broker, root_id} = one_record_segments(store, 5)
+      view = ReadView.new(broker, [root_id])
+      assert ReadView.logical_start(view, root_id) == 0
+
+      broker = purge(broker, "events", %{root_id => 3})
+      assert ReadView.logical_start(view, root_id) == 3
+
+      assert {:ok, [%{value: "v3"}, %{value: "v4"}], {0, 5}, [%Skip{from: 1, offsets: 2, cause: :purged}]} =
+               Broker.read_consume_view(view, root_id, {0, 1}, 100, read_fun(store))
+
+      assert broker.starts_table != nil
+    end
+
+    test "a re-seed publishes the starts the control plane holds, and drops the ones it no longer has",
+         %{store: store} do
+      {purged, root_id} = one_record_segments(store, 3)
+      purged = purge(purged, "events", %{root_id => 2})
+
+      # another frontend: its cache learns the purge only from the re-seed
+      {other, ^root_id} = broker_with_topic()
+      stale = ReadView.new(other, [root_id])
+      other = other |> Broker.put_cache(purged.dsrsm) |> Broker.replay_journal([])
+      assert ReadView.logical_start(stale, root_id) == 2
+
+      # the topic gone from the control plane (deleted, or moved away by a split): its start goes too,
+      # since a topic created again under the name reuses the range ids
+      {fresh, _other_root} = broker_with_topic("other_topic_only")
+      _other = other |> Broker.put_cache(fresh.dsrsm) |> Broker.replay_journal([])
+      assert ReadView.logical_start(stale, root_id) == 0
+    end
+
+    test "a re-seed read before a local purge does not take the purge's start back out of the table",
+         %{store: store} do
+      # The reconcile installs a read taken before the commands this broker applied since, then replays
+      # them (`Malachi.BrokerServer`): the start must be published again after the replay.
+      {broker, root_id} = one_record_segments(store, 3)
+      broker = Broker.journal(broker)
+      view = ReadView.new(broker, [root_id])
+      before_purge = broker.dsrsm
+
+      broker = purge(broker, "events", %{root_id => 2})
+      {journaled, broker} = Broker.take_journal(broker)
+
+      # Not for a moment either: a reader in another process can look between the two steps.
+      reseeded = Broker.put_cache(broker, before_purge)
+      assert ReadView.logical_start(view, root_id) == 2
+
+      _broker = Broker.replay_journal(reseeded, journaled)
+      assert ReadView.logical_start(view, root_id) == 2
+    end
+
+    test "a view with no published table clamps by the starts it was built with" do
+      assert ReadView.logical_start(%ReadView{starts: %{{"t", 0} => 4}}, {"t", 0}) == 4
+      assert ReadView.logical_start(%ReadView{}, {"t", 0}) == 0
+    end
+
+    test "a view outliving the broker that published its starts falls back to its own" do
+      parent = self()
+
+      {owner, monitor} =
+        spawn_monitor(fn ->
+          {broker, root_id} = broker_with_topic()
+          send(parent, {:view, ReadView.new(broker, [root_id]), root_id})
+        end)
+
+      assert_receive {:view, view, root_id}
+      # the owner exited, and its table with it
+      assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}
+      assert ReadView.logical_start(view, root_id) == 0
+    end
+
+    test "a range whose horizon or end a recovery has not learned refuses the purge, to be retried",
+         %{store: store} do
+      {restarted, root_id} = restarted_with_records(store)
+      waiting = Broker.await_horizon(restarted, root_id, 2)
+
+      assert {^waiting, {:error, :metadata_unavailable}} = Broker.set_range_starts(waiting, "events", %{root_id => 1})
+
+      assert {^waiting, {:error, :metadata_unavailable}} =
+               Broker.purge(waiting, "events", {:position, Position.encode(root_id, {0, 1})})
+
+      unrecovered = Broker.seed_unrecovered_range(%{restarted | offsets: %{}}, root_id, 1)
+      assert Broker.unrecovered?(unrecovered, root_id)
+      assert {_, {:error, :metadata_unavailable}} = Broker.set_range_starts(unrecovered, "events", %{root_id => 1})
+
+      vouched = Broker.seed_durable(waiting, root_id, 2)
+      assert {_, {:ok, %{^root_id => {0, 1}}}} = Broker.set_range_starts(vouched, "events", %{root_id => 1})
+    end
+
+    test "the backlog of a reader still in an ancestor leaves out a later source's purged records",
+         %{store: store} do
+      {broker, root_id} = one_record_segments(store, 4)
+      broker = seal_active(broker, store, root_id)
+      {broker, {:ok, left_id, _right_id}} = Broker.split_range(broker, root_id)
+      broker = produce_durable(broker, store, "events", for(i <- 0..31, do: record("c#{i}", "c#{i}")))
+      own = Broker.range_end(broker, left_id)
+      assert own > 0, "no record of the batch routed to the left child"
+
+      before = Broker.consume_backlog(ReadView.new(broker, [left_id]), left_id, {0, 1})
+      broker = purge(broker, "events", %{left_id => own})
+      # the reader is in the root (source 0); the left child (source 1) is a later source, purged whole
+      assert Broker.consume_backlog(ReadView.new(broker, [left_id]), left_id, {0, 1}) == before - own
+    end
+
+    property "no read returns an offset below the start, and every offset is delivered or skipped once" do
+      check all(
+              count <- integer(2..10),
+              deleted <- list_of(boolean(), length: 10),
+              point <- integer(0..11),
+              page <- integer(1..4),
+              max_runs: 80
+            ) do
+        {:ok, store} = FakeSegmentStore.start_link()
+        {broker, root_id} = one_record_segments(store, count)
+        {broker, {:ok, _placements}} = produce(broker, store, "events", [record("tail", "tail")])
+
+        expired =
+          segments(broker, root_id) |> Enum.filter(&(&1.start_offset < count and Enum.at(deleted, &1.start_offset)))
+
+        broker = delete_segments(broker, expired)
+        point = min(point, count + 1)
+        broker = purge(broker, "events", %{root_id => point})
+
+        {delivered, skipped} = drain(broker, store, root_id, page)
+        offsets_of = fn skips -> Enum.flat_map(skips, &Enum.to_list(&1.from..(&1.from + &1.offsets - 1)//1)) end
+        {purged, removed} = Enum.split_with(skipped, &(&1.cause == :purged))
+
+        assert Enum.all?(delivered, &(&1 >= point)), "a record below the logical start was served"
+        assert Enum.sort(delivered ++ offsets_of.(skipped)) == Enum.to_list(0..count)
+
+        # by position: everything below the start is purged, every expired offset at or above it is expired
+        assert Enum.sort(offsets_of.(purged)) == Enum.to_list(0..(point - 1)//1)
+
+        assert Enum.sort(offsets_of.(removed)) ==
+                 expired |> Enum.map(& &1.start_offset) |> Enum.filter(&(&1 >= point))
+
+        Agent.stop(store)
+      end
+    end
+
+    test "purge/3 by time moves each range to the end of its segments sealed by then", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 3)
+      sealed_end = segments(broker, root_id) |> Enum.filter(&(&1.state == :sealed)) |> Broker.last_sealed_end()
+      assert sealed_end > 0
+
+      # every seal in these tests is recorded at 1_000
+      assert {^broker, {:ok, %{}}} = Broker.purge(broker, "events", {:before, 999})
+      assert {broker, {:ok, %{^root_id => {0, ^sealed_end}}}} = Broker.purge(broker, "events", {:before, 1_000})
+      # a second purge to the same point moves nothing and submits nothing
+      assert {^broker, {:ok, %{}}} = Broker.purge(broker, "events", {:before, 1_000})
+    end
+
+    test "purge/3 by position moves the issuing range up to it", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 4)
+      token = Position.encode(root_id, {0, 2})
+
+      assert {broker, {:ok, %{^root_id => {0, 2}}}} = Broker.purge(broker, "events", {:position, token})
+
+      assert {:ok, [%{value: "v2"} | _], _cursor, _skips} =
+               Broker.read_consume(broker, root_id, :start, 100, read_fun(store))
+    end
+
+    test "purge/3 refuses a position inside an ancestor, of another topic, or of an unknown range",
+         %{store: store} do
+      {broker, root_id} = one_record_segments(store, 3)
+      broker = seal_active(broker, store, root_id)
+      {broker, {:ok, left_id, _right_id}} = Broker.split_range(broker, root_id)
+
+      assert {_, {:error, :cursor_in_ancestor}} =
+               Broker.purge(broker, "events", {:position, Position.encode(left_id, {0, 1})})
+
+      assert {_, {:error, :invalid_position}} =
+               Broker.purge(broker, "events", {:position, Position.encode({"other", 1}, {1, 1})})
+
+      assert {_, {:error, :invalid_position}} =
+               Broker.purge(broker, "events", {:position, Position.encode({"events", 99}, {0, 1})})
+
+      assert {_, {:error, :invalid_position}} =
+               Broker.purge(broker, "events", {:position, Position.encode(left_id, {2, 1})})
+
+      assert {_, {:error, :invalid_position}} = Broker.purge(broker, "events", {:position, "garbage"})
+
+      # a forged offset past the range's end is refused by the live check
+      assert {_, {:error, :start_past_end}} =
+               Broker.purge(broker, "events", {:position, Position.encode(left_id, {1, 50})})
+    end
+
+    test "purge/3 by group purges what the group read, through the lineage", %{store: store} do
+      {broker, root_id} = one_record_segments(store, 4)
+      broker = seal_active(broker, store, root_id)
+      {broker, {:ok, left_id, right_id}} = Broker.split_range(broker, root_id)
+
+      # nothing committed: nothing read, nothing purged
+      assert {^broker, {:ok, %{}}} = Broker.purge(broker, "events", {:group, "g"})
+
+      {broker, :ok} = Broker.commit_offset(broker, "g", "events", %{left_id => {0, 3}, right_id => {0, 1}}, 0)
+      assert {broker, {:ok, %{^root_id => {0, 1}}}} = Broker.purge(broker, "events", {:group, "g"})
+
+      {broker, :ok} = Broker.commit_offset(broker, "g", "events", %{right_id => {0, 2}}, 0)
+      assert {_broker, {:ok, %{^root_id => {1, 2}}}} = Broker.purge(broker, "events", {:group, "g"})
+    end
+
+    test "purge/3 refuses an unknown topic and a malformed point" do
+      {broker, _root_id} = broker_with_topic()
+
+      assert {^broker, {:error, :no_such_topic}} = Broker.purge(broker, "ghost", {:before, 1})
+      assert {^broker, {:error, :invalid_purge_point}} = Broker.purge(broker, "events", {:before, -1})
+      assert {^broker, {:error, :invalid_purge_point}} = Broker.purge(broker, "events", {:group, ""})
+      assert {^broker, {:error, :invalid_purge_point}} = Broker.purge(broker, "events", :everything)
     end
   end
 

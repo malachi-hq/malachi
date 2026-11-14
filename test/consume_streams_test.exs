@@ -90,6 +90,27 @@ defmodule Malachi.ConsumeStreamsTest do
       assert {:error, :timeout} = TCPHelper.recv_frame(ctx.consumer, timeout: 300)
     end
 
+    test "a reader moved past a purged stretch with nothing left to read is told its new position (#198)",
+         ctx do
+      produce(ctx.producer, ctx.topic, ["v1", "v2", "v3"])
+      {:ok, %{stream_id: id}} = open_consume(ctx.consumer, ctx.topic, window: 1, max: 1)
+      first = records_push(ctx.consumer)
+      assert [{{0, 0}, "v1"}] = page_records(first)
+
+      # everything the reader has not read yet is purged; `expired` leaves a purge out, so only the move
+      # itself makes the empty page go out
+      root = {ctx.topic, 0}
+      position = Malachi.Position.encode(root, {0, 3})
+
+      assert {:ok, %{^root => {0, 3}}} =
+               BrokerServer.purge(DataPlaneRouter.shard_for(ctx.topic), ctx.topic, {:position, position})
+
+      consume_ack(ctx.consumer, id, first.ack, 1)
+      page = records_push(ctx.consumer)
+      assert page_records(page) == []
+      assert %{ack: {0, 3}, backlog: 0, expired: 0} = page
+    end
+
     test "the window an ack asks for is capped as at open", ctx do
       # more records than the cap, in one compressed batch
       produce(ctx.producer, ctx.topic, Enum.map(1..10_010, &"r#{&1}"))

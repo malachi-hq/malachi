@@ -143,6 +143,7 @@ defmodule Malachi.MixProject do
       "docs/guides/authentication.md": [title: "Authentication"],
       "docs/guides/per-topic-acls.md": [title: "Per-topic ACLs"],
       "docs/guides/per-topic-retention.md": [title: "Per-topic retention"],
+      "docs/guides/purging-a-topic.md": [title: "Purging a topic"],
       "docs/guides/clustering-and-resharding.md": [title: "Clustering and re-sharding"],
       "docs/guides/operations.md": [title: "Operations"],
       "README.md": [title: "Overview"],
@@ -190,6 +191,7 @@ defmodule Malachi.MixProject do
         "docs/guides/authentication.md",
         "docs/guides/per-topic-acls.md",
         "docs/guides/per-topic-retention.md",
+        "docs/guides/purging-a-topic.md",
         "docs/guides/clustering-and-resharding.md",
         "docs/guides/operations.md",
         "README.md"

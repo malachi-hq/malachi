@@ -266,6 +266,14 @@ defmodule Malachi.I18n do
       "pt_BR" => "🔗 Tópico %{topic} desvinculado da sua política por %{actor}",
       "en_US" => "🔗 Topic %{topic} detached from its policy by %{actor}"
     },
+    topic_purged: %{
+      "pt_BR" =>
+        "✂️ Tópico %{topic} purgado até %{point} por %{actor}: início lógico movido em %{ranges} range(s) " <>
+          "(purge lógico: os registros continuam em disco até a retenção remover o segmento inteiro)",
+      "en_US" =>
+        "✂️ Topic %{topic} purged up to %{point} by %{actor}: logical start moved on %{ranges} range(s) " <>
+          "(logical purge: the records stay on disk until retention removes their whole segment)"
+    },
     audit_event_logged: %{
       "pt_BR" => "📝 Evento de auditoria registrado: %{event_type}",
       "en_US" => "📝 Audit event logged: %{event_type}"
@@ -1042,6 +1050,16 @@ defmodule Malachi.I18n do
           "%{held} outros pulos deste leitor foram contados sem linha desde a última",
       "en_US" =>
         "⚠️ Group %{group} on topic %{topic} was moved past %{offsets} offsets that are no longer stored " <>
+          "(range %{range}, source range %{source_range}, origin %{origin}, span %{span}); " <>
+          "%{held} more skips of this reader were counted without a line since the last one"
+    },
+    purge_consumer_skipped: %{
+      "pt_BR" =>
+        "✂️ O grupo %{group} no tópico %{topic} foi movido além de %{offsets} offsets purgados por um " <>
+          "operador (range %{range}, range de origem %{source_range}, origem %{origin}, extensão %{span}); " <>
+          "%{held} outros pulos deste leitor foram contados sem linha desde a última",
+      "en_US" =>
+        "✂️ Group %{group} on topic %{topic} was moved past %{offsets} offsets an operator purged " <>
           "(range %{range}, source range %{source_range}, origin %{origin}, span %{span}); " <>
           "%{held} more skips of this reader were counted without a line since the last one"
     }

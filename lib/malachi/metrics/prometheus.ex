@@ -219,15 +219,24 @@ defmodule Malachi.Metrics.Prometheus do
   # refusals the closed set of replies.
   defp retention_metrics(retention) do
     skip_labels = fn skip ->
-      [topic: skip.topic, reader: skip.reader, group: skip.group, origin: skip.origin, span: skip.span]
+      [
+        topic: skip.topic,
+        reader: skip.reader,
+        group: skip.group,
+        origin: skip.origin,
+        span: skip.span,
+        cause: skip.cause
+      ]
     end
 
     [
       metric(
         "malachi_retention_skips_total",
         :counter,
-        "Times a consumer was moved past data no longer stored (expired or deleted), counted once per " <>
-          "distinct skip; origin=cursor is a reader that fell behind, origin=start one that had no position; " <>
+        "Times a consumer was moved past data no longer served, counted once per distinct skip; " <>
+          "cause=expired is data retention or an operator removed, cause=purged a stretch below the range's " <>
+          "logical start (an operator's purge); origin=cursor is a reader that fell behind, origin=start one " <>
+          "that had no position; " <>
           "reader=group names the group, reader=none is a fetch outside a group and reader=other a group " <>
           "folded by the label cap (both with an empty group)",
         Enum.map(retention.skips, &{skip_labels.(&1), &1.events})

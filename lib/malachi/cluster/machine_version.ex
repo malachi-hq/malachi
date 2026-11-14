@@ -100,7 +100,9 @@ defmodule Malachi.Cluster.MachineVersion do
   # `Malachi.Metadata`: a wider tuple is a new command, so it takes the next version.
   # 8 introduces the group fence in `Malachi.Metadata` (#275): `{:commit_offset, group, topic, offsets,
   # generation}` and `{:open_group, group, topic}`, at the next version since 7 is released.
-  @code_version 8
+  # 9 introduces the manual purge in `Malachi.Metadata` (#198): `{:set_range_starts, topic, starts}`,
+  # and the topic export format that carries a range's logical start.
+  @code_version 9
 
   @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
   @type command_key :: {atom(), non_neg_integer()}

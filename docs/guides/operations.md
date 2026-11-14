@@ -367,8 +367,10 @@ The sweep (only the node that leads a vnode sweeps it, so read these summed acro
 
 The readers:
 
-- **`malachi_retention_skips_total{topic,reader,group,origin,span}`**: how many times a reader was moved
-  past data no longer stored (expired by retention, or deleted by an operator). Each distinct skip is
+- **`malachi_retention_skips_total{topic,reader,group,origin,span,cause}`**: how many times a reader was
+  moved past data no longer served. `cause="expired"` is data retention expired or an operator deleted;
+  `cause="purged"` is a stretch below the range's logical start, which an operator's purge removed from
+  every reader on purpose (see [Purging a topic](purging-a-topic.md)). Each distinct skip is
   counted once, however often a group re-reads it before committing. `reader` says which kind of reader
   it was: `group` names it in `group`, `none` is a fetch outside a group and `other` a group folded by
   the label cap, both with an empty `group`. Nothing reserves a group name, so `reader` is what keeps a
@@ -376,15 +378,15 @@ The readers:
   one to alert on**: a group that held a position and fell behind retention. `origin="start"` is a
   reader that had no position, a new group or a range's children after a split, which start over the
   range's history; retention reaching them is expected.
-- **`malachi_retention_offsets_skipped_total{topic,reader,group,origin,span}`**: how many offsets those skips
+- **`malachi_retention_offsets_skipped_total{topic,reader,group,origin,span,cause}`**: how many offsets those skips
   stepped over. `span="exact"` is exact. `span="upper_bound"` is a skip over the ancestor of a split
   range: the count covers the ancestor's whole range, of which this reader would only have received its
   own key slice. `span="unknown"` is an ancestor with nothing left stored whose end this node could not
   recover after a restart, so only the fact of the skip is known and the offsets are 0. It counts
   **offsets, not records lost**.
 
-A suggested alert: `increase(malachi_retention_skips_total{origin="cursor"}[15m]) > 0`, which names the
-group that lost data. The first skip of a reader is also logged, then at most once per reader per
+A suggested alert: `increase(malachi_retention_skips_total{origin="cursor",cause="expired"}[15m]) > 0`,
+which names the group that lost data. Without `cause="expired"` it also fires on every purge. The first skip of a reader is also logged, then at most once per reader per
 `MALACHI_RETENTION_SKIP_LOG_WINDOW_MS` (10 minutes), with the count of skips held back since the last
 line.
 
@@ -678,8 +680,11 @@ with roles): until the cluster reaches 5, assigning a role is refused on every s
 upgrade" message over the wire and in `mix malachi.user`. A default user that carries a role is not created,
 while creating a user without one keeps working. `node scripts/user.js create --role` creates the user and
 then sets the role in a second request, so on such a cluster it leaves the user created without a role. Finalizing it gives up rolling back below the release that
-introduced the roles. Each time, the machines that gained nothing move with it at no cost, and a member on
-the older build refuses the new command until the whole group has moved.
+introduced the roles. Version **9** adds the manual purge (`set_range_starts`, [Purging a topic](purging-a-topic.md)):
+until the cluster reaches 9, `mix malachi.purge` and api key 35 are refused with the same "finish the rolling
+upgrade" message, and a vnode split cannot move a purged topic to a vnode below 9. Each time, the machines
+that gained nothing move with it at no cost, and a member on the older build refuses the new command until
+the whole group has moved.
 
 The same rule applies at every step: to keep a rollback to the previous build possible while you roll
 out, upgrade with `MALACHI_RA_MACHINE_VERSION` set to the version the cluster runs now, and finalize

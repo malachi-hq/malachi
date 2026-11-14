@@ -265,6 +265,54 @@ defmodule Malachi.LogProtocolTest do
     end
   end
 
+  describe "admin manual purge (api key 35, #198)" do
+    setup do
+      %{topic: "wire-purge-#{System.unique_integer([:positive])}"}
+    end
+
+    defp purge(socket, topic, point),
+      do: TCPHelper.request(socket, Wire.purge_topic_key(), 7, Wire.encode_purge_topic_req(topic, point))
+
+    test "an admin purges by position; readers are clamped and the reply lists the moved start", ctx do
+      with_session("admin", "admin123", fn socket ->
+        assert {0, _} = create_topic(socket, ctx.topic)
+        root = {ctx.topic, 0}
+        records = for i <- 0..3, do: Malachi.Log.Record.new("v#{i}", key: "k#{i}")
+        {:ok, _} = BrokerServer.produce(Malachi.LogBroker, ctx.topic, records)
+
+        assert {0, payload} = purge(socket, ctx.topic, {:position, Malachi.Position.encode(root, {0, 2})})
+        assert Wire.decode_purge_topic_resp(payload) == [{0, 0, 2}]
+
+        assert {:ok, read, _cursor, [%{cause: :purged}]} =
+                 BrokerServer.read_consume(Malachi.LogBroker, root, :start, 10)
+
+        assert Enum.map(read, & &1.value) == ["v2", "v3"]
+
+        # by time before any seal, and by a group that read nothing: nothing moves
+        assert {0, payload} = purge(socket, ctx.topic, {:before, 0})
+        assert Wire.decode_purge_topic_resp(payload) == []
+        assert {0, payload} = purge(socket, ctx.topic, {:group, "nobody"})
+        assert Wire.decode_purge_topic_resp(payload) == []
+      end)
+    end
+
+    test "a refusal comes back as its reason string", ctx do
+      with_session("admin", "admin123", fn socket ->
+        assert {code, payload} = purge(socket, ctx.topic, {:before, 0})
+        refute ok?(code)
+        assert reason(payload) == "no_such_topic"
+      end)
+    end
+
+    test "a session without :admin is refused", ctx do
+      with_session("producer", "producer123", fn socket ->
+        assert {code, payload} = purge(socket, ctx.topic, {:before, 0})
+        refute ok?(code)
+        assert reason(payload) == "permission_denied"
+      end)
+    end
+  end
+
   describe "admin storage policies (api keys 17 to 21)" do
     setup do
       suffix = System.unique_integer([:positive])

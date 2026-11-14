@@ -156,6 +156,16 @@ defmodule Malachi.BrokerServer do
     do: GenServer.call(server, {:bind_topic_policy, topic, policy_name}, @bind_call_timeout_ms)
 
   @doc """
+  Purges `topic` up to `point` (#198, `Malachi.Broker.purge/3`): moves the logical start of the ranges
+  the point covers, in one command. `{:ok, %{range_id => {from, to}}}`, `{:ok, %{}}` when the point moves
+  nothing, or a refusal; `{:error, :metadata_unavailable}` while this node has not yet heard from the
+  topic's vnode, since resolving the point from an empty placeholder would find no range to move.
+  """
+  @spec purge(GenServer.server(), Malachi.Metadata.topic_name(), Broker.purge_point()) ::
+          {:ok, %{Malachi.Metadata.range_id() => {non_neg_integer(), non_neg_integer()}}} | {:error, term()}
+  def purge(server, topic, point), do: GenServer.call(server, {:purge, topic, point}, @bind_call_timeout_ms)
+
+  @doc """
   The policy name `topic` is bound to (`nil` for none), `{:error, :no_such_topic}`, or
   `{:error, :metadata_unavailable}` while this node has not yet heard from the topic's vnode.
   """
@@ -616,6 +626,15 @@ defmodule Malachi.BrokerServer do
   def handle_call({:bind_topic_policy, topic, policy_name}, _from, state) do
     {broker, reply} = Broker.bind_topic_policy(state.broker, topic, policy_name)
     {:reply, reply, %{state | broker: broker}}
+  end
+
+  def handle_call({:purge, topic, point}, _from, state) do
+    if topic_metadata_ready?(state, topic) do
+      {broker, reply} = Broker.purge(state.broker, topic, point)
+      {:reply, reply, %{state | broker: broker}}
+    else
+      {:reply, {:error, :metadata_unavailable}, state}
+    end
   end
 
   # Gated like consume: before the topic's vnode has answered, the cache holds an empty placeholder for

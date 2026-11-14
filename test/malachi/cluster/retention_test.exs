@@ -72,6 +72,58 @@ defmodule Malachi.Cluster.RetentionTest do
     assert result == ["s0", "s1"]
   end
 
+  describe "below the logical start (the manual purge, #198)" do
+    defp purged(metadata, start) do
+      {metadata, {:ok, _moves}} = Metadata.apply(metadata, {:set_range_starts, "t", %{@range => start}})
+      metadata
+    end
+
+    test "sealed segments wholly below the start expire regardless of age and size; the boundary stays" do
+      # each segment is one offset long: s0 = [0,1), s1 = [1,2), s2 = [2,3)
+      metadata = [{"s0", 0, 100, 9_999}, {"s1", 1, 100, 9_999}, {"s2", 2, 100, 9_999}] |> with_sealed() |> purged(2)
+      assert expired(metadata, 10_000, %{}) == ["s0", "s1"]
+    end
+
+    test "a start inside a segment keeps that segment" do
+      base = elem(Metadata.apply(Metadata.new(), {:create_topic, "t", 4}), 0)
+      {metadata, :ok} = Metadata.apply(base, {:register_segment, @range, "wide", [:b1], 0})
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, "wide", 10, 100, 0})
+
+      assert metadata |> purged(9) |> expired(10_000, %{}) == []
+      assert metadata |> purged(10) |> expired(10_000, %{}) == ["wide"]
+    end
+
+    test "unions with the age and size rules without duplicates" do
+      metadata = [{"s0", 0, 100, 1_000}, {"s1", 1, 100, 9_900}, {"s2", 2, 100, 9_900}] |> with_sealed() |> purged(2)
+      assert expired(metadata, 10_000, %{max_age_ms: 5_000}) == ["s0", "s1"]
+    end
+
+    test "a policy that keeps everything still lets a purge reclaim" do
+      metadata = [{"s0", 0, 100, 0}, {"s1", 1, 100, 0}] |> with_sealed() |> purged(1)
+      assert expired(metadata, 10_000, %{max_age_ms: nil, max_bytes: nil}) == ["s0"]
+    end
+
+    test "never expires the active segment, however far the start is" do
+      base = elem(Metadata.apply(Metadata.new(), {:create_topic, "t", 4}), 0)
+      {metadata, :ok} = Metadata.apply(base, {:register_segment, @range, "active", [:b1], 0})
+      assert metadata |> purged(50) |> expired(10_000, %{}) == []
+    end
+
+    property "no segment holding an offset at or above the start is expired by the purge rule" do
+      check all(
+              count <- integer(1..8),
+              start <- integer(0..9),
+              max_runs: 100
+            ) do
+        metadata = 0..(count - 1) |> Enum.map(&{"s#{&1}", &1, 100, 0}) |> with_sealed()
+        start = min(start, count)
+        result = metadata |> purged(start) |> expired(10_000, %{})
+
+        assert Enum.sort(result) == Enum.sort(for i <- 0..(count - 1), i + 1 <= start, do: "s#{i}")
+      end
+    end
+  end
+
   describe "per-topic policy" do
     # The topic points at a name (its own state, in its vnode); the definitions come from the cluster's
     # policy store, which the sweep resolves once per pass and hands in.
