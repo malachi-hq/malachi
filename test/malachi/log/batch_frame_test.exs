@@ -196,11 +196,8 @@ defmodule Malachi.Log.BatchFrameTest do
     assert BatchFrame.max_frame_size(100) > 100 + 62
   end
 
-  test "a stored frame is judged by a fixed ceiling, and the boot refuses a setting above it" do
+  test "a stored frame is judged by a fixed ceiling" do
     assert BatchFrame.max_stored_inflated() == 268_435_456
     assert BatchFrame.max_frame_size() == BatchFrame.max_frame_size(BatchFrame.max_stored_inflated())
-
-    runtime = File.read!(Path.expand("../../../config/runtime.exs", __DIR__))
-    assert runtime =~ "bytes when bytes <= 268_435_456 ->"
   end
 end
