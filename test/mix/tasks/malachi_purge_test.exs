@@ -124,6 +124,17 @@ defmodule Mix.Tasks.Malachi.PurgeTest do
       assert message =~ "the purge may still apply; run the same command again (with the same --request)"
     end
 
+    test "an RPC timeout on a purge without a request does not mention --request" do
+      assert {:error, message} = Task.execute(["t"], [group: "g"], recording_call({:error, :timeout}))
+      assert message =~ "the purge may still apply; run the same command again to see what it moved"
+      refute message =~ "--request"
+    end
+
+    test "the task's RPC budget outlasts the node's own deadlines for a purge" do
+      # the durable request entry (5 s), the broker (4 s) and the flush after the purge (5 s)
+      assert Task.rpc_timeout_ms() > 5_000 + 4_000 + 5_000
+    end
+
     test "a refusal under a request is printed as the refusal" do
       assert {:error, "no_such_topic"} =
                Task.execute(["t"], [{:group, "g"} | @request], recording_call({:ok, {:error, :no_such_topic}}))

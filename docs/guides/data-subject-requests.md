@@ -79,9 +79,10 @@ If it had already been sent to the control plane, its `topic_purge_planned` entr
 set out to move. To see whether it did, read the ranges' logical starts back: the console's
 `GET /api/v1/topics/<topic>/ranges` lists each range with its `logical_start`. That list is a sample of
 the node's own copy of the control plane, so take a reading whose `sampled_at` is later than the timeout
-and whose `stale` is false. A range whose start is at or past the planned "to" holds nothing below that
-point for any reader; a start below it may still be catching up, so read again, or rely on the second
-run.
+and whose `stale` is false. A range whose start is at or past the planned "to" means the purge
+committed: the node you read serves nothing below that point, and every other node follows within one
+metadata refresh (one second by default). A start below it may still be catching up, so read again, or
+rely on the second run.
 
 ## What the audit trail records
 
@@ -92,8 +93,11 @@ Each run writes these entries to the audit log:
    until this entry is written out: with file output it is synced to disk first, so a node killed right
    after the purge commits still leaves the request in the trail. When the audit log cannot write it (the
    log is restarting, does not answer within 5 s, or fails to write), the purge is refused with
-   `audit_unavailable` and never sent; check the audit log and run the same command again. With
-   `MALACHI_AUDIT_LOG_OUTPUT=ets_only` the entry is only in memory, so ship the log as described below.
+   `audit_unavailable` and never sent; check the audit log and run the same command again. That includes
+   file output with no file to write to (a directory the node cannot create, say). With
+   `MALACHI_AUDIT_LOG_OUTPUT=stdout` the entry is handed to the logger, which writes it asynchronously,
+   so a node killed at that moment can lose it; with `ets_only` it is only in memory. Ship the log as
+   described below.
 2. `topic_purge_planned`, when the purge is about to move something: the same request id, and each
    range's logical start as the node sees it and the start it is about to move to. It is written after
    the point is resolved and before the command is sent, so it is there even when the control plane

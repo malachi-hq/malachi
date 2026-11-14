@@ -385,6 +385,31 @@ defmodule Malachi.Metrics do
     :ok
   end
 
+  @purge_results [:applied, :nothing, :refused]
+  @purge_kinds [:before, :position, :group, :other]
+
+  @doc """
+  Records one purge (`[:malachi, :purge, :done]`): its outcome (`:applied` when a start moved, `:nothing`
+  when none did, `:refused`), the kind of point, whether a data subject request came with it, and how
+  many offsets it stopped serving. Every label comes from a closed set, so the series are fixed.
+  """
+  @spec record_purge(atom(), atom(), boolean(), non_neg_integer()) :: :ok
+  def record_purge(result, kind, request, offsets) when result in @purge_results and is_boolean(request) do
+    kind = if kind in @purge_kinds, do: kind, else: :other
+    key = {:purge, result, kind, request}
+    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
+    :ets.update_counter(@metrics_table, :purged_offsets, {2, offsets}, {:purged_offsets, 0})
+    :ok
+  end
+
+  # Every combination of the purge labels, zero included, so a series exists before its first purge.
+  defp purge_counts do
+    for result <- @purge_results, kind <- @purge_kinds, request <- [true, false] do
+      {[result: Atom.to_string(result), kind: Atom.to_string(kind), request: to_string(request)],
+       get_counter({:purge, result, kind, request})}
+    end
+  end
+
   defp storage_failure_bucket(reason) when reason in [:enospc, :eio, :eacces], do: reason
   defp storage_failure_bucket(_reason), do: :other
 
@@ -685,6 +710,8 @@ defmodule Malachi.Metrics do
         storage_failure_eio: get_counter({:storage_failure, :eio}),
         storage_failure_eacces: get_counter({:storage_failure, :eacces}),
         storage_failure_other: get_counter({:storage_failure, :other}),
+        purges: purge_counts(),
+        purged_offsets: get_counter(:purged_offsets),
         scrub_segments_verified: get_counter(:scrub_segments_verified),
         scrub_segments_repaired: get_counter(:scrub_segments_repaired),
         scrub_segments_unrepairable: get_counter(:scrub_segments_unrepairable),

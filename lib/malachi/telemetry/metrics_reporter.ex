@@ -28,6 +28,7 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :cluster, :sealed_copies_settled],
     [:malachi, :cluster, :reconcile_degraded],
     [:malachi, :retention, :skip],
+    [:malachi, :purge, :done],
     [:malachi, :retention, :expire],
     [:malachi, :retention, :orphan_left],
     [:malachi, :retention, :orphan_removed],
@@ -80,6 +81,15 @@ defmodule Malachi.Telemetry.MetricsReporter do
 
   def handle_event([:malachi, :storage, :integrity], _measurements, %{result: result}, _config) do
     Metrics.record_integrity_failure(result)
+  end
+
+  def handle_event(
+        [:malachi, :purge, :done],
+        %{offsets: offsets},
+        %{result: result, kind: kind, request: request},
+        _config
+      ) do
+    Metrics.record_purge(result, kind, request, offsets)
   end
 
   def handle_event([:malachi, :storage, :failure], _measurements, %{reason: reason}, _config) do

@@ -59,6 +59,11 @@ defmodule Malachi.Test.MetricsFixtures do
         storage_failure_eio: 1,
         storage_failure_eacces: 0,
         storage_failure_other: 2,
+        purges: [
+          {[result: "applied", kind: "position", request: "true"], 3},
+          {[result: "refused", kind: "group", request: "false"], 1}
+        ],
+        purged_offsets: 120,
         scrub_segments_verified: 4200,
         scrub_segments_repaired: 3,
         scrub_segments_unrepairable: 2,

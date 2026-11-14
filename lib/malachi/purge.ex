@@ -61,8 +61,13 @@ defmodule Malachi.Purge do
   not answer in time, the purge is refused as `:timeout` and may still commit; its plan is then the record
   of what it set out to move, and the console's ranges (`GET /api/v1/topics/:topic/ranges`, field
   `logical_start`, a sample of the node's copy of the control plane) show a start at or past the plan's
-  "to" once it did. A purge still queued in the broker when its caller's deadline passed is dropped
+  "to" once it did; other nodes follow within one metadata refresh. A purge still queued in the broker when its caller's deadline passed is dropped
   without a plan (`Malachi.BrokerServer.purge/4`).
+
+  ## Telemetry
+
+  Every purge emits `[:malachi, :purge, :done]` (`Malachi.Telemetry`), counted on `/metrics` as
+  `malachi_purges_total{result, kind, request}` and `malachi_purged_offsets_total`.
 
   ## When it takes effect
 
@@ -127,21 +132,57 @@ defmodule Malachi.Purge do
   @spec purge(String.t(), Broker.purge_point(), AdminCall.actor(), request()) ::
           {:ok, moves()} | {:error, reason()}
   def purge(topic, point, actor, request \\ nil) do
-    case check(topic, point, request) do
-      {:ok, request} ->
-        run(topic, point, actor, request)
+    result =
+      case check(topic, point, request) do
+        {:ok, request} ->
+          run(topic, point, actor, request)
 
-      {:error, reason, metadata, request} ->
-        # A valid request is recorded even when its topic or point is refused, so every request that
-        # reached the cluster can be found by its id; the refused field is in the metadata by size only.
-        # The purge is refused either way, so a request entry that could not be written changes nothing.
-        _recorded = record(request, actor, metadata)
-        refusal = put_request_id(metadata, request)
-        AdminCall.audit(:topic_purged, actor, "purge_topic", {:error, reason}, refusal, &reason_string/1)
-        flush_audit()
-        {:error, reason}
-    end
+        {:error, reason, metadata, request} ->
+          # A valid request is recorded even when its topic or point is refused, so every request that
+          # reached the cluster can be found by its id; the refused field is in the metadata by size only.
+          # The purge is refused either way, so a request entry that could not be written changes nothing.
+          _recorded = record(request, actor, metadata)
+          refusal = put_request_id(metadata, request)
+          AdminCall.audit(:topic_purged, actor, "purge_topic", {:error, reason}, refusal, &reason_string/1)
+          flush_audit()
+          {:error, reason}
+      end
+
+    report(topic, point, request, result)
+    result
   end
+
+  # `[:malachi, :purge, :done]` for every purge, applied, moving nothing or refused, so the action is seen
+  # in metrics as well as in the audit trail. Measurements count the ranges moved and the offsets no
+  # longer served; the metadata holds the checked topic (by size when refused), the kind of point, the
+  # outcome and whether a request came with it, never the request's id or reason.
+  defp report(topic, point, request, result) do
+    {outcome, reason} =
+      case result do
+        {:ok, _moves} -> if(moved_count(result) > 0, do: {:applied, nil}, else: {:nothing, nil})
+        {:error, reason} -> {:refused, reason}
+      end
+
+    :telemetry.execute(
+      [:malachi, :purge, :done],
+      %{count: 1, ranges: moved_count(result), offsets: purged_offsets(result)},
+      %{
+        topic: AdminCall.describe_topic(topic),
+        kind: point_kind(point),
+        result: outcome,
+        reason: reason,
+        request: request != nil
+      }
+    )
+  end
+
+  defp point_kind({kind, _value}) when kind in [:before, :position, :group], do: kind
+  defp point_kind(_point), do: :other
+
+  defp purged_offsets({:ok, moves}),
+    do: moves |> Enum.map(fn {_range_id, {from, to}} -> max(to - from, 0) end) |> Enum.sum()
+
+  defp purged_offsets(_refused), do: 0
 
   defp run(topic, point, actor, request) do
     metadata = %{topic: topic, point: describe_point(point)}

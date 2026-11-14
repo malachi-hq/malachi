@@ -179,14 +179,20 @@ defmodule Mix.Tasks.Malachi.Purge do
   defp finish({:ok, {:error, reason}}, _topic, _point, _request), do: {:error, Purge.reason_string(reason)}
   # The node did not answer within the RPC budget. The call is not stopped there, so the purge may still
   # apply: say so, the way a purge that answers `timeout` does.
-  defp finish({:error, :timeout}, _topic, _point, _request),
-    do:
-      {:error,
-       Rpc.rpc_error(:timeout) <>
-         ": the node did not answer in time and the purge may still apply; run the same command again " <>
-         "(with the same --request) to see what it moved"}
+  defp finish({:error, :timeout}, _topic, _point, request) do
+    again = if request, do: "run the same command again (with the same --request)", else: "run the same command again"
+
+    {:error,
+     Rpc.rpc_error(:timeout) <>
+       ": the node did not answer in time and the purge may still apply; #{again} to see what it moved"}
+  end
 
   defp finish({:error, reason}, _topic, _point, _request), do: {:error, Rpc.rpc_error(reason)}
+
+  @doc false
+  # The RPC budget, above the node's own deadlines for a purge (#308); read by the tests.
+  @spec rpc_timeout_ms() :: pos_integer()
+  def rpc_timeout_ms, do: @rpc_timeout_ms
 
   @limits "(logical purge, not erasure: every record below the point, from every subject, is no longer " <>
             "readable; the bytes stay on disk until their segment expires)"

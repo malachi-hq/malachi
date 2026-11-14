@@ -112,6 +112,19 @@ defmodule Malachi.Metrics.Prometheus do
         {[], ops.producer_streams_open}
       ]),
       metric(
+        "malachi_purges_total",
+        :counter,
+        "Manual purges by outcome (applied moved a logical start, nothing moved none, refused), kind of point " <>
+          "(before, position, group, other) and whether a data subject request came with it",
+        ops.purges
+      ),
+      metric(
+        "malachi_purged_offsets_total",
+        :counter,
+        "Offsets manual purges stopped serving to every reader (a logical purge: the bytes stay on disk)",
+        [{[], ops.purged_offsets}]
+      ),
+      metric(
         "malachi_storage_failures_total",
         :counter,
         "Storage operations that failed on a segment copy, which was then taken out of service, by reason " <>

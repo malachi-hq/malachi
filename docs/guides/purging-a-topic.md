@@ -68,7 +68,9 @@ each range's logical start before and after. A purge that moves something also w
 `topic_purge_planned` just before its command is sent, with the starts it is about to set: if the purge
 answers `timeout` after it was sent, it may still commit, and the plan is then the record of what it set
 out to move; a purge still waiting on the node when its caller gave up is dropped there, unplanned. Each
-range's current `logical_start` is listed by the console's `GET /api/v1/topics/<topic>/ranges`.
+range's current `logical_start` is listed by the console's `GET /api/v1/topics/<topic>/ranges`. Every
+purge is also counted on `/metrics` as `malachi_purges_total{result, kind, request}` and
+`malachi_purged_offsets_total`, from the telemetry event `[:malachi, :purge, :done]`.
 
 ## When it takes effect
 

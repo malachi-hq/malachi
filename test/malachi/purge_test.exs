@@ -339,8 +339,10 @@ defmodule Malachi.PurgeTest do
         end
 
         assert {:ok, _moves} = Task.await(task)
-        assert_receive {:trace, ^audit, :receive, {:"$gen_cast", {:log_event, :topic_purged, _, _, _, _}}}, 2_000
-        assert_receive {:trace, ^audit, :receive, {:"$gen_call", {^caller, _tag}, :flush_now}}, 2_000
+
+        # In order: the purge's own entry reaches the log before the flush it then asks for.
+        assert next_trace(audit, caller) == :topic_purged
+        assert next_trace(audit, caller) == :flush_now
       after
         :erlang.trace(audit, false, [:receive])
       end
@@ -500,10 +502,86 @@ defmodule Malachi.PurgeTest do
     assert Purge.purge(ctx.topic, {:group, "billing\u00A0team"}, ctx.actor) == {:ok, %{}}
   end
 
+  describe "telemetry" do
+    setup do
+      parent = self()
+      id = "purge-telemetry-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        id,
+        [:malachi, :purge, :done],
+        fn _event, measurements, metadata, _config ->
+          send(parent, {:purge_done, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(id) end)
+    end
+
+    defp purge_done(topic) do
+      receive do
+        {:purge_done, measurements, %{topic: ^topic} = metadata} -> {measurements, metadata}
+      after
+        2_000 -> flunk("no [:malachi, :purge, :done] for #{topic}")
+      end
+    end
+
+    test "an applied purge reports the ranges moved and the offsets it stopped serving", ctx do
+      {:ok, request} = Request.new("DSR-tel-#{ctx.actor}", "LGPD art. 18 request")
+      assert {:ok, _} = Purge.purge(ctx.topic, {:position, Position.encode(ctx.root, {0, 3})}, ctx.actor, request)
+
+      assert {%{count: 1, ranges: 1, offsets: 3}, %{kind: :position, result: :applied, reason: nil, request: true}} =
+               purge_done(ctx.topic)
+    end
+
+    test "a purge that moves nothing and a refused one are reported too, without a request", ctx do
+      assert {:ok, %{}} = Purge.purge(ctx.topic, {:group, "nobody"}, ctx.actor)
+
+      assert {%{count: 1, ranges: 0, offsets: 0}, %{kind: :group, result: :nothing, request: false}} =
+               purge_done(ctx.topic)
+
+      assert {:error, :invalid_purge_point} = Purge.purge(ctx.topic, {:before, -1}, ctx.actor)
+
+      assert {%{ranges: 0, offsets: 0}, %{kind: :before, result: :refused, reason: :invalid_purge_point}} =
+               purge_done(ctx.topic)
+
+      assert {:error, :invalid_topic} = Purge.purge("a/b", :everything, ctx.actor)
+      assert {_, %{kind: :other, result: :refused, reason: :invalid_topic}} = purge_done("<3 bytes>")
+    end
+
+    test "the reporter counts purges by outcome, kind and request, and the offsets purged", ctx do
+      before = Malachi.Metrics.get_system_metrics().operations
+      {:ok, _} = Purge.purge(ctx.topic, {:position, Position.encode(ctx.root, {0, 2})}, ctx.actor)
+      after_ = Malachi.Metrics.get_system_metrics().operations
+
+      count = fn ops ->
+        Enum.find_value(ops.purges, fn {labels, n} ->
+          labels == [result: "applied", kind: "position", request: "false"] && n
+        end)
+      end
+
+      assert count.(after_) - count.(before) >= 1
+      assert after_.purged_offsets - before.purged_offsets >= 2
+      assert length(after_.purges) == 24
+    end
+  end
+
   test "the largest token and group name the check accepts get past it", ctx do
     # A 1024-byte token is not a position the topic issued, so the broker refuses it, but not as a bad point.
     assert Purge.purge(ctx.topic, {:position, :binary.copy(<<1>>, 1024)}, ctx.actor) == {:error, :invalid_position}
     assert Purge.purge(ctx.topic, {:group, String.duplicate("g", 255)}, ctx.actor) == {:ok, %{}}
+  end
+
+  # The next message the audit log received from this purge's process, or its topic_purged entry (the
+  # plan arrives from the broker, so it is skipped), as :topic_purged or :flush_now, in arrival order.
+  defp next_trace(audit, caller) do
+    receive do
+      {:trace, ^audit, :receive, {:"$gen_cast", {:log_event, :topic_purged, _, _, _, _}}} -> :topic_purged
+      {:trace, ^audit, :receive, {:"$gen_call", {^caller, _tag}, :flush_now}} -> :flush_now
+    after
+      2_000 -> :none
+    end
   end
 
   defp wait_until(fun, attempts \\ 100) do
