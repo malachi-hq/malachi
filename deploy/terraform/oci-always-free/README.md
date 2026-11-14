@@ -41,7 +41,9 @@ The daily run is the systemd timer `malachi-daily.timer` on the orchestrator ins
    so a broken new commit cannot block the teardown. The restore is tried three times; if it still fails, the run ends
    as `restore-failed` with no destroy, and the next run tries again. On an orchestrator where no apply has ever
    succeeded there is nothing to restore, so the destroy uses the stack's configuration, which is the only one that
-   can remove what a failed first apply created. It then lists what is left again and publishes the report to the
+   can remove what a failed first apply created. It then lists what is left again. OCI Search follows the services
+   with a delay and can still list what the destroy just removed, so a count above zero is repeated every 30 seconds
+   for up to ten minutes (`SWEEP_SETTLE_LIMIT`) before it is called a leak. Last, it publishes the report to the
    topic the maintainer subscribed to.
 
 The report ends with a line that says the numbers are informative only. The exit code agrees with the verdict.
@@ -61,7 +63,7 @@ The report ends with a line that says the numbers are informative only. The exit
 | `not-ready` | The nodes never reported healthy at the load balancer. |
 | `leftovers` | The cluster compartment was not empty before the apply. Nothing was applied; the destroy then ran. |
 | `destroy-failed` | The destroy job did not succeed. **The cluster may still exist.** Check the stack in Resource Manager. |
-| `leak` | Resources remained after a destroy that reported success. The run fails loudly. |
+| `leak` | Resources remained after a destroy that reported success, still listed ten minutes later. The report lists each one with its type, name and state. The run fails loudly. |
 
 The `micro memory` line says `over-limit` when the peak is above 70% of 1 GB (a proposal, not yet measured). That
 line is information for the maintainer: the verdict does not change. A reading that cannot be made says `unmeasured`,
