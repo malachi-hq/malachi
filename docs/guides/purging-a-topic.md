@@ -64,7 +64,11 @@ there was nothing to purge.
 
 On the wire it is api key 35 (`purge_topic`), `admin` only. Every purge, and every refusal, is written to
 the audit log as `topic_purged`, with the user who made it (`cli@<node>` for the mix task), the point, and
-each range's logical start before and after.
+each range's logical start before and after. A purge that moves something also writes
+`topic_purge_planned` just before its command is sent, with the starts it is about to set: if the purge
+answers `timeout` after it was sent, it may still commit, and the plan is then the record of what it set
+out to move; a purge still waiting on the node when its caller gave up is dropped there, unplanned. Each
+range's current `logical_start` is listed by the console's `GET /api/v1/topics/<topic>/ranges`.
 
 ## When it takes effect
 
@@ -85,7 +89,7 @@ leaves purged stretches out, so a client alerting on it does not page on a purge
 | reason | meaning |
 |---|---|
 | `no_such_topic` | the topic does not exist |
-| `invalid_purge_point` | a negative time, a position token that is empty or over 1024 bytes, a group name that is empty, over 255 bytes or holds a control, format or separator character, or no point at all; a group with such a name can still be purged by time or by position |
+| `invalid_purge_point` | a negative time, a position token that is empty or over 1024 bytes, a group name that is empty, over 255 bytes or holds a control, format, line separator or paragraph separator character, or no point at all; a group with such a name can still be purged by time or by position |
 | `invalid_topic` | a topic name the control plane would never accept (`[A-Za-z0-9._-]`, at most 255 bytes) |
 | `invalid_request` | a data subject request whose id or reason is missing or out of bounds ([Data subject requests](data-subject-requests.md)) |
 | `invalid_position` | the token does not decode, names another topic, or a range or source the topic does not have |

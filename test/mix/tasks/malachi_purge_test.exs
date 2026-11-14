@@ -143,7 +143,8 @@ defmodule Mix.Tasks.Malachi.PurgeTest do
       _ = :sys.get_state(Malachi.AuditLog)
       events = Enum.filter(Malachi.AuditLog.get_events_by_user("cli@#{node()}"), &(&1.metadata[:request_id] == id))
 
-      assert events |> Enum.map(& &1.event_type) |> Enum.sort() == [:purge_request_recorded, :topic_purged]
+      assert events |> Enum.map(& &1.event_type) |> Enum.sort() ==
+               [:purge_request_recorded, :topic_purge_planned, :topic_purged]
     end
   end
 

@@ -160,10 +160,20 @@ defmodule Malachi.BrokerServer do
   the point covers, in one command. `{:ok, %{range_id => {from, to}}}`, `{:ok, %{}}` when the point moves
   nothing, or a refusal; `{:error, :metadata_unavailable}` while this node has not yet heard from the
   topic's vnode, since resolving the point from an empty placeholder would find no range to move.
+
+  `before_submit` is called with the plan, inside this server, before the command is submitted
+  (`Malachi.Broker.purge/4`); it must not block.
+
+  The request carries the caller's deadline. A request still queued behind other work when its caller
+  gave up is refused with `{:error, :timeout}` without being planned or submitted: a caller that was
+  answered `timeout` while the purge waited in the queue never sees it commit later.
   """
-  @spec purge(GenServer.server(), Malachi.Metadata.topic_name(), Broker.purge_point()) ::
+  @spec purge(GenServer.server(), Malachi.Metadata.topic_name(), Broker.purge_point(), (map() -> any())) ::
           {:ok, %{Malachi.Metadata.range_id() => {non_neg_integer(), non_neg_integer()}}} | {:error, term()}
-  def purge(server, topic, point), do: GenServer.call(server, {:purge, topic, point}, @bind_call_timeout_ms)
+  def purge(server, topic, point, before_submit \\ fn _plan -> :ok end) do
+    deadline = System.monotonic_time(:millisecond) + @bind_call_timeout_ms
+    GenServer.call(server, {:purge, topic, point, before_submit, deadline}, @bind_call_timeout_ms)
+  end
 
   @doc """
   The policy name `topic` is bound to (`nil` for none), `{:error, :no_such_topic}`, or
@@ -632,12 +642,19 @@ defmodule Malachi.BrokerServer do
     {:reply, reply, %{state | broker: broker}}
   end
 
-  def handle_call({:purge, topic, point}, _from, state) do
-    if topic_metadata_ready?(state, topic) do
-      {broker, reply} = Broker.purge(state.broker, topic, point)
-      {:reply, reply, %{state | broker: broker}}
-    else
-      {:reply, {:error, :metadata_unavailable}, state}
+  def handle_call({:purge, topic, point, before_submit, deadline}, _from, state) do
+    cond do
+      # The caller has already been answered `timeout`: planning or submitting now would purge behind
+      # its back, so the request is dropped as it stands. The reply goes nowhere.
+      System.monotonic_time(:millisecond) >= deadline ->
+        {:reply, {:error, :timeout}, state}
+
+      topic_metadata_ready?(state, topic) ->
+        {broker, reply} = Broker.purge(state.broker, topic, point, guarded(before_submit, topic))
+        {:reply, reply, %{state | broker: broker}}
+
+      true ->
+        {:reply, {:error, :metadata_unavailable}, state}
     end
   end
 
@@ -2355,4 +2372,20 @@ defmodule Malachi.BrokerServer do
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # The plan callback runs inside this server, which serves every topic of the shard: one that raises or
+  # exits must neither take the server down nor stop the purge, since the plan is a record of the purge,
+  # not a condition of it. It is logged.
+  defp guarded(before_submit, topic) do
+    fn plan ->
+      try do
+        before_submit.(plan)
+      rescue
+        error -> Logger.warning(I18n.t(:purge_plan_callback_failed, topic: topic, reason: Exception.message(error)))
+      catch
+        kind, reason ->
+          Logger.warning(I18n.t(:purge_plan_callback_failed, topic: topic, reason: inspect({kind, reason})))
+      end
+    end
+  end
 end

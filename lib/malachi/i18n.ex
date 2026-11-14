@@ -282,6 +282,10 @@ defmodule Malachi.I18n do
         "✂️ Topic %{topic} purged up to %{point} by %{actor} for request %{request}: logical start moved on " <>
           "%{ranges} range(s) (logical purge: the records stay on disk until retention removes their whole segment)"
     },
+    purge_plan_callback_failed: %{
+      "pt_BR" => "⚠️ O registro do plano de purge do tópico %{topic} falhou: %{reason}; o purge segue",
+      "en_US" => "⚠️ Recording the purge plan of topic %{topic} failed: %{reason}; the purge goes on"
+    },
     purge_audit_flush_failed: %{
       "pt_BR" =>
         "⚠️ Não foi possível descarregar o log de auditoria de um purge: %{reason}; a entrada será escrita quando ele se recuperar",

@@ -51,6 +51,17 @@ defmodule Malachi.Purge do
   The audit log is flushed after the request's entry and before the purge is sent, and again after the
   purge's entry: with file output both are on disk before the call returns.
 
+  ## The plan
+
+  Every purge that moves a range records `:topic_purge_planned` before its command is submitted: each
+  range's logical start in the node's view and the start it is about to move to (`Malachi.Broker.purge/4`
+  calls back inside the broker, so the plan is exactly what is submitted). When the control plane does
+  not answer in time, the purge is refused as `:timeout` and may still commit; its plan is then the record
+  of what it set out to move, and the console's ranges (`GET /api/v1/topics/:topic/ranges`, field
+  `logical_start`, a sample of the node's copy of the control plane) show a start at or past the plan's
+  "to" once it did. A purge still queued in the broker when its caller's deadline passed is dropped
+  without a plan (`Malachi.BrokerServer.purge/4`).
+
   ## When it takes effect
 
   The reply comes after the control plane committed the command and the frontend that ran it applied
@@ -132,7 +143,8 @@ defmodule Malachi.Purge do
     metadata = %{topic: topic, point: describe_point(point)}
     record(request, actor, metadata)
 
-    result = AdminCall.call(fn -> BrokerServer.purge(DataPlaneRouter.shard_for(topic), topic, point) end)
+    planned = fn plan -> record_plan(plan, actor, put_request_id(metadata, request)) end
+    result = AdminCall.call(fn -> BrokerServer.purge(DataPlaneRouter.shard_for(topic), topic, point, planned) end)
 
     metadata = put_request_id(metadata, request)
     AdminCall.audit(:topic_purged, actor, "purge_topic", result, with_moves(metadata, result), &reason_string/1)
@@ -143,8 +155,10 @@ defmodule Malachi.Purge do
   end
 
   # Writes the request's entry and flushes the audit log before the caller goes on, so with file output
-  # the entry is on disk (datasynced) before the purge is sent: a node killed right after the control
-  # plane commits still leaves the request in the trail. Stdout output is handed to the logger.
+  # the entry is normally synced to disk before the purge is sent: a node killed right after the control
+  # plane commits still leaves the request in the trail. Stdout output is handed to the logger. Not when
+  # the audit log is restarting (the cast is dropped and the flush answers at once), when the flush times
+  # out, or when it rotates the file (rewritten without a sync); see `flush_audit/0`.
   defp record(nil, _actor, _metadata), do: :ok
 
   defp record(request, actor, metadata) do
@@ -153,11 +167,22 @@ defmodule Malachi.Purge do
     flush_audit()
   end
 
+  # The plan is what the purge is about to submit, each range's start in the node's view and the start it
+  # moves to. It runs inside the broker, before the command is submitted, so it is recorded even when the
+  # control plane does not answer in time and the purge may still commit: then it is the only record of
+  # what the purge set out to move. A cast, never a flush: the broker serves nothing while this runs, and
+  # the flush after the call returns writes it out.
+  defp record_plan(plan, actor, metadata) do
+    AdminCall.audit(:topic_purge_planned, actor, "plan_purge", :ok, Map.put(metadata, :planned, render_moves(plan)))
+  end
+
   defp put_request_id(metadata, nil), do: metadata
   defp put_request_id(metadata, request), do: Map.put(metadata, :request_id, request.id)
 
-  # A flush that cannot complete (the audit log restarting, a slow disk) must not take the purge down:
-  # the entry is still in the log's mailbox or buffer and is written when it recovers. It is reported.
+  # A flush that does not complete (a stalled disk, a log that does not answer in time) must not take
+  # the purge down. It is reported, and the entry stays in the log's mailbox or buffer, written when the
+  # log gets to it, unless the log process dies first. A log that is not running at all is not caught
+  # here: the cast before it went nowhere and the flush answers `:ok`.
   defp flush_audit do
     AuditLog.flush()
   catch
@@ -183,16 +208,18 @@ defmodule Malachi.Purge do
     end
   end
 
-  # The request first, then the topic, then the point. An invalid request is refused with nothing recorded
-  # but its fields' sizes. A valid request whose topic or point is refused comes back with the refusal, so
-  # it is still recorded. A refused field is described by its size only, so arbitrary bytes from a frame
-  # never reach the audit trail.
+  # The request first, then the topic, then the point. An invalid request is refused with no request
+  # recorded: its fields by their sizes, the topic and the point as they are when valid. A valid request
+  # whose topic or point is refused comes back with the refusal, so it is still recorded. A refused field
+  # is described by its size only, so arbitrary bytes from a frame never reach the audit trail.
   defp check(topic, point, request) do
     case check_request(request) do
       {:error, reason} ->
         {id, why} = request_fields(request)
         sizes = %{request_id: AdminCall.describe_invalid(id), request_reason: AdminCall.describe_invalid(why)}
-        {:error, reason, Map.merge(%{topic: describe_topic(topic), point: describe_point_safely(point)}, sizes), nil}
+
+        {:error, reason,
+         Map.merge(%{topic: AdminCall.describe_topic(topic), point: describe_point_safely(point)}, sizes), nil}
 
       {:ok, request} ->
         with {:topic, :ok} <- {:topic, AdminCall.check_topic(topic)},
@@ -206,10 +233,6 @@ defmodule Malachi.Purge do
             {:error, reason, %{topic: topic, point: describe_invalid_point(point)}, request}
         end
     end
-  end
-
-  defp describe_topic(topic) do
-    if AdminCall.check_topic(topic) == :ok, do: topic, else: AdminCall.describe_invalid(topic)
   end
 
   defp describe_point_safely(point) do
@@ -249,14 +272,14 @@ defmodule Malachi.Purge do
     do:
       "invalid_purge_point: give exactly one point: a time of at least 0, a position token of 1 to " <>
         "#{@max_token_bytes} bytes, or a consumer group name of 1 to #{@max_group_bytes} bytes of UTF-8 text " <>
-        "without control, format or separator characters; a group whose name is outside that can still be " <>
+        "without control, format, line separator or paragraph separator characters; a group whose name is outside that can still be " <>
         "purged by time or by position"
 
   def reason_string(:invalid_request) do
     {id_bytes, reason_bytes} = Request.limits()
 
     "invalid_request: give both a request id (1 to #{id_bytes} bytes of printable ASCII, no spaces) and a reason " <>
-      "(1 to #{reason_bytes} bytes of UTF-8 text without control, format or separator characters), " <>
+      "(1 to #{reason_bytes} bytes of UTF-8 text without control, format, line separator or paragraph separator characters), " <>
       "and never the data subject's identity"
   end
 
@@ -295,10 +318,11 @@ defmodule Malachi.Purge do
 
   # The audit trail keeps each range's start before and after, so what a purge removed from every reader
   # can be read back later.
-  defp with_moves(metadata, {:ok, moves}),
-    do: Map.put(metadata, :moves, Map.new(moves, fn {range_id, {from, to}} -> {inspect(range_id), [from, to]} end))
+  defp with_moves(metadata, {:ok, moves}), do: Map.put(metadata, :moves, render_moves(moves))
 
   defp with_moves(metadata, _refused), do: metadata
+
+  defp render_moves(moves), do: Map.new(moves, fn {range_id, {from, to}} -> {inspect(range_id), [from, to]} end)
 
   defp moved_count({:ok, moves}), do: Enum.count(moves, fn {_range_id, {from, to}} -> to > from end)
   defp moved_count(_refused), do: 0

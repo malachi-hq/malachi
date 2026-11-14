@@ -162,7 +162,7 @@ defmodule Malachi.PurgeTest do
       assert log =~ "logical purge"
       refute log =~ ctx.request.reason
 
-      assert [recorded, purged] = requested(ctx.actor, ctx.request.id)
+      assert [recorded, planned, purged] = requested(ctx.actor, ctx.request.id)
 
       assert %{event_type: :purge_request_recorded, action: "record_purge_request", status: :success} = recorded
 
@@ -172,6 +172,10 @@ defmodule Malachi.PurgeTest do
                request_id: ctx.request.id,
                request_reason: ctx.request.reason
              }
+
+      assert %{event_type: :topic_purge_planned, action: "plan_purge", status: :success} = planned
+      assert planned.metadata.planned == %{inspect(ctx.root) => [0, 2]}
+      assert planned.metadata.request_id == ctx.request.id
 
       assert %{event_type: :topic_purged, action: "purge_topic", status: :success} = purged
       assert purged.metadata.moves == %{inspect(ctx.root) => [0, 2]}
@@ -311,6 +315,87 @@ defmodule Malachi.PurgeTest do
       assert recorded?.(:topic_purged)
     end
 
+    test "the audit log is flushed after the request's entry, before the broker is asked, and after the purge's",
+         ctx do
+      audit = Process.whereis(Malachi.AuditLog)
+      broker = DataPlaneRouter.shard_for(ctx.topic)
+      point = {:position, Position.encode(ctx.root, {0, 1})}
+
+      # Every message the audit log receives is traced, so the flush calls this purge's own process makes,
+      # and their order against its entries, can be read off; the ETS table alone cannot show a flush.
+      1 = :erlang.trace(audit, true, [:receive])
+      :ok = :sys.suspend(broker)
+      task = Task.async(fn -> Purge.purge(ctx.topic, point, ctx.actor, ctx.request) end)
+      caller = task.pid
+
+      try do
+        try do
+          assert_receive {:trace, ^audit, :receive, {:"$gen_cast", {:log_event, :purge_request_recorded, _, _, _, _}}},
+                         2_000
+
+          # the broker is suspended, so this flush happened before the purge reached it
+          assert_receive {:trace, ^audit, :receive, {:"$gen_call", {^caller, _tag}, :flush_now}}, 2_000
+        after
+          :ok = :sys.resume(broker)
+        end
+
+        assert {:ok, _moves} = Task.await(task)
+        assert_receive {:trace, ^audit, :receive, {:"$gen_cast", {:log_event, :topic_purged, _, _, _, _}}}, 2_000
+        assert_receive {:trace, ^audit, :receive, {:"$gen_call", {^caller, _tag}, :flush_now}}, 2_000
+      after
+        :erlang.trace(audit, false, [:receive])
+      end
+    end
+
+    test "a purge still queued when its caller gave up is dropped: no plan, no move", ctx do
+      broker = DataPlaneRouter.shard_for(ctx.topic)
+      point = {:position, Position.encode(ctx.root, {0, 3})}
+      :ok = :sys.suspend(broker)
+
+      result =
+        try do
+          # the broker cannot take the request within the caller's 4 s, so the caller is answered timeout
+          Purge.purge(ctx.topic, point, ctx.actor, ctx.request)
+        after
+          :ok = :sys.resume(broker)
+        end
+
+      assert result == {:error, :timeout}
+      # the broker now reaches the stale request and drops it: the start never moves
+      _ = :sys.get_state(broker)
+      assert {["v0", "v1", "v2", "v3", "v4"], []} = values(ctx.shard, ctx.root)
+
+      events = requested(ctx.actor, ctx.request.id)
+      refute Enum.any?(events, &(&1.event_type == :topic_purge_planned))
+
+      assert [%{status: :failure, metadata: %{reason: "timeout: " <> _}}] =
+               Enum.filter(events, &(&1.event_type == :topic_purged))
+    end
+
+    test "an invalid request with an invalid topic or point is refused as the request, every bad field by size",
+         ctx do
+      bad = {"DSR 1", "reason"}
+
+      assert Purge.purge("a/b\n", {:before, 0}, ctx.actor, bad) == {:error, :invalid_request}
+      assert Purge.purge(ctx.topic, {:group, "g\n%{actor}"}, ctx.actor, bad) == {:error, :invalid_request}
+
+      refused =
+        ctx.actor
+        |> audited()
+        |> Enum.filter(&(&1.event_type == :topic_purged and &1.status == :failure))
+        |> Enum.map(& &1.metadata)
+
+      assert %{topic: "<4 bytes>", point: "before:0", request_id: "<5 bytes>", request_reason: "<6 bytes>"} =
+               Enum.find(refused, &(&1.topic == "<4 bytes>"))
+
+      assert %{topic: _, point: "group:<10 bytes>", request_id: "<5 bytes>"} =
+               Enum.find(refused, &(&1.point == "group:<10 bytes>"))
+
+      assert Enum.all?(refused, &String.starts_with?(&1.reason, "invalid_request: "))
+      refute inspect(refused) =~ "%{actor}"
+      refute Enum.any?(audited(ctx.actor), &(&1.event_type == :purge_request_recorded))
+    end
+
     test "a purge without a request records no request", ctx do
       assert {:ok, _} = Purge.purge(ctx.topic, {:position, Position.encode(ctx.root, {0, 1})}, ctx.actor)
 
@@ -319,6 +404,60 @@ defmodule Malachi.PurgeTest do
       assert [purged] = Enum.filter(events, &(&1.event_type == :topic_purged))
       refute Map.has_key?(purged.metadata, :request_id)
     end
+  end
+
+  test "every purge that moves a range records its plan before the command, the same moves it reports", ctx do
+    point = {:position, Position.encode(ctx.root, {0, 2})}
+    assert {:ok, moves} = Purge.purge(ctx.topic, point, ctx.actor)
+
+    assert [planned] = Enum.filter(audited(ctx.actor), &(&1.event_type == :topic_purge_planned))
+    assert %{action: "plan_purge", status: :success} = planned
+
+    assert planned.metadata == %{
+             topic: ctx.topic,
+             point: Purge.describe_point(point),
+             planned: %{inspect(ctx.root) => [0, 2]}
+           }
+
+    assert moves == %{ctx.root => {0, 2}}
+
+    # a point that moves nothing has no plan
+    assert Purge.purge(ctx.topic, {:before, 0}, ctx.actor) == {:ok, %{}}
+    assert [_only_one] = Enum.filter(audited(ctx.actor), &(&1.event_type == :topic_purge_planned))
+  end
+
+  test "a purge refused after it was planned keeps its plan: what it set out to move is on record", ctx do
+    {:ok, request} = Request.new("DSR-plan-#{ctx.actor}", "LGPD art. 18 request")
+    point = {:position, Position.encode(ctx.root, {0, 99})}
+
+    assert Purge.purge(ctx.topic, point, ctx.actor, request) == {:error, :start_past_end}
+
+    events = Enum.filter(audited(ctx.actor), &(&1.metadata[:request_id] == request.id))
+    assert [planned] = Enum.filter(events, &(&1.event_type == :topic_purge_planned))
+    assert planned.metadata.planned == %{inspect(ctx.root) => [0, 99]}
+    assert [%{status: :failure}] = Enum.filter(events, &(&1.event_type == :topic_purged))
+  end
+
+  test "a plan callback that raises is logged and does not stop the purge or the broker", ctx do
+    shard = DataPlaneRouter.shard_for(ctx.topic)
+    point = {:position, Position.encode(ctx.root, {0, 1})}
+
+    log =
+      capture_log(fn ->
+        assert BrokerServer.purge(shard, ctx.topic, point, fn _plan -> raise "boom" end) == {:ok, %{ctx.root => {0, 1}}}
+      end)
+
+    assert log =~ "Recording the purge plan of topic #{ctx.topic} failed: boom; the purge goes on"
+
+    point = {:position, Position.encode(ctx.root, {0, 2})}
+
+    log =
+      capture_log(fn ->
+        assert BrokerServer.purge(shard, ctx.topic, point, fn _plan -> exit(:gone) end) == {:ok, %{ctx.root => {1, 2}}}
+      end)
+
+    assert log =~ "{:exit, :gone}"
+    assert {["v2", "v3", "v4"], _skips} = values(ctx.shard, ctx.root)
   end
 
   test "an audit log that cannot flush does not take the purge down, and is reported", ctx do
@@ -334,6 +473,11 @@ defmodule Malachi.PurgeTest do
     assert log =~ "Could not flush the audit log for a purge"
     # the entry was queued, so it is written once the log answers again
     assert Enum.any?(audited(ctx.actor), &(&1.event_type == :topic_purged and &1.metadata.topic == "<3 bytes>"))
+  end
+
+  test "a group name with spaces is accepted: only control, format, line and paragraph separators are not", ctx do
+    assert Purge.purge(ctx.topic, {:group, "billing team"}, ctx.actor) == {:ok, %{}}
+    assert Purge.purge(ctx.topic, {:group, "billing\u00A0team"}, ctx.actor) == {:ok, %{}}
   end
 
   test "the largest token and group name the check accepts get past it", ctx do

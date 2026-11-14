@@ -58,7 +58,7 @@ mix malachi.purge clicks --cursor 01a3c5... --request DSR-2026-0042 --reason "LG
 | field | what it holds | bounds |
 |---|---|---|
 | `--request` | the request's reference in your own system, such as a ticket number | 1 to 128 bytes of printable ASCII, no spaces |
-| `--reason` | why the purge is made | 1 to 512 bytes of text, no control, format or line separator characters |
+| `--reason` | why the purge is made | 1 to 512 bytes of text, no control, format, line separator or paragraph separator characters |
 
 A request that covers several topics is one run per topic, each with the same `--request`. On the wire it is
 api key 35 (`purge_topic`, `admin` only), whose request carries the same two fields; see
@@ -68,30 +68,47 @@ The command prints `request DSR-2026-0042 applied` with each range's start befor
 `request DSR-2026-0042 recorded; nothing below ... was readable` when the point moved nothing: the records
 were purged by an earlier run, or the point is not where you thought.
 
-If the command answers `timeout`, the purge may still have applied. Run the same command again, with the
-same `--request`: a purge never moves a start backward, so the second run either moves what the first did
-not or moves nothing, and its audit entries say which. What a timed out run moved is not in the audit
-trail: its `topic_purged` entry holds the timeout, and the second run sees those starts already moved, so
-neither entry holds the starts before the first run. No command shows a range's logical start yet, so
-those starts cannot be read back either: keep the timeout and the second run's answer with the request's
-own record, and say that the starts before the purge are unknown.
+If the command answers `timeout`, or the mix task answers `rpc failed: :timeout`, the purge may still have
+applied. Run the same command again, with the same `--request`: a purge never moves a start backward, so
+the second run either moves what the first did not or moves nothing, and its audit entries say which.
+That second run is the firmest confirmation, since its answer comes from the control plane.
+
+A timed out run's `topic_purged` entry holds the timeout, not the moves. If the purge was waiting behind
+other work on the node when its caller gave up, it is dropped there and never runs, and it has no plan.
+If it had already been sent to the control plane, its `topic_purge_planned` entry (below) holds what it
+set out to move. To see whether it did, read the ranges' logical starts back: the console's
+`GET /api/v1/topics/<topic>/ranges` lists each range with its `logical_start`. That list is a sample of
+the node's own copy of the control plane, so take a reading whose `sampled_at` is later than the timeout
+and whose `stale` is false. A range whose start is at or past the planned "to" holds nothing below that
+point for any reader; a start below it may still be catching up, so read again, or rely on the second
+run.
 
 ## What the audit trail records
 
-Each run writes two entries to the audit log:
+Each run writes these entries to the audit log:
 
 1. `purge_request_recorded`, before the purge runs: the request id, the reason, the topic, the point, and
    the user who ran it (`cli@<node>` for the mix task, the session user on the wire). The audit log is
-   flushed before the purge is sent, so with file output the entry is on disk first, and a node killed
-   right after the purge commits still leaves the request in the trail.
-2. `topic_purged`, after: the same request id, and each range's logical start before and after, or the
+   flushed before the purge is sent, so with file output the entry is normally on disk first, and a node
+   killed right after the purge commits still leaves the request in the trail. Three cases leave it
+   short of that, and the purge still goes on: an audit log that is restarting drops the entry without a
+   trace; a flush that does not answer within 5 s is logged as a warning and the entry is written later,
+   if the node lives; and a flush that rotates the audit file rewrites it without a sync to disk.
+2. `topic_purge_planned`, when the purge is about to move something: the same request id, and each
+   range's logical start as the node sees it and the start it is about to move to. It is written after
+   the point is resolved and before the command is sent, so it is there even when the control plane
+   does not answer in time. A purge that moves nothing has no plan, and neither does one dropped before
+   it ran because its caller had already been answered `timeout`.
+3. `topic_purged`, after: the same request id, and each range's logical start before and after, or the
    refusal.
 
 A request that was refused (an unknown topic, a topic name or a point that is not valid, an unfinished
 upgrade) is still recorded, followed by the refusal under the same id; a field that was not valid is
 recorded by its size only. A request whose id or reason is out of bounds is refused without a
-`purge_request_recorded` entry: on the wire the refusal's `topic_purged` entry keeps only the sizes of
-what was sent, and the mix task refuses it before anything is sent, so nothing reaches the audit trail.
+`purge_request_recorded` entry: on the wire the refusal's `topic_purged` entry keeps the id and the
+reason by their sizes only, with the topic and the point as they are when those are valid and by their
+sizes when they are not; the mix task refuses it before anything is sent, so nothing reaches the audit
+trail.
 
 The audit log is kept in memory on the node that ran the purge for 30 days, and is lost if that process
 restarts. For a record you can rely on later, ship it to storage you keep: set `MALACHI_AUDIT_LOG_OUTPUT` to
@@ -107,7 +124,7 @@ The audit trail and the logs are never purged. Whatever you put in them about th
 - The reason names no one.
 - The topic and consumer group names are written to the audit trail and the logs too. A topic kept per
   subject must have an opaque name, never one that identifies the person. A purge by group takes a group
-  name of 1 to 255 bytes of text with no control, format or separator characters; a group whose name is
+  name of 1 to 255 bytes of text with no control, format, line separator or paragraph separator characters (spaces are fine); a group whose name is
   outside that can still be purged by time or by position.
 - The command line stays in the shell history and the process list of the machine that runs it.
 

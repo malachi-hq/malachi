@@ -25,7 +25,10 @@ defmodule Malachi.AuditLog do
   - `:topic_policy_bound` - An administrator bound a topic to a storage policy, or detached it
   - `:topic_purged` - An administrator purged a topic up to a point (`Malachi.Purge`): a logical purge,
     recorded with the point asked for and each range's logical start before and after, and the
-    `request_id` of the data subject request it answers, if any. A refused field is recorded by its size
+    `request_id` of the data subject request it answers, if any. A refused field is recorded by its size only.
+  - `:topic_purge_planned` - A purge is about to submit its command (`Malachi.Purge`): each range's
+    logical start in the node's view and the start it moves to, so a purge that times out and still
+    commits leaves a record of what it set out to move
   - `:purge_request_recorded` - An administrator recorded a data subject request before applying its purge
     (`Malachi.Purge.Request`): the request id, the reason, the topic and the point
   - `:user_role_changed` - An administrator set or removed a user's console role (`Malachi.Auth.set_role/3`)
