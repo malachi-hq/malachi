@@ -450,11 +450,16 @@ defmodule Malachi.Metrics do
     :ok
   end
 
-  # Every combination of the purge labels, zero included, so a series exists before its first purge.
+  # Every combination of the purge labels, zero included, so a series exists before its first purge. Plain
+  # maps, since the operations are also served as JSON on `/metrics`.
   defp purge_counts do
     for result <- @purge_results, kind <- @purge_kinds, request <- [true, false] do
-      {[result: Atom.to_string(result), kind: Atom.to_string(kind), request: to_string(request)],
-       get_counter({:purge, result, kind, request})}
+      %{
+        result: Atom.to_string(result),
+        kind: Atom.to_string(kind),
+        request: to_string(request),
+        count: get_counter({:purge, result, kind, request})
+      }
     end
   end
 

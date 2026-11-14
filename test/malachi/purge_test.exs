@@ -556,14 +556,16 @@ defmodule Malachi.PurgeTest do
       after_ = Malachi.Metrics.get_system_metrics().operations
 
       count = fn ops ->
-        Enum.find_value(ops.purges, fn {labels, n} ->
-          labels == [result: "applied", kind: "position", request: "false"] && n
+        Enum.find_value(ops.purges, fn p ->
+          {p.result, p.kind, p.request} == {"applied", "position", "false"} && p.count
         end)
       end
 
       assert count.(after_) - count.(before) >= 1
       assert after_.purged_offsets - before.purged_offsets >= 2
       assert length(after_.purges) == 24
+      # the operations are served as JSON on /metrics too
+      assert {:ok, _json} = Jason.encode(after_)
     end
   end
 

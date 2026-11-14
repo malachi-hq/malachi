@@ -116,7 +116,7 @@ defmodule Malachi.Metrics.Prometheus do
         :counter,
         "Manual purges by outcome (applied moved a logical start, nothing moved none, refused), kind of point " <>
           "(before, position, group, other) and whether a data subject request came with it",
-        ops.purges
+        Enum.map(ops.purges, &{[result: &1.result, kind: &1.kind, request: &1.request], &1.count})
       ),
       metric(
         "malachi_purged_offsets_total",
