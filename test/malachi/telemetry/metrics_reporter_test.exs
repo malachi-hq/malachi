@@ -387,6 +387,11 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
       report.(%{topic => %{segments: 1, bytes: 9}})
       assert Enum.any?(Metrics.retention_snapshot().held, &(&1.topic == topic))
 
+      # The first report asks Metrics, by a cast, to monitor the reporter. A call after it is ordered after
+      # that cast, so the monitor is in place before the reporter exits; without this, a monitor set on a
+      # pid already dead would queue its DOWN behind the call below and the check could run too early.
+      _ = :sys.get_state(Malachi.Metrics)
+
       stop.()
       # The DOWN reaches Metrics after the exit; a call to it afterwards is ordered after that message.
       _ = :sys.get_state(Malachi.Metrics)
@@ -394,17 +399,22 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
     end
 
     test "a topic two coordinators report is counted once, at the larger report" do
-      topic = unique_topic()
+      [larger_first, larger_last] = [unique_topic(), unique_topic()]
       {vnode_a, stop_a} = reporter()
       {vnode_b, stop_b} = reporter()
       on_exit(fn -> Enum.each([stop_a, stop_b], & &1.()) end)
 
-      vnode_a.(%{topic => %{segments: 1, bytes: 10}})
-      vnode_b.(%{topic => %{segments: 3, bytes: 30}})
+      # Both orders, one topic each. The two rows of a topic come back in the hash order of the reporters'
+      # pids, not in write order, so only a snapshot that picks the larger report shows 3/30 for both: one
+      # that kept the first row, the last row, the last write or the smaller report fails on one of them.
+      vnode_a.(%{larger_first => %{segments: 3, bytes: 30}, larger_last => %{segments: 1, bytes: 10}})
+      vnode_b.(%{larger_first => %{segments: 1, bytes: 10}, larger_last => %{segments: 3, bytes: 30}})
 
-      assert Enum.filter(Metrics.retention_snapshot().held, &(&1.topic == topic)) == [
-               %{topic: topic, segments: 3, bytes: 30}
-             ]
+      assert Enum.filter(Metrics.retention_snapshot().held, &(&1.topic in [larger_first, larger_last])) ==
+               Enum.sort([
+                 %{topic: larger_first, segments: 3, bytes: 30},
+                 %{topic: larger_last, segments: 3, bytes: 30}
+               ])
     end
 
     test "a sweep lands in the duration histogram" do
