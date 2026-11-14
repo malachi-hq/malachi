@@ -97,6 +97,30 @@ defmodule Malachi.PoliciesTest do
       assert Policies.bind("", ctx.policy, ctx.actor) == {:error, :invalid_topic}
       assert Policies.bind(ctx.topic, "", ctx.actor) == {:error, :invalid_policy_name}
     end
+
+    test "a name the control plane would never accept is invalid_topic, not no_such_topic (#308)", ctx do
+      :ok = Policies.define(ctx.policy, [], ctx.actor)
+
+      for name <- ["a/b", "t\n%{actor}", "..", String.duplicate("a", 256)] do
+        assert Policies.bind(name, ctx.policy, ctx.actor) == {:error, :invalid_topic}
+        assert Policies.topic_policy(name) == {:error, :invalid_topic}
+      end
+    end
+
+    test "a refused topic is audited by its size, never its bytes", ctx do
+      :ok = Policies.define(ctx.policy, [], ctx.actor)
+      assert Policies.bind("t\n%{actor}", ctx.policy, ctx.actor) == {:error, :invalid_topic}
+
+      _ = :sys.get_state(Malachi.AuditLog)
+
+      bound =
+        ctx.actor
+        |> Malachi.AuditLog.get_events_by_user()
+        |> Enum.filter(&(&1.event_type == :topic_policy_bound and &1.status == :failure))
+
+      assert Enum.any?(bound, &(&1.metadata.topic == "<10 bytes>"))
+      refute inspect(bound) =~ "%{actor}"
+    end
   end
 
   describe "a broker that does not answer" do
