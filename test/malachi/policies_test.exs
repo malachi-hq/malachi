@@ -185,7 +185,8 @@ defmodule Malachi.PoliciesTest do
                  max_bytes: {nil, :global},
                  segment_max_age_ms: {604_800_000, :global}
                },
-               spread_by: {"rack", :global}
+               spread_by: {"rack", :global},
+               legal_hold: nil
              }
 
       :ok = Policies.define(ctx.policy, [{"retention.max_bytes", 0}, {"spread_by", nil}], ctx.actor)

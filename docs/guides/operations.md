@@ -348,6 +348,9 @@ These are the cluster's defaults. A topic bound to a storage policy takes the bo
 inherits the rest; see [Per-topic retention](per-topic-retention.md) for `mix malachi.policy`, the wire
 keys and the dashboard routes, and `mix malachi.policy get <topic>` to see which value applies and why.
 
+A topic under a [legal hold](legal-hold.md) expires nothing whatever these bounds say, and cannot be deleted
+or purged, until the hold is released.
+
 ### Retention metrics
 
 Retention is observable from both sides: what the sweep deleted, and which readers were moved past data
@@ -361,9 +364,14 @@ The sweep (only the node that leads a vnode sweeps it, so read these summed acro
 - **`malachi_retention_segments_expired_total{topic}`** and **`malachi_retention_bytes_expired_total{topic}`**:
   what the sweep deleted.
 - **`malachi_retention_expire_failures_total{reply}`**: deletes the control plane refused, by reply:
-  `migrating` (the topic was moving between vnodes), `segment_active` (still the write head) or `other`
-  (anything else, a Raft timeout included). A segment the sweep found already gone is neither expired
+  `migrating` (the topic was moving between vnodes), `segment_active` (still the write head), `legal_hold`
+  (a hold landed after the sweep read the metadata) or `other` (anything else, a Raft timeout included). A segment the sweep found already gone is neither expired
   again nor a failure.
+- **`malachi_retention_held_segments{topic}`** and **`malachi_retention_held_bytes{topic}`**: gauges of what
+  a [legal hold](legal-hold.md) kept from the latest completed sweep, per held topic. A topic leaves them at
+  the first sweep after its hold is released, and a node that stops leading a vnode stops reporting its
+  topics. A sweep skipped because the policies or the metadata could not be read changes nothing, so
+  during such an outage the gauges show the last completed sweep.
 
 The readers:
 
@@ -682,7 +690,9 @@ while creating a user without one keeps working. `node scripts/user.js create --
 then sets the role in a second request, so on such a cluster it leaves the user created without a role. Finalizing it gives up rolling back below the release that
 introduced the roles. Version **9** adds the manual purge (`set_range_starts`, [Purging a topic](purging-a-topic.md)):
 until the cluster reaches 9, `mix malachi.purge` and api key 35 are refused with the same "finish the rolling
-upgrade" message, and a vnode split cannot move a purged topic to a vnode below 9. Each time, the machines
+upgrade" message, and a vnode split cannot move a purged topic to a vnode below 9. Version **11** adds the legal hold
+(`set_topic_hold`, [Legal hold](legal-hold.md)): until the cluster reaches 11, `mix malachi.hold` and api keys
+36 and 37 are refused the same way, and a vnode split cannot move a held topic to a vnode below 11. Each time, the machines
 that gained nothing move with it at no cost, and a member on the older build refuses the new command until
 the whole group has moved.
 

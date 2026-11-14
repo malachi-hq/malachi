@@ -88,6 +88,7 @@ leaves purged stretches out, so a client alerting on it does not page on a purge
 | `metadata_unavailable` | the node has not heard from the topic's control plane yet; retry |
 | `migrating` | a vnode split is moving the topic; retry |
 | `unsupported_command` | the cluster has not finished upgrading to a release that knows the purge |
+| `legal_hold` | the topic is under a [legal hold](legal-hold.md); even a purge that would move nothing is refused |
 
 ## Upgrades
 

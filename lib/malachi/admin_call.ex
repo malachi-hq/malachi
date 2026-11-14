@@ -59,11 +59,15 @@ defmodule Malachi.AdminCall do
   @doc """
   The rendering of the refusals any administrative request can meet. It starts with the reason's name,
   so a client can still branch on it; services render their own reasons first and fall back to this.
+  A legal hold (#307) refuses a purge, a topic delete and a segment delete alike, so its rendering is here.
 
   ## Examples
 
       iex> Malachi.AdminCall.reason_string(:invalid_topic)
       "invalid_topic"
+
+      iex> Malachi.AdminCall.reason_string(:legal_hold)
+      "legal_hold: the topic is under a legal hold, which keeps its data; release the hold first"
 
   """
   @spec reason_string(term()) :: String.t()
@@ -72,6 +76,9 @@ defmodule Malachi.AdminCall do
 
   def reason_string(:timeout),
     do: "timeout: the control plane did not answer in time; the change may still apply, read it back before retrying"
+
+  def reason_string(:legal_hold),
+    do: "legal_hold: the topic is under a legal hold, which keeps its data; release the hold first"
 
   def reason_string(reason) when is_atom(reason), do: Atom.to_string(reason)
   def reason_string(reason), do: inspect(reason)

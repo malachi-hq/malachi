@@ -846,8 +846,9 @@ The server pushes three kinds of frame on an open stream, in the response envelo
 of the request that opened it: `append_ack`, `moved` and `records`.
 
 The admin api_keys (users 8 to 11, per-topic ACLs 14 to 16, storage policies 17 to 21, console roles 22
-and 23, the manual purge 35) require the `:admin` permission; see the [per-topic ACLs](docs/guides/per-topic-acls.md),
-[per-topic retention](docs/guides/per-topic-retention.md) and [purging a topic](docs/guides/purging-a-topic.md) guides.
+and 23, the manual purge 35, the legal hold 36 to 38) require the `:admin` permission; see the
+[per-topic ACLs](docs/guides/per-topic-acls.md), [per-topic retention](docs/guides/per-topic-retention.md),
+[purging a topic](docs/guides/purging-a-topic.md) and [legal hold](docs/guides/legal-hold.md) guides.
 
 Keys 24 to 34 are the NorthGuard data path, the only keys that write and read records: routing (`cluster_state`, `topic_routes`),
 producer streams with a broker-defined window (`open_stream`, `append`, `close_stream`), per-range consume

@@ -156,13 +156,18 @@ defmodule Malachi.Wire do
   # admin manual purge (#198): move a topic's logical start up to a time, an opaque position or a group's
   # commit. Requires the wire :admin permission.
   @purge_topic 35
+  # admin legal hold (#307): place, release and read a topic's legal hold. Requires the wire :admin
+  # permission; the hold records the session's user as its actor, never a name the request carries.
+  @set_topic_hold 36
+  @release_topic_hold 37
+  @get_topic_hold 38
 
   # error codes (responses): 0 = ok, 1 = error with the reason as a string payload
   @ok 0
   @error 1
 
-  @typedoc "A request operation: 0 and 1, then 7 to 35 (2 to 6 are retired)."
-  @type api_key :: 0..1 | 7..35
+  @typedoc "A request operation: 0 and 1, then 7 to 38 (2 to 6 are retired)."
+  @type api_key :: 0..1 | 7..38
   @type error_code :: non_neg_integer()
 
   @spec auth_key() :: api_key()
@@ -197,6 +202,9 @@ defmodule Malachi.Wire do
   def group_heartbeat_key, do: @group_heartbeat
   def commit_offsets_key, do: @commit_offsets
   def purge_topic_key, do: @purge_topic
+  def set_topic_hold_key, do: @set_topic_hold
+  def release_topic_hold_key, do: @release_topic_hold
+  def get_topic_hold_key, do: @get_topic_hold
   def ok_code, do: @ok
   def error_code, do: @error
 
@@ -547,6 +555,48 @@ defmodule Malachi.Wire do
   @spec decode_purge_topic_resp(binary()) :: [{non_neg_integer(), non_neg_integer(), non_neg_integer()}]
   def decode_purge_topic_resp(<<count::32, body::binary-size(count * 20)>>),
     do: for(<<seq::32, from::64, to::64 <- body>>, do: {seq, from, to})
+
+  @doc "set_topic_hold (36): `<<put_str(topic), put_str(reason)>>`. The response is empty."
+  @spec encode_set_topic_hold_req(String.t(), String.t()) :: binary()
+  def encode_set_topic_hold_req(topic, reason), do: <<put_str(topic)::binary, put_str(reason)::binary>>
+
+  @spec decode_set_topic_hold_req(binary()) :: {String.t() | nil, String.t() | nil}
+  def decode_set_topic_hold_req(payload) do
+    {topic, rest} = take_str(payload)
+    {reason, <<>>} = take_str(rest)
+    {topic, reason}
+  end
+
+  @doc "release_topic_hold (37) and get_topic_hold (38): `put_str(topic)`. A release's response is empty."
+  @spec encode_topic_hold_topic_req(String.t()) :: binary()
+  def encode_topic_hold_topic_req(topic), do: put_str(topic)
+
+  @spec decode_topic_hold_topic_req(binary()) :: String.t() | nil
+  def decode_topic_hold_topic_req(payload) do
+    {topic, <<>>} = take_str(payload)
+    topic
+  end
+
+  @doc """
+  get_topic_hold response: `<<0::8>>` for a topic that is not held, or `<<1::8, put_str(reason),
+  put_str(actor), since_ms::64>>`.
+  """
+  @spec encode_topic_hold_resp(%{reason: String.t(), actor: String.t(), since_ms: non_neg_integer()} | nil) ::
+          binary()
+  def encode_topic_hold_resp(nil), do: <<0::8>>
+
+  def encode_topic_hold_resp(%{reason: reason, actor: actor, since_ms: since_ms}),
+    do: <<1::8, put_str(reason)::binary, put_str(actor)::binary, since_ms::64>>
+
+  @spec decode_topic_hold_resp(binary()) ::
+          %{reason: String.t(), actor: String.t(), since_ms: non_neg_integer()} | nil
+  def decode_topic_hold_resp(<<0::8>>), do: nil
+
+  def decode_topic_hold_resp(<<1::8, rest::binary>>) do
+    {reason, rest} = take_str(rest)
+    {actor, <<since_ms::64>>} = take_str(rest)
+    %{reason: reason, actor: actor, since_ms: since_ms}
+  end
 
   @doc "get_topic_policy (21): `put_str(topic)`."
   @spec encode_get_topic_policy_req(String.t()) :: binary()
