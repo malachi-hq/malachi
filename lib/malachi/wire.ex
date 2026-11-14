@@ -505,32 +505,42 @@ defmodule Malachi.Wire do
   @type purge_point :: {:before, non_neg_integer()} | {:position, binary()} | {:group, String.t()}
 
   @doc """
-  purge_topic (35): `<<put_str(topic), kind::8, point>>`. Kind 0 is a time, `epoch_ms::64`; kind 1 an
-  opaque position, `put_str(token)`; kind 2 a consumer group, `put_str(group)`.
+  purge_topic (35): `<<put_str(topic), kind::8, point, put_str(request_id), put_str(reason)>>`. Kind 0 is a
+  time, `epoch_ms::64`; kind 1 an opaque position, `put_str(token)`; kind 2 a consumer group,
+  `put_str(group)`. The two trailing strings are the data subject request the purge answers (#308), both
+  absent (`<<0>>` each) for a purge that answers none; `Malachi.Purge` refuses one without the other.
   """
-  @spec encode_purge_topic_req(String.t(), purge_point()) :: binary()
-  def encode_purge_topic_req(topic, {:before, time_ms}), do: <<put_str(topic)::binary, 0::8, time_ms::64>>
-  def encode_purge_topic_req(topic, {:position, token}), do: <<put_str(topic)::binary, 1::8, put_str(token)::binary>>
-  def encode_purge_topic_req(topic, {:group, group}), do: <<put_str(topic)::binary, 2::8, put_str(group)::binary>>
-
-  @spec decode_purge_topic_req(binary()) :: {String.t() | nil, purge_point()}
-  def decode_purge_topic_req(payload) do
-    {topic, rest} = take_str(payload)
-    {topic, take_purge_point(rest)}
+  @spec encode_purge_topic_req(String.t(), purge_point(), String.t() | nil, String.t() | nil) :: binary()
+  def encode_purge_topic_req(topic, point, request_id \\ nil, reason \\ nil) do
+    <<put_str(topic)::binary, put_purge_point(point)::binary, put_str(request_id)::binary, put_str(reason)::binary>>
   end
 
-  defp take_purge_point(<<0::8, time_ms::64>>), do: {:before, time_ms}
+  defp put_purge_point({:before, time_ms}), do: <<0::8, time_ms::64>>
+  defp put_purge_point({:position, token}), do: <<1::8, put_str(token)::binary>>
+  defp put_purge_point({:group, group}), do: <<2::8, put_str(group)::binary>>
+
+  @spec decode_purge_topic_req(binary()) ::
+          {String.t() | nil, purge_point(), String.t() | nil, String.t() | nil}
+  def decode_purge_topic_req(payload) do
+    {topic, rest} = take_str(payload)
+    {point, rest} = take_purge_point(rest)
+    {request_id, rest} = take_str(rest)
+    {reason, <<>>} = take_str(rest)
+    {topic, point, request_id, reason}
+  end
+
+  defp take_purge_point(<<0::8, time_ms::64, rest::binary>>), do: {{:before, time_ms}, rest}
 
   defp take_purge_point(<<1::8, rest::binary>>) do
-    {token, <<>>} = take_str(rest)
+    {token, rest} = take_str(rest)
     true = is_binary(token)
-    {:position, token}
+    {{:position, token}, rest}
   end
 
   defp take_purge_point(<<2::8, rest::binary>>) do
-    {group, <<>>} = take_str(rest)
+    {group, rest} = take_str(rest)
     true = is_binary(group)
-    {:group, group}
+    {{:group, group}, rest}
   end
 
   @doc """

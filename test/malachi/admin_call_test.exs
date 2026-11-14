@@ -23,11 +23,23 @@ defmodule Malachi.AdminCallTest do
   end
 
   describe "check_topic/1" do
-    test "accepts a non-empty binary and refuses anything else" do
+    test "accepts a name the control plane accepts and refuses anything else" do
       assert AdminCall.check_topic("events") == :ok
+      assert AdminCall.check_topic("Orders_v2.eu-1") == :ok
       assert AdminCall.check_topic("") == {:error, :invalid_topic}
       assert AdminCall.check_topic(nil) == {:error, :invalid_topic}
       assert AdminCall.check_topic(:events) == {:error, :invalid_topic}
+    end
+
+    test "refuses what would forge a log line or escape a directory" do
+      for bad <- ["a\nb", "a b", "a/b", "..", ".", "t%{actor}", "caf\u00e9", <<0>>, "a\u202Eb"] do
+        assert AdminCall.check_topic(bad) == {:error, :invalid_topic}, "accepted #{inspect(bad)}"
+      end
+    end
+
+    test "accepts up to 255 bytes and refuses 256" do
+      assert AdminCall.check_topic(String.duplicate("a", 255)) == :ok
+      assert AdminCall.check_topic(String.duplicate("a", 256)) == {:error, :invalid_topic}
     end
   end
 

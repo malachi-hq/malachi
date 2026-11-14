@@ -274,6 +274,23 @@ defmodule Malachi.I18n do
         "✂️ Topic %{topic} purged up to %{point} by %{actor}: logical start moved on %{ranges} range(s) " <>
           "(logical purge: the records stay on disk until retention removes their whole segment)"
     },
+    topic_purged_for_request: %{
+      "pt_BR" =>
+        "✂️ Tópico %{topic} purgado até %{point} por %{actor} para o pedido %{request}: início lógico movido em " <>
+          "%{ranges} range(s) (purge lógico: os registros continuam em disco até a retenção remover o segmento inteiro)",
+      "en_US" =>
+        "✂️ Topic %{topic} purged up to %{point} by %{actor} for request %{request}: logical start moved on " <>
+          "%{ranges} range(s) (logical purge: the records stay on disk until retention removes their whole segment)"
+    },
+    purge_audit_flush_failed: %{
+      "pt_BR" =>
+        "⚠️ Não foi possível descarregar o log de auditoria de um purge: %{reason}; a entrada será escrita quando ele se recuperar",
+      "en_US" => "⚠️ Could not flush the audit log for a purge: %{reason}; the entry is written when it recovers"
+    },
+    purge_request_recorded: %{
+      "pt_BR" => "📋 Pedido de purge %{request} registrado por %{actor} para o tópico %{topic} até %{point}",
+      "en_US" => "📋 Purge request %{request} recorded by %{actor} for topic %{topic} up to %{point}"
+    },
     audit_event_logged: %{
       "pt_BR" => "📝 Evento de auditoria registrado: %{event_type}",
       "en_US" => "📝 Audit event logged: %{event_type}"
@@ -1293,9 +1310,18 @@ defmodule Malachi.I18n do
 
   defp interpolate(template, []), do: template
 
+  # One pass over the template: each placeholder is replaced by its binding's value, and a value is never
+  # scanned again. Replacing the bindings one after another would let a value that holds `%{other}` (a
+  # topic, a group name, anything a client sent) be rewritten by a later binding, forging the line.
+  # A placeholder with no binding is left as it is.
   defp interpolate(template, bindings) do
-    Enum.reduce(bindings, template, fn {key, value}, acc ->
-      String.replace(acc, "%{#{key}}", to_string(value))
+    values = Map.new(bindings, fn {key, value} -> {to_string(key), value} end)
+
+    Regex.replace(~r/%\{(\w+)\}/, template, fn placeholder, name ->
+      case Map.fetch(values, name) do
+        {:ok, value} -> to_string(value)
+        :error -> placeholder
+      end
     end)
   end
 end

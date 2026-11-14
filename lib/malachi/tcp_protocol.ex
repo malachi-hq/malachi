@@ -834,12 +834,15 @@ defmodule Malachi.TCPProtocol do
     end)
   end
 
-  # The manual purge (#198), gated by the :admin permission: a purge removes data from every reader.
+  # The manual purge (#198), gated by the :admin permission: a purge removes data from every reader. The
+  # permission is checked before the frame is decoded, so a refused caller has nothing recorded. A frame with
+  # one of the request fields and not the other reaches Purge, which refuses it as invalid_request (#308).
   defp purge_topic(correlation_id, payload, session) do
     with_permission(session, :admin, correlation_id, fn ->
-      {topic, point} = Wire.decode_purge_topic_req(payload)
+      {topic, point, request_id, reason} = Wire.decode_purge_topic_req(payload)
+      request = if is_nil(request_id) and is_nil(reason), do: nil, else: {request_id, reason}
 
-      case Purge.purge(topic, point, session.username) do
+      case Purge.purge(topic, point, session.username, request) do
         {:ok, moves} ->
           rows = moves |> Enum.sort() |> Enum.map(fn {{_topic, seq}, {from, to}} -> {seq, from, to} end)
           Wire.encode_ok(correlation_id, Wire.encode_purge_topic_resp(rows))

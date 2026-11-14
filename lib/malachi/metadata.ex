@@ -1159,9 +1159,18 @@ defmodule Malachi.Metadata do
 
   # --- internals: topic ---
 
-  # Topic names are used in file paths (range log directories), so restrict them to a safe
-  # allowlist and reject "."/"..": preventing path traversal at the data plane.
-  defp valid_topic_name?(name) do
+  @doc """
+  Whether `name` is a topic name the control plane accepts: `[A-Za-z0-9._-]+`, never `.` or `..`.
+  Topic names are used in file paths (range log directories), so the allowlist prevents path traversal at
+  the data plane. `Malachi.AdminCall.check_topic/1` applies the same rule to every administrative request.
+
+      iex> Malachi.Metadata.valid_topic_name?("orders.v2")
+      true
+      iex> Malachi.Metadata.valid_topic_name?("a/b")
+      false
+  """
+  @spec valid_topic_name?(term()) :: boolean()
+  def valid_topic_name?(name) do
     is_binary(name) and name not in ["", ".", ".."] and name =~ ~r/\A[A-Za-z0-9._-]+\z/
   end
 

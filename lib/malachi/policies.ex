@@ -127,7 +127,9 @@ defmodule Malachi.Policies do
         broker_call(fn -> BrokerServer.bind_topic_policy(DataPlaneRouter.shard_for(topic), topic, name) end)
       end
 
-    audit(:topic_policy_bound, actor, "bind_topic_policy", result, %{topic: topic, policy: name})
+    # A topic check_topic refused is recorded by its size: its bytes are whatever the request carried.
+    audited_topic = if check_topic(topic) == :ok, do: topic, else: AdminCall.describe_invalid(topic)
+    audit(:topic_policy_bound, actor, "bind_topic_policy", result, %{topic: audited_topic, policy: name})
 
     log(result, if(name, do: :topic_policy_bound, else: :topic_policy_unbound),
       topic: topic,

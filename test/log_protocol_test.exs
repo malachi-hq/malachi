@@ -311,6 +311,81 @@ defmodule Malachi.LogProtocolTest do
         assert reason(payload) == "permission_denied"
       end)
     end
+
+    defp purge(socket, topic, point, request_id, request_reason) do
+      frame = Wire.encode_purge_topic_req(topic, point, request_id, request_reason)
+      TCPHelper.request(socket, Wire.purge_topic_key(), 7, frame)
+    end
+
+    defp audited_request(request_id) do
+      _ = :sys.get_state(Malachi.AuditLog)
+
+      :purge_request_recorded
+      |> Malachi.AuditLog.get_events_by_type()
+      |> Enum.concat(Malachi.AuditLog.get_events_by_type(:topic_purged))
+      |> Enum.filter(&(&1.metadata[:request_id] == request_id))
+    end
+
+    test "an admin answers a data subject request: both entries carry the session user and the id", ctx do
+      request_id = "DSR-#{ctx.topic}"
+
+      with_session("admin", "admin123", fn socket ->
+        assert {0, _} = create_topic(socket, ctx.topic)
+        {:ok, _} = BrokerServer.produce(Malachi.LogBroker, ctx.topic, [Malachi.Log.Record.new("v0", key: "k0")])
+        point = {:position, Malachi.Position.encode({ctx.topic, 0}, {0, 1})}
+
+        assert {0, payload} = purge(socket, ctx.topic, point, request_id, "LGPD art. 18 request")
+        assert Wire.decode_purge_topic_resp(payload) == [{0, 0, 1}]
+      end)
+
+      events = audited_request(request_id)
+      assert events |> Enum.map(& &1.event_type) |> Enum.sort() == [:purge_request_recorded, :topic_purged]
+      assert Enum.all?(events, &(&1.username == "admin"))
+    end
+
+    test "a request field without the other, or one out of bounds, is refused as invalid_request", ctx do
+      with_session("admin", "admin123", fn socket ->
+        assert {0, _} = create_topic(socket, ctx.topic)
+
+        for {id, why} <- [{"DSR-half", nil}, {nil, "a reason alone"}, {"DSR 1", "space in the id"}] do
+          assert {code, payload} = purge(socket, ctx.topic, {:before, 0}, id, why)
+          refute ok?(code)
+          assert "invalid_request: " <> _ = reason(payload)
+        end
+      end)
+
+      assert audited_request("DSR-half") == []
+    end
+
+    test "a session without :admin is refused before the request is read or recorded", ctx do
+      request_id = "DSR-denied-#{ctx.topic}"
+
+      with_session("producer", "producer123", fn socket ->
+        assert {code, payload} = purge(socket, ctx.topic, {:before, 0}, request_id, "why")
+        refute ok?(code)
+        assert reason(payload) == "permission_denied"
+      end)
+
+      assert audited_request(request_id) == []
+    end
+
+    test "a session without :admin is refused before the frame is decoded, a malformed one included", ctx do
+      with_session("producer", "producer123", fn socket ->
+        old_frame = <<1::8, byte_size(ctx.topic)::32, ctx.topic::binary, 0::8, 0::64>>
+        assert {code, payload} = TCPHelper.request(socket, Wire.purge_topic_key(), 7, old_frame)
+        refute ok?(code)
+        assert reason(payload) == "permission_denied"
+      end)
+    end
+
+    test "a frame from before #308, without the request fields, is malformed", ctx do
+      with_session("admin", "admin123", fn socket ->
+        old_frame = <<1::8, byte_size(ctx.topic)::32, ctx.topic::binary, 0::8, 0::64>>
+        assert {code, payload} = TCPHelper.request(socket, Wire.purge_topic_key(), 7, old_frame)
+        refute ok?(code)
+        assert reason(payload) == "malformed_request"
+      end)
+    end
   end
 
   describe "admin storage policies (api keys 17 to 21)" do

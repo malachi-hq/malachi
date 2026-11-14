@@ -24,7 +24,10 @@ defmodule Malachi.AuditLog do
   - `:policy_deleted` - An administrator deleted a storage policy
   - `:topic_policy_bound` - An administrator bound a topic to a storage policy, or detached it
   - `:topic_purged` - An administrator purged a topic up to a point (`Malachi.Purge`): a logical purge,
-    recorded with the point asked for and each range's logical start before and after
+    recorded with the point asked for and each range's logical start before and after, and the
+    `request_id` of the data subject request it answers, if any. A refused field is recorded by its size
+  - `:purge_request_recorded` - An administrator recorded a data subject request before applying its purge
+    (`Malachi.Purge.Request`): the request id, the reason, the topic and the point
   - `:user_role_changed` - An administrator set or removed a user's console role (`Malachi.Auth.set_role/3`)
 
   ## Event Structure

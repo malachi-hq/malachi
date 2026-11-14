@@ -682,7 +682,8 @@ while creating a user without one keeps working. `node scripts/user.js create --
 then sets the role in a second request, so on such a cluster it leaves the user created without a role. Finalizing it gives up rolling back below the release that
 introduced the roles. Version **9** adds the manual purge (`set_range_starts`, [Purging a topic](purging-a-topic.md)):
 until the cluster reaches 9, `mix malachi.purge` and api key 35 are refused with the same "finish the rolling
-upgrade" message, and a vnode split cannot move a purged topic to a vnode below 9. Each time, the machines
+upgrade" message (a wire client whose api key 35 request is from the other side of the data subject request
+fields gets `malformed_request` instead, see [Purging a topic](purging-a-topic.md#upgrades)), and a vnode split cannot move a purged topic to a vnode below 9. Each time, the machines
 that gained nothing move with it at no cost, and a member on the older build refuses the new command until
 the whole group has moved.
 
