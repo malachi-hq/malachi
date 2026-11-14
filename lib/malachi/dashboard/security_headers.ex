@@ -88,26 +88,66 @@ defmodule Malachi.Dashboard.SecurityHeaders do
     base_headers ++ build_csp_header() ++ build_hsts_header() ++ cors_headers
   end
 
+  # No 'unsafe-inline' and no 'unsafe-eval' (#38): the dashboard's script and stylesheet are files of their own
+  # (Malachi.Dashboard.Assets), and no page carries an inline block, an inline handler or a style attribute.
+  @default_csp "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'"
+
+  # Source keywords that let injected markup run or style the page. Matched case-insensitively, as browsers do.
+  @weak_keywords ["'unsafe-inline'", "'unsafe-eval'", "'unsafe-hashes'"]
+
   @doc """
-  Builds Content Security Policy header.
+  The Content-Security-Policy sent when `MALACHI_DASHBOARD_CSP` is not set.
 
-  Default policy allows 'unsafe-inline' for compatibility with current dashboard.
-  Can be customized via MALACHI_DASHBOARD_CSP environment variable.
+  ## Examples
 
-  ## Future Hardening
+      iex> Malachi.Dashboard.SecurityHeaders.default_csp()
+      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'"
 
-  For production environments, consider removing 'unsafe-inline' and using nonces:
+  """
+  @spec default_csp() :: String.t()
+  def default_csp, do: @default_csp
 
-      export MALACHI_DASHBOARD_CSP="default-src 'self'; script-src 'self' 'nonce-RANDOM'; style-src 'self' 'nonce-RANDOM'"
+  @doc """
+  The operator's policy from `:dashboard_csp` (`MALACHI_DASHBOARD_CSP`), or `nil` when there is none. A value
+  that is empty or only whitespace counts as none: sent as is it would be an empty header, which is no policy at
+  all, the opposite of what anyone setting the variable wants.
+  """
+  @spec csp_override() :: String.t() | nil
+  def csp_override do
+    case Application.get_env(:malachi, :dashboard_csp) do
+      csp when is_binary(csp) -> if String.trim(csp) == "", do: nil, else: csp
+      _unset -> nil
+    end
+  end
 
-  This requires refactoring dashboard HTML to use nonce attributes.
+  @doc """
+  Whether `csp` allows any of `'unsafe-inline'`, `'unsafe-eval'` or `'unsafe-hashes'`, in any letter case.
+  `Malachi.Dashboard` warns at boot when the operator's policy does.
+
+  ## Examples
+
+      iex> Malachi.Dashboard.SecurityHeaders.weak_csp?("script-src 'self' 'UNSAFE-INLINE'")
+      true
+
+      iex> Malachi.Dashboard.SecurityHeaders.weak_csp?(Malachi.Dashboard.SecurityHeaders.default_csp())
+      false
+
+  """
+  @spec weak_csp?(String.t()) :: boolean()
+  def weak_csp?(csp) do
+    lowered = String.downcase(csp)
+    Enum.any?(@weak_keywords, &String.contains?(lowered, &1))
+  end
+
+  @doc """
+  Builds the Content-Security-Policy header: the operator's policy when `csp_override/0` has one, otherwise
+  `default_csp/0`, which allows nothing inline.
+
+  The same policy covers the dashboard (both HTML pages and their assets) and the console endpoint, which takes
+  its headers from `headers/3`.
   """
   def build_csp_header do
-    csp =
-      Application.get_env(:malachi, :dashboard_csp) ||
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
-
-    [{"content-security-policy", csp}]
+    [{"content-security-policy", csp_override() || @default_csp}]
   end
 
   @doc """

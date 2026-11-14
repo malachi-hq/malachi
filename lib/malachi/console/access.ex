@@ -86,13 +86,18 @@ defmodule Malachi.Console.Access do
   }
 
   @routes [
-    # Public: the login flow, the probes and the logo send no credentials.
+    # Public: the login flow, the probes, the logo and the dashboard's script and stylesheet
+    # (Malachi.Dashboard.Assets: fixed files, no data) send no credentials. The login page loads its assets
+    # before there is a session.
     {"GET", ["login"], :public},
     {"POST", ["login"], :public},
     {"GET", ["logout"], :public},
     {"GET", ["health"], :public},
     {"GET", ["ready"], :public},
     {"GET", ["logo.svg"], :public},
+    {"GET", ["app.css"], :public},
+    {"GET", ["app.js"], :public},
+    {"GET", ["login.js"], :public},
     {"OPTIONS", :any, :public},
     # Any valid session: the shell needs to know who it is talking to before it knows what it may show.
     {"GET", ["api", "v1", "me"], :authenticated},

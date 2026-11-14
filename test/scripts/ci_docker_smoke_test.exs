@@ -33,6 +33,9 @@ defmodule CiDockerSmokeTest do
       Regex.compile!("^\\s*MALACHI_DEFAULT_USERS=" <> @quoted <> "$"),
       ~r/^\s*if ! TOKEN="\$\(ms_login admin "\$ADMIN_PASS"\)"; then$/,
       ~r/^\s*if ! METRICS_RESPONSE="\$\(ms_http_get \/metrics "\$TOKEN" '\*\/\*'\)"; then$/,
+      # The browser check (#38) takes the password in its environment: an assignment prefixed to the
+      # command, which puts it in the process's environment and never in its argv.
+      ~r/^\s*if ! \(cd site\/checks && DASHBOARD_USER=admin DASHBOARD_PASS="\$ADMIN_PASS" node dashboard\.mjs "\$DASHBOARD_URL" csp-check\); then$/,
       Regex.compile!("^\\s*echo " <> @quoted <> "$")
     ]
   end
@@ -63,6 +66,7 @@ defmodule CiDockerSmokeTest do
     assert step =~ "source scripts/lib/dashboard_curl.sh"
     assert step =~ ~s|TOKEN="$(ms_login admin "$ADMIN_PASS")"|
     assert step =~ ~s|ms_http_get /metrics "$TOKEN"|
+    assert step =~ ~s|DASHBOARD_PASS="$ADMIN_PASS" node dashboard.mjs "$DASHBOARD_URL" csp-check|
   end
 
   # The guard against the ways a secret could come back that the first version of this test let through,
@@ -84,7 +88,11 @@ defmodule CiDockerSmokeTest do
         {"the users passed by value, quoted", ~S(            -e "MALACHI_DEFAULT_USERS=$MALACHI_DEFAULT_USERS" \\)},
         {"the users passed by value with --env",
          ~S(            --env MALACHI_DEFAULT_USERS="${MALACHI_DEFAULT_USERS}" \\)},
-        {"the users passed by value, unquoted", ~S(            -e MALACHI_DEFAULT_USERS=$MALACHI_DEFAULT_USERS \\)}
+        {"the users passed by value, unquoted", ~S(            -e MALACHI_DEFAULT_USERS=$MALACHI_DEFAULT_USERS \\)},
+        {"the browser check given the password as an argument",
+         ~S|          (cd site/checks && node dashboard.mjs "$DASHBOARD_URL" csp-check "$ADMIN_PASS")|},
+        {"the browser check with a command substituted in its environment",
+         ~S|          if ! (cd site/checks && DASHBOARD_PASS="$(echo $ADMIN_PASS)" node dashboard.mjs "$DASHBOARD_URL" csp-check); then|}
       ] do
     test "catches #{name}" do
       ci = File.read!(WorkflowText.path("ci.yml"))
