@@ -118,6 +118,12 @@ defmodule Mix.Tasks.Malachi.PurgeTest do
       refute_received {:called, _, _, _}
     end
 
+    test "an RPC that runs out of time says the purge may still apply, as a purge timeout does" do
+      assert {:error, message} = Task.execute(["t"], [{:group, "g"} | @request], recording_call({:error, :timeout}))
+      assert message =~ "rpc failed: :timeout"
+      assert message =~ "the purge may still apply; run the same command again (with the same --request)"
+    end
+
     test "a refusal under a request is printed as the refusal" do
       assert {:error, "no_such_topic"} =
                Task.execute(["t"], [{:group, "g"} | @request], recording_call({:ok, {:error, :no_such_topic}}))

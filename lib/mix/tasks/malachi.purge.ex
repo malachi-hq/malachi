@@ -52,6 +52,11 @@ defmodule Mix.Tasks.Malachi.Purge do
   alias Malachi.Purge
   alias Malachi.Purge.Request
 
+  # A purge waits on its own deadlines on the node: the audit flush before it (5 s), the broker (4 s) and
+  # the flush after it (5 s). The RPC outlasts their sum, so the task hears the purge's own answer instead
+  # of giving up while the purge goes on without it.
+  @rpc_timeout_ms 20_000
+
   @switches [
     node: :string,
     cookie: :string,
@@ -74,7 +79,7 @@ defmodule Mix.Tasks.Malachi.Purge do
     node = Rpc.target_node(opts)
 
     case Rpc.connect(node, opts[:cookie]) do
-      :ok -> report(execute(args, opts, Rpc.rpc(node)))
+      :ok -> report(execute(args, opts, Rpc.rpc(node, @rpc_timeout_ms)))
       {:error, message} -> Mix.raise(message)
     end
   end
@@ -172,6 +177,15 @@ defmodule Mix.Tasks.Malachi.Purge do
   end
 
   defp finish({:ok, {:error, reason}}, _topic, _point, _request), do: {:error, Purge.reason_string(reason)}
+  # The node did not answer within the RPC budget. The call is not stopped there, so the purge may still
+  # apply: say so, the way a purge that answers `timeout` does.
+  defp finish({:error, :timeout}, _topic, _point, _request),
+    do:
+      {:error,
+       Rpc.rpc_error(:timeout) <>
+         ": the node did not answer in time and the purge may still apply; run the same command again " <>
+         "(with the same --request) to see what it moved"}
+
   defp finish({:error, reason}, _topic, _point, _request), do: {:error, Rpc.rpc_error(reason)}
 
   @limits "(logical purge, not erasure: every record below the point, from every subject, is no longer " <>
