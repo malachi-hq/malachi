@@ -9,7 +9,8 @@
 # written to the report, so every result names the code it ran. Trust in that code rests on GitHub's transport and on
 # the review that main requires (a pull request with one approval): the run applies whatever main holds.
 #
-# The destroy and the final sweep run from an EXIT trap, so a failure in any step still tears the cluster down.
+# The destroy and the final sweep run from an EXIT trap, so a failure in any step still tears the cluster down. The
+# final sweep waits for OCI Search to catch up with the destroy before it calls a leak (sweep_after_destroy).
 # SIGTERM, SIGINT and SIGHUP exit through the same trap. SIGKILL and a reboot cannot run a trap: the next day's
 # sweep finds the leftovers and destroys them before it applies anything. Before any destroy, the configuration
 # that the last successful apply used is put back on the stack, so a broken new commit cannot block the teardown.
@@ -26,6 +27,7 @@ DOCKER="${DOCKER:-docker}"
 CLUSTER_NODES="malachi1 malachi2 malachi3"
 MEMORY_LIMIT_PCT=70
 APPLY_WAIT_LIMIT="${APPLY_WAIT_LIMIT:-10800}"   # seconds to wait for one apply job, polled once a minute
+SWEEP_SETTLE_LIMIT="${SWEEP_SETTLE_LIMIT:-600}"   # seconds the sweep after the destroy waits for OCI Search to catch up
 
 RESULT="unknown"
 DESTROYED="no"
@@ -65,17 +67,65 @@ lb_id() {
 # Lists what is left in the cluster compartment, excluding terminated resources. Returns 0 when nothing is left,
 # 1 when something is, and 2 when the count could not be made: a tooling failure is not a leak.
 # The errors of the search go to sweep.err in the run directory.
+SWEEP_LEFT=""
+sweep_query() {
+  printf "query all resources where compartmentId = '%s' && lifecycleState != 'TERMINATED'" "$CLUSTER_COMPARTMENT_ID"
+}
+
+# Leaves the count in SWEEP_LEFT. Fails when the search fails or answers anything but a number.
+count_left() {
+  SWEEP_LEFT=$("${OCI[@]}" search resource structured-search --query-text "$(sweep_query)" \
+    --query 'length(data.items)' --raw-output 2>>"$WORK/sweep.err") || SWEEP_LEFT=""
+  [[ "$SWEEP_LEFT" =~ ^[0-9]+$ ]]
+}
+
 sweep() {
-  local when="$1" left
-  left=$("${OCI[@]}" search resource structured-search \
-    --query-text "query all resources where compartmentId = '$CLUSTER_COMPARTMENT_ID' && lifecycleState != 'TERMINATED'" \
-    --query 'length(data.items)' --raw-output 2>>"$WORK/sweep.err") || left=""
-  if ! [[ "$left" =~ ^[0-9]+$ ]]; then
+  local when="$1"
+  if ! count_left; then
     log "sweep $when: could not count the cluster compartment (see sweep.err)"
     return 2
   fi
-  if [ "$left" -eq 0 ]; then log "sweep $when: 0 resource(s) left"; return 0; fi
-  log "sweep $when: $left resource(s) left in the cluster compartment"
+  if [ "$SWEEP_LEFT" -eq 0 ]; then log "sweep $when: 0 resource(s) left"; return 0; fi
+  log "sweep $when: $SWEEP_LEFT resource(s) left in the cluster compartment"
+  return 1
+}
+
+# Writes each resource left to the report: its type, display name and lifecycle state.
+list_leftovers() {
+  local table line
+  if ! table=$("${OCI[@]}" search resource structured-search --query-text "$(sweep_query)" \
+      --query 'data.items[].{type:"resource-type",name:"display-name",state:"lifecycle-state"}' \
+      --output table 2>>"$WORK/sweep.err"); then
+    log "the resources left could not be listed (see sweep.err)"
+    return 0
+  fi
+  while IFS= read -r line; do log "  $line"; done <<<"$table"
+}
+
+# OCI Search is an index that follows the services with a delay: straight after a destroy it can still list, as
+# AVAILABLE or TERMINATING, what the destroy has just removed (the run of 2026-11-13 counted 2 resources 18 seconds
+# after a destroy of all 28, and none were left). So the sweep after the destroy counts again every 30 seconds until
+# nothing is left or SWEEP_SETTLE_LIMIT is reached, and only a count still above zero then is a leak, reported with
+# the resources it found. A count that cannot be made returns at once, as in sweep. The sweep before the apply
+# stays a single count: it runs a day after the last destroy.
+sweep_after_destroy() {
+  local rc=0 deadline=$((SECONDS + SWEEP_SETTLE_LIMIT))
+  sweep "after destroy" || rc=$?
+  [ "$rc" -eq 1 ] || return "$rc"
+  log "OCI Search may still list what the destroy removed: counting again every 30 s, for up to ${SWEEP_SETTLE_LIMIT} s"
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 30
+    if ! count_left; then
+      log "sweep after destroy: could not count the cluster compartment (see sweep.err)"
+      return 2
+    fi
+    if [ "$SWEEP_LEFT" -eq 0 ]; then
+      log "sweep after destroy: 0 resource(s) left once the index caught up"
+      return 0
+    fi
+  done
+  log "sweep after destroy: $SWEEP_LEFT resource(s) still left after ${SWEEP_SETTLE_LIMIT} s:"
+  list_leftovers
   return 1
 }
 
@@ -329,7 +379,7 @@ on_exit() {
     fi
   fi
   if [ "$RESULT" != "config-missing" ]; then
-    sweep "after destroy" || sweep_rc=$?
+    sweep_after_destroy || sweep_rc=$?
     if [ "$sweep_rc" -eq 1 ]; then
       log "LEAK: resources remain after destroy"
       case "$RESULT" in apply-stuck|destroy-failed|restore-failed) ;; *) RESULT="leak" ;; esac
