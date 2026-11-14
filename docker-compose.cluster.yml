@@ -88,6 +88,8 @@ x-malachi-node: &malachi-node
     # them tiny, because otherwise no `.idx` exists in a test window and its integrity is untestable.
     MALACHI_LOG_ROLL_MAX_BYTES: "${MALACHI_LOG_ROLL_MAX_BYTES:-}"
     MALACHI_LOG_ROLL_MAX_AGE_MS: "${MALACHI_LOG_ROLL_MAX_AGE_MS:-}"
+    # How new segments frame their records (#202): record by default; the drills also run with batch.
+    MALACHI_SEGMENT_FORMAT: "${MALACHI_SEGMENT_FORMAT:-record}"
     # Integrity scrub. Unset keeps the production defaults (enabled, one segment a minute); the
     # storage-chaos drill turns the cadence way up so a repair happens inside a test window, and
     # benchmark/docker-scrub.sh sweeps these to measure what the scrub costs under load.

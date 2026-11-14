@@ -1437,6 +1437,9 @@ defmodule Malachi.Application do
       end
     end)
     |> Keyword.put(:prealloc_bytes, segment_prealloc_bytes())
+    # Where the data-directory format marker lives (`Malachi.Storage.FormatMarker`): the replication server
+    # raises it before it writes the first byte of a batch segment.
+    |> Keyword.put(:format_marker_dir, log_data_dir())
   end
 
   # How far to size a new segment file at creation, so appends overwrite an already-allocated region

@@ -30,19 +30,22 @@ defmodule Malachi.Cluster.Catchup do
 
   ## Options
     * `:batch_size` - records copied per round trip (default 1000).
+    * `:format` - the segment's format (`t:Malachi.Log.Frames.format/0`, `:record` by default), which the
+      target creates its copy with when it holds none yet.
   """
   @spec run(term(), term(), term(), non_neg_integer(), non_neg_integer(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, {:source | :target, term()}}
   def run(target, source, segment_id, from_offset, to_offset, opts \\ []) do
     batch_size = Keyword.get(opts, :batch_size, @default_batch_size)
-    copy(target, source, segment_id, from_offset, to_offset, batch_size)
+    format = Keyword.get(opts, :format, :record)
+    copy(target, source, segment_id, from_offset, to_offset, {batch_size, format})
   end
 
-  defp copy(_target, _source, _segment_id, offset, to_offset, _batch_size) when offset >= to_offset do
+  defp copy(_target, _source, _segment_id, offset, to_offset, _settings) when offset >= to_offset do
     {:ok, offset}
   end
 
-  defp copy(target, source, segment_id, offset, to_offset, batch_size) do
+  defp copy(target, source, segment_id, offset, to_offset, {batch_size, format} = settings) do
     limit = min(batch_size, to_offset - offset)
 
     case ReplicationServer.read(source, segment_id, offset, limit) do
@@ -53,8 +56,8 @@ defmodule Malachi.Cluster.Catchup do
         {:error, {:source, reason}}
 
       {:ok, records} ->
-        case ReplicationServer.follow(target, segment_id, offset, records) do
-          {:ok, last} -> copy(target, source, segment_id, last + 1, to_offset, batch_size)
+        case ReplicationServer.follow(target, segment_id, offset, records, format) do
+          {:ok, last} -> copy(target, source, segment_id, last + 1, to_offset, settings)
           {:error, reason} -> {:error, {:target, reason}}
         end
     end

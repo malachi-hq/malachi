@@ -5,6 +5,8 @@ defmodule Malachi.Cluster.ScrubberTracingTest do
   # plane and copies a whole segment between nodes, which is exactly the distributed latency a trace
   # is for. async: false: it sets the global span exporter.
   use ExUnit.Case, async: false
+
+  alias Malachi.Test.SegmentFilesHelper
   require Record
 
   alias Malachi.Cluster.ReplicationServer
@@ -77,7 +79,7 @@ defmodule Malachi.Cluster.ScrubberTracingTest do
     refute_receive {:span, _clean_pass_span}, 200
 
     # now rot the local copy and let the repair run
-    [log_file] = damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+    [log_file] = damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
     {pairs, _valid} = LogRecord.decode_all(File.read!(log_file))
     {_record, position} = Enum.at(pairs, 1)
     flip_at = position + 12

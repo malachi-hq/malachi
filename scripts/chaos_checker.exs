@@ -78,8 +78,9 @@ defmodule ChaosChecker.Copies do
   the model does promise is the records, so a copy is summarized by:
 
     * `records` and `bytes`: what `Malachi.Storage.ElixirStore.verify/3` accepts as valid, per file;
-    * `digest`: the md5 of every file's valid prefix, concatenated in base-offset order, which is the
-      same for two copies holding the same frames however their files are cut;
+    * `digest`: the md5 of every record's offset and wire encoding, in offset order, which is the same for
+      two copies holding the same records however their files and, in the batch format, their batches are
+      cut;
     * `trailing`: non-zero bytes past a file's valid end, which no writer leaves there;
     * `files`: each file's base offset, size and whole-file md5, so a report still shows the raw layout.
 
@@ -89,14 +90,14 @@ defmodule ChaosChecker.Copies do
   """
 
   alias Malachi.Log
+  alias Malachi.Log.Frames
+  alias Malachi.Log.SegmentFiles
   alias Malachi.Storage.ElixirStore
 
-  @segment_id_width 20
   @chunk_bytes 65_536
   @short_md5 12
   # Where a file's first record offset sits: past the frame header (magic, payload length, CRC) at the head
   # of the payload, per `Malachi.Log.Record`. Read only once `verify/3` has accepted that frame, CRC included.
-  @first_offset_at 10
 
   @passing [:identical, :benign]
 
@@ -193,24 +194,25 @@ defmodule ChaosChecker.Copies do
     if File.exists?(dir), do: read_present(dir, blank), else: %{blank | status: :missing}
   end
 
+  # A path that exists and is not a directory cannot be listed, and it is damage: `SegmentFiles.list/1` reads
+  # it as holding no segment, which is right for a log and wrong for a copy the checker was told is there.
   defp read_present(dir, blank) do
-    case File.ls(dir) do
-      {:ok, names} ->
-        names
-        |> Enum.flat_map(&log_base_offset/1)
-        |> Enum.sort()
+    case File.stat(dir) do
+      {:ok, %{type: :directory}} -> list_present(dir, blank)
+      {:ok, _not_a_directory} -> %{blank | status: {:damaged, %{reason: :enotdir, file: dir}}}
+      {:error, reason} -> %{blank | status: {:damaged, %{reason: reason, file: dir}}}
+    end
+  end
+
+  defp list_present(dir, blank) do
+    case SegmentFiles.list(dir) do
+      {:ok, offsets} ->
+        offsets
         |> Enum.reduce_while({blank, :crypto.hash_init(:md5), nil}, &read_file(dir, &1, &2))
         |> finish_copy()
 
       {:error, reason} ->
         %{blank | status: {:damaged, %{reason: reason, file: dir}}}
-    end
-  end
-
-  defp log_base_offset(name) do
-    case Regex.run(~r/\A(\d+)\.log\z/, name) do
-      [_, digits] -> [String.to_integer(digits)]
-      nil -> []
     end
   end
 
@@ -224,13 +226,12 @@ defmodule ChaosChecker.Copies do
   # of the non-zero bytes past the valid end. `verify/3` runs first because the valid end comes from it.
   # `next` is where this file has to start, given the files before it (`nil` for the first).
   defp read_file(dir, base_offset, {copy, content, next}) do
-    path = Path.join(dir, segment_id(base_offset) <> ".log")
+    path = SegmentFiles.log_path(dir, base_offset)
 
     with :ok <- chained(base_offset, next, path),
-         {:ok, %{records: records, bytes: valid}} <-
-           ElixirStore.verify(dir, segment_id(base_offset), base_offset: base_offset),
-         :ok <- named_for_its_first_record(path, base_offset, records),
-         {:ok, size, md5, content, trailing} <- hash_file(path, valid, content) do
+         {:ok, %{records: records, bytes: valid}} <- verified(dir, base_offset, path),
+         {:ok, size, md5, trailing} <- hash_file(path, valid),
+         {:ok, content} <- hash_records(dir, base_offset, records, content) do
       file = %{base_offset: base_offset, size: size, md5: md5, records: records, valid: valid}
 
       {:cont,
@@ -252,17 +253,29 @@ defmodule ChaosChecker.Copies do
   defp chained(base_offset, next, path),
     do: {:error, %{reason: :discontiguous, file: path, expected: next, found: base_offset}}
 
-  # A file with no record starts wherever it was created, and there is no frame to disagree with.
-  defp named_for_its_first_record(_path, _base_offset, 0), do: :ok
+  # The store checks that a file's first frame starts at the offset its name says (`ElixirStore.verify/3`), and
+  # answers a file that does not as damage at byte 0. That is a file named for another offset, and it is
+  # reported as one, with where it says it starts, since that tells a renamed file from a rotted one.
+  defp verified(dir, base_offset, path) do
+    case ElixirStore.verify(dir, segment_id(base_offset), base_offset: base_offset) do
+      {:error, %{reason: :bad_offset, position: 0}} -> misplaced(path, base_offset)
+      other -> other
+    end
+  end
 
-  defp named_for_its_first_record(path, base_offset, _records) do
-    case File.open(path, [:read, :raw, :binary], &:file.pread(&1, @first_offset_at, 8)) do
-      {:ok, {:ok, <<^base_offset::64>>}} -> :ok
-      {:ok, {:ok, <<first::64>>}} -> {:error, %{reason: :misplaced, file: path, expected: base_offset, found: first}}
-      {:ok, {:ok, _short}} -> {:error, %{reason: :misplaced, file: path, expected: base_offset, found: nil}}
-      {:ok, :eof} -> {:error, %{reason: :misplaced, file: path, expected: base_offset, found: nil}}
-      {:ok, {:error, reason}} -> {:error, reason}
-      {:error, reason} -> {:error, reason}
+  defp misplaced(path, base_offset) do
+    case File.open(path, [:read, :raw, :binary], &:file.pread(&1, 0, 32)) do
+      {:ok, {:ok, head}} ->
+        {:error, %{reason: :misplaced, file: path, expected: base_offset, found: Frames.first_offset(head)}}
+
+      {:ok, :eof} ->
+        {:error, %{reason: :misplaced, file: path, expected: base_offset, found: nil}}
+
+      {:ok, {:error, reason}} ->
+        {:error, reason}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -271,31 +284,69 @@ defmodule ChaosChecker.Copies do
   defp damage_details(details, _path) when is_map(details), do: details
   defp damage_details(reason, path), do: %{reason: reason, file: path}
 
-  defp hash_file(path, valid, content) do
-    case File.open(path, [:read, :raw, :binary], &hash_chunks(&1, 0, valid, :crypto.hash_init(:md5), content, 0)) do
-      {:ok, {:ok, _size, _md5, _content, _trailing} = hashed} -> hashed
+  defp hash_file(path, valid) do
+    case File.open(path, [:read, :raw, :binary], &hash_chunks(&1, 0, valid, :crypto.hash_init(:md5), 0)) do
+      {:ok, {:ok, _size, _md5, _trailing} = hashed} -> hashed
       {:ok, {:error, _reason} = error} -> error
       {:error, _reason} = error -> error
     end
   end
 
-  defp hash_chunks(fd, position, valid, whole, content, trailing) do
+  defp hash_chunks(fd, position, valid, whole, trailing) do
     case :file.read(fd, @chunk_bytes) do
       {:ok, chunk} ->
         in_prefix = chunk |> byte_size() |> min(max(valid - position, 0))
-        <<prefix::binary-size(in_prefix), past_valid::binary>> = chunk
+        <<_prefix::binary-size(in_prefix), past_valid::binary>> = chunk
 
         hash_chunks(
           fd,
           position + byte_size(chunk),
           valid,
           :crypto.hash_update(whole, chunk),
-          :crypto.hash_update(content, prefix),
           trailing + non_zero_bytes(past_valid)
         )
 
       :eof ->
-        {:ok, position, hex(:crypto.hash_final(whole)), content, trailing}
+        {:ok, position, hex(:crypto.hash_final(whole)), trailing}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # The content digest is over the records, not the bytes that store them: each record's offset and its wire
+  # encoding (`Malachi.Wire.encode_record/1`), file after file. Copies of one segment in the batch format can
+  # hold the same records in batches cut at different places (a catch-up copies in its own steps), and every
+  # copy is compared by what it holds, so the digest is independent of the format, the batches and the files.
+  defp hash_records(dir, base_offset, records, content) do
+    opts = [base_offset: base_offset, record_count: records]
+
+    with {:ok, handle} <- ElixirStore.open_read(dir, segment_id(base_offset), opts) do
+      try do
+        hash_from(handle, base_offset, base_offset + records, content)
+      after
+        ElixirStore.close(handle)
+      end
+    end
+  end
+
+  defp hash_from(_handle, offset, end_offset, content) when offset >= end_offset, do: {:ok, content}
+
+  defp hash_from(handle, offset, end_offset, content) do
+    case ElixirStore.read(handle, offset, min(1_000, end_offset - offset)) do
+      {:ok, [_ | _] = page} ->
+        content =
+          Enum.reduce(page, content, fn record, acc ->
+            :crypto.hash_update(acc, <<record.offset::64, Malachi.Wire.encode_record(record)::binary>>)
+          end)
+
+        hash_from(handle, List.last(page).offset + 1, end_offset, content)
+
+      {:ok, []} ->
+        {:error, %{reason: :short_read, expected: end_offset, found: offset}}
+
+      :eof ->
+        {:error, %{reason: :short_read, expected: end_offset, found: offset}}
 
       {:error, _reason} = error ->
         error
@@ -308,7 +359,7 @@ defmodule ChaosChecker.Copies do
     end
   end
 
-  defp segment_id(base_offset), do: base_offset |> Integer.to_string() |> String.pad_leading(@segment_id_width, "0")
+  defp segment_id(base_offset), do: SegmentFiles.id(base_offset)
 
   defp hex(binary), do: Base.encode16(binary, case: :lower)
 

@@ -13,6 +13,8 @@ defmodule Malachi.Log.Segment do
   (durable, committed) state, not data still buffered in memory.
   """
 
+  alias Malachi.Log.SegmentFiles
+
   # NorthGuard seals at 1GB or after 1h active.
   @default_max_bytes 1_073_741_824
   @default_max_age_ms 3_600_000
@@ -67,16 +69,16 @@ defmodule Malachi.Log.Segment do
 
   @doc "Absolute path of the segment's data file."
   @spec path(t()) :: Path.t()
-  def path(%__MODULE__{directory: directory, id: id}), do: Path.join(directory, "#{id}.log")
+  def path(%__MODULE__{directory: directory, id: id}), do: SegmentFiles.path(directory, to_string(id), :log)
 
   @doc "Absolute path of the segment's persisted sparse index sidecar."
   @spec index_path(t()) :: Path.t()
-  def index_path(%__MODULE__{directory: directory, id: id}), do: Path.join(directory, "#{id}.idx")
+  def index_path(%__MODULE__{directory: directory, id: id}), do: SegmentFiles.path(directory, to_string(id), :index)
 
   @doc "Absolute path of the segment's seal marker."
   @spec seal_marker_path(t()) :: Path.t()
   def seal_marker_path(%__MODULE__{directory: directory, id: id}),
-    do: Path.join(directory, "#{id}.sealed")
+    do: SegmentFiles.path(directory, to_string(id), :seal_marker)
 
   @doc "The logical offset *after* the last committed record (exclusive end)."
   @spec end_offset(t()) :: non_neg_integer()

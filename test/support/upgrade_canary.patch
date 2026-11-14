@@ -37,8 +37,8 @@ index d6514f2..161c808 100644
    end
  
 +  # UPGRADE CANARY (test/support/upgrade_canary.patch): switching the canary flag on raises the data
-+  # directory to format 2, so that an older build refuses to start on it (issue #189).
-+  defp adopt_upgrade_canary(:upgrade_canary), do: :ok = FormatMarker.raise_to(log_data_dir(), 2)
++  # directory to format 3, so that an older build refuses to start on it (issue #189).
++  defp adopt_upgrade_canary(:upgrade_canary), do: :ok = FormatMarker.raise_to(log_data_dir(), 3)
 +  defp adopt_upgrade_canary(_flag), do: :ok
 +
    @doc """
@@ -54,7 +54,7 @@ index 6c1c5db..eec6257 100644
  
 +  @doc """
 +  UPGRADE CANARY (test/support/upgrade_canary.patch): writes `note` into `topic`'s metadata through the
-+  control plane, a command introduced at machine version 9.
++  control plane, a command introduced at machine version 11.
 +  """
 +  @spec canary_note(t(), Metadata.topic_name(), term()) :: {t(), term()}
 +  def canary_note(%__MODULE__{} = broker, topic, note), do: apply_metadata(broker, {:canary_note, topic, note})
@@ -95,18 +95,17 @@ index 6919733..05c3649 100644
    @typedoc "A capability, which is also the name of the flag that requires it."
    @type capability :: atom()
 diff --git a/lib/malachi/cluster/machine_version.ex b/lib/malachi/cluster/machine_version.ex
-index 3970a03..22e1b03 100644
 --- a/lib/malachi/cluster/machine_version.ex
 +++ b/lib/malachi/cluster/machine_version.ex
-@@ -102,7 +102,10 @@ defmodule Malachi.Cluster.MachineVersion do
-   # generation}` and `{:open_group, group, topic}`, at the next version since 7 is released.
-   # 9 introduces the manual purge in `Malachi.Metadata` (#198): `{:set_range_starts, topic, starts}`,
+@@ -104,7 +104,10 @@ defmodule Malachi.Cluster.MachineVersion do
    # and the topic export format that carries a range's logical start.
--  @code_version 9
+   # 10 introduces the batch storage format in `Malachi.Metadata` (#202): `{:register_segment, range, id,
+   # replicas, start, format}` and `{:seal_segment, id, length, byte_size, stored_bytes, at}`.
+-  @code_version 10
 +  # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
-+  # scripts/docker-upgrade-chaos.sh, never into a release. Version 10 introduces
++  # scripts/docker-upgrade-chaos.sh, never into a release. Version 11 introduces
 +  # `{:canary_note, topic, note}` in `Malachi.Metadata`.
-+  @code_version 10
++  @code_version 11
  
    @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
    @type command_key :: {atom(), non_neg_integer()}
@@ -163,7 +162,7 @@ index 1258dcf..1183399 100644
 +      {:end_migration, 2} => 0,
 +      # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
 +      # scripts/docker-upgrade-chaos.sh, never into a release.
-+      {:canary_note, 3} => 10
++      {:canary_note, 3} => 11
      }
    end
  
@@ -195,24 +194,24 @@ index 1258dcf..1183399 100644
  
    # Retiring a range requires its write head to be closed FIRST, and this is the only place that
 diff --git a/lib/malachi/storage/format_marker.ex b/lib/malachi/storage/format_marker.ex
-index 8f27d72..989c75f 100644
 --- a/lib/malachi/storage/format_marker.ex
 +++ b/lib/malachi/storage/format_marker.ex
-@@ -65,11 +65,15 @@ defmodule Malachi.Storage.FormatMarker do
-   # `raise_to/3`, called when the flag flips, moves a directory above it.
-   @baseline_format 1
+@@ -68,12 +68,16 @@ defmodule Malachi.Storage.FormatMarker do
+   # first byte of one is written, so a binary that would read it as damage refuses the directory instead.
+   @batch_format 2
    # The highest level this release can read.
--  @supported_format 1
+-  @supported_format @batch_format
 +  # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
-+  # scripts/docker-upgrade-chaos.sh, never into a release. Format 2 is what the
++  # scripts/docker-upgrade-chaos.sh, never into a release. Format 3 is what the
 +  # canary flag raises the marker to, so that an older build refuses the directory.
-+  @supported_format 2
++  @supported_format 3
  
    # The oldest release that understands each format. The bridge release is the first that reads the
-   # marker at all, so it is the floor for format 1 as far as the marker can express one.
--  @first_release %{1 => "0.12.0"}
-+  # UPGRADE CANARY (test/support/upgrade_canary.patch): format 2 needs its own first release, or raise_to refuses it.
-+  @first_release %{1 => "0.12.0", 2 => "upgrade-canary"}
+   # marker at all, so it is the floor for format 1 as far as the marker can express one; format 2 is read
+   # from the release that ships the batch frame.
+-  @first_release %{1 => "0.12.0", 2 => "0.25.0"}
++  # UPGRADE CANARY (test/support/upgrade_canary.patch): format 3 needs its own first release, or raise_to refuses it.
++  @first_release %{1 => "0.12.0", 2 => "0.25.0", 3 => "upgrade-canary"}
  
    @required_keys ["format", "written_by", "requires"]
  

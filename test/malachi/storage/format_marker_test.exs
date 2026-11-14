@@ -15,6 +15,8 @@ defmodule Malachi.Storage.FormatMarkerTest do
 
   @v1 %{format: 1, written_by: "0.12.0", requires: "0.12.0"}
   @v2 %{format: 2, written_by: "0.13.0", requires: "0.13.0"}
+  # One past what this release reads (it reads up to 2, the batch format).
+  @v3 %{format: 3, written_by: "0.25.0", requires: "0.25.0"}
 
   defp put_marker(dir, content), do: File.write!(FormatMarker.path(dir), content)
 
@@ -32,7 +34,8 @@ defmodule Malachi.Storage.FormatMarkerTest do
 
   test "the levels and the exit status this release is built with" do
     assert FormatMarker.baseline_format() == 1
-    assert FormatMarker.supported_format() == 1
+    assert FormatMarker.supported_format() == 2
+    assert FormatMarker.batch_format() == 2
     assert FormatMarker.exit_status() == 78
   end
 
@@ -151,10 +154,10 @@ defmodule Malachi.Storage.FormatMarkerTest do
     end
 
     test "a marker above the supported format refuses without touching it", %{tmp_dir: dir} do
-      content = FormatMarker.render(@v2)
+      content = FormatMarker.render(@v3)
       put_marker(dir, content)
 
-      assert FormatMarker.enforce(dir) == {:refuse, {:too_new, @v2, 1, FormatMarker.path(dir)}}
+      assert FormatMarker.enforce(dir) == {:refuse, {:too_new, @v3, 2, FormatMarker.path(dir)}}
       assert File.read!(FormatMarker.path(dir)) == content
     end
 
@@ -244,37 +247,45 @@ defmodule Malachi.Storage.FormatMarkerTest do
   end
 
   describe "raising above the current format" do
-    # This release reads only format 1, so there is nothing real to raise to yet; `:supported` and
-    # `:requires` stand in for the release that will (#207), exactly as it will call this.
-    @raise_opts [supported: 2, requires: "0.13.0", version: "0.13.0"]
+    # Format 3 does not exist yet; `:supported` and `:requires` stand in for the release that will read it,
+    # exactly as it will call this. The real raise, to the batch format, is the first test.
+    @raise_opts [supported: 3, requires: "0.25.0", version: "0.25.0"]
+
+    test "raises to the batch format with the release that first reads it", %{tmp_dir: dir} do
+      :ok = FormatMarker.write(dir, 1, "0.12.0")
+
+      assert FormatMarker.raise_to(dir, FormatMarker.batch_format(), version: "0.25.0") == :ok
+      assert {:ok, {:ok, %{format: 2, requires: "0.25.0"}}} = FormatMarker.read(dir)
+      assert FormatMarker.enforce(dir) == :ok
+    end
 
     test "overwrites the marker in place with the new level", %{tmp_dir: dir} do
       :ok = FormatMarker.write(dir, 1, "0.12.0")
 
-      assert FormatMarker.raise_to(dir, 2, @raise_opts) == :ok
-      assert File.read!(FormatMarker.path(dir)) == FormatMarker.render(@v2)
-      assert FormatMarker.enforce(dir) == {:refuse, {:too_new, @v2, 1, FormatMarker.path(dir)}}
+      assert FormatMarker.raise_to(dir, 3, @raise_opts) == :ok
+      assert File.read!(FormatMarker.path(dir)) == FormatMarker.render(@v3)
+      assert FormatMarker.enforce(dir) == {:refuse, {:too_new, @v3, 2, FormatMarker.path(dir)}}
     end
 
     test "keeps no stale bytes when the new content is shorter", %{tmp_dir: dir} do
       put_marker(dir, "format=1\nwritten_by=an-old-and-much-longer-version-string\nrequires=0.12.0\n")
 
-      assert FormatMarker.raise_to(dir, 2, @raise_opts) == :ok
-      assert File.read!(FormatMarker.path(dir)) == FormatMarker.render(@v2)
+      assert FormatMarker.raise_to(dir, 3, @raise_opts) == :ok
+      assert File.read!(FormatMarker.path(dir)) == FormatMarker.render(@v3)
     end
 
     test "a level with no recorded first release is not written", %{tmp_dir: dir} do
       :ok = FormatMarker.write(dir, 1, "0.12.0")
       before = File.read!(FormatMarker.path(dir))
 
-      assert FormatMarker.raise_to(dir, 2, supported: 2) == {:error, {:no_first_release, 2}}
+      assert FormatMarker.raise_to(dir, 3, supported: 3) == {:error, {:no_first_release, 3}}
       assert File.read!(FormatMarker.path(dir)) == before
     end
 
     test "never lowers", %{tmp_dir: dir} do
-      put_marker(dir, FormatMarker.render(@v2))
-      assert FormatMarker.raise_to(dir, 1, @raise_opts) == {:error, {:lower, 2, 1}}
-      assert File.read!(FormatMarker.path(dir)) == FormatMarker.render(@v2)
+      put_marker(dir, FormatMarker.render(@v3))
+      assert FormatMarker.raise_to(dir, 1, @raise_opts) == {:error, {:lower, 3, 1}}
+      assert File.read!(FormatMarker.path(dir)) == FormatMarker.render(@v3)
     end
 
     test "a directory the node cannot write is reported, and the marker is left as it was", %{tmp_dir: dir} do
@@ -285,17 +296,17 @@ defmodule Malachi.Storage.FormatMarkerTest do
 
       # Root ignores the permission bits, so the refusal can only be observed as a regular user.
       if File.write(Path.join(dir, "probe"), "") == {:error, :eacces} do
-        assert FormatMarker.raise_to(dir, 2, @raise_opts) == {:error, {:io, :eacces}}
+        assert FormatMarker.raise_to(dir, 3, @raise_opts) == {:error, {:io, :eacces}}
         assert File.read!(FormatMarker.path(dir)) == before
       end
     end
 
     test "a leftover temporary file from a crashed raise does not stop the next one", %{tmp_dir: dir} do
       :ok = FormatMarker.write(dir, 1, "0.12.0")
-      File.write!(Path.join(dir, "malachi.format.tmp"), "format=2\nwrit")
+      File.write!(Path.join(dir, "malachi.format.tmp"), "format=3\nwrit")
 
-      assert FormatMarker.raise_to(dir, 2, @raise_opts) == :ok
-      assert File.read!(FormatMarker.path(dir)) == FormatMarker.render(@v2)
+      assert FormatMarker.raise_to(dir, 3, @raise_opts) == :ok
+      assert File.read!(FormatMarker.path(dir)) == FormatMarker.render(@v3)
       refute File.exists?(Path.join(dir, "malachi.format.tmp"))
     end
   end

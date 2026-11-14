@@ -31,7 +31,7 @@
 # Phase 2, roll back before the flip: every node goes back to OLD, still under load. This must succeed.
 # Phase 3, roll forward, finalize, flip, and a rollback that must be refused: every node goes to NEW under
 #   the pin, then the pin is removed node by node, which moves the control plane to NEW's version, where the
-#   canary command applies. The flag is switched on, which raises every data directory to format 2. Node 3 is
+#   canary command applies. The flag is switched on, which raises every data directory to format 3. Node 3 is
 #   then started on OLD: it must exit 78 with the format marker's refusal (#189), its data directory (segment
 #   files and control-plane state) must be byte for byte what it was, and the other two must keep serving.
 #   Node 3 then goes back to NEW.
@@ -49,6 +49,9 @@
 #
 # Usage: scripts/docker-upgrade-chaos.sh
 set -uo pipefail
+# The data format the canary flag raises a directory to (test/support/upgrade_canary.patch): one past the
+# newest format a release reads, so the OLD build refuses the directory whatever release it is.
+CANARY_FORMAT=3
 cd "$(cd "$(dirname "$0")/.." && pwd)" || exit 1
 export SRV_CPUSET="${SRV_CPUSET:-2,3,4,5,6,7}" LT_CPUSET="${LT_CPUSET:-0,1}"
 export RF=3
@@ -539,11 +542,11 @@ refused_rollback() {
   capture_logs malachi-cluster-3 "p3 OLD node 3, refused"
 
   if [ -z "$refused" ]; then
-    fail "node 3 on OLD did not exit 78 on a format 2 directory (last state: $state)"
-  elif ! echo "$logs" | grep -q "REFUSING TO START (exit 78): the format marker .* records format 2"; then
+    fail "node 3 on OLD did not exit 78 on a format $CANARY_FORMAT directory (last state: $state)"
+  elif ! echo "$logs" | grep -q "REFUSING TO START (exit 78): the format marker .* records format $CANARY_FORMAT"; then
     fail "node 3 on OLD exited 78 without the format marker's refusal: $(echo "$logs" | grep "REFUSING" | tail -1)"
   else
-    echo "node 3 on OLD refused the format 2 directory with exit 78"
+    echo "node 3 on OLD refused the format $CANARY_FORMAT directory with exit 78"
   fi
 
   volume_md5 "$volume" "$NEW_IMAGE" >"$WORK/md5-after.txt" || fail "could not read node 3's data after the rollback"
@@ -736,8 +739,8 @@ out=$(node_task 1 "malachi.flag enable upgrade_canary")
 echo "$out" | grep -q "cluster flag enabled: upgrade_canary" && echo "the canary flag is on" ||
   fail "the canary flag was refused with every node on NEW: $(echo "$out" | tail -2 | tr '\n' ' ')"
 for n in 1 2 3; do
-  await_value 2 45 marker_format "$n" && echo "node $n's data directory is at format 2" ||
-    fail "node $n's data directory did not reach format 2 after the flip (at '$(marker_format "$n")')"
+  await_value "$CANARY_FORMAT" 45 marker_format "$n" && echo "node $n's data directory is at format $CANARY_FORMAT" ||
+    fail "node $n's data directory did not reach format $CANARY_FORMAT after the flip (at '$(marker_format "$n")')"
 done
 
 refused_rollback

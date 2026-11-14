@@ -22,9 +22,9 @@ defmodule Malachi.Broker do
 
   Effects are injected, never performed here:
 
-    * `replicate_fun.(primary, segment_id, replica_set, base_offset, records)` →
-      `{:ok, last_offset} | {:error, reason}`, appends/replicates a batch (e.g.
-      `&Malachi.Cluster.ReplicationServer.replicate/5`).
+    * `replicate_fun.(primary, segment_id, replica_set, base_offset, records, format)` →
+      `{:ok, last_offset} | {:error, reason}`, appends/replicates a batch to a segment of `format` (e.g.
+      `&Malachi.Cluster.ReplicationServer.replicate/6`).
     * `read_fun.(ref, segment_id, offset, max_records)` →
       `{:ok, records} | :eof | {:error, reason}`, reads one segment (e.g.
       `&Malachi.Cluster.ReplicationServer.read/4`).
@@ -78,7 +78,12 @@ defmodule Malachi.Broker do
 
   @typedoc "Appends/replicates a batch to a segment, returning the last offset stored."
   @type replicate_fun ::
-          (Metadata.broker(), Metadata.segment_id(), [Metadata.broker()], non_neg_integer(), [Record.t()] ->
+          (Metadata.broker(),
+           Metadata.segment_id(),
+           [Metadata.broker()],
+           non_neg_integer(),
+           [Record.t()],
+           Malachi.Log.Frames.format() ->
              {:ok, non_neg_integer()} | {:error, term()})
 
   @typedoc "Reads up to `max_records` of a segment from `offset`."
@@ -100,6 +105,7 @@ defmodule Malachi.Broker do
           brokers: [Metadata.broker()],
           replication_factor: pos_integer(),
           segment_max_bytes: pos_integer(),
+          segment_format: Malachi.Log.Frames.format(),
           segments: %{Metadata.range_id() => active_segment()},
           segment_seq: %{Metadata.range_id() => non_neg_integer()},
           offsets: %{Metadata.range_id() => non_neg_integer()},
@@ -132,6 +138,10 @@ defmodule Malachi.Broker do
             brokers: nil,
             replication_factor: 1,
             segment_max_bytes: @default_segment_max_bytes,
+            # The format this frontend registers new segments with (`Malachi.Metadata.register_command/5`). The
+            # control plane records it, and every replica writes the frames it names, so it is decided once per
+            # segment, here, and never by a replica's own configuration.
+            segment_format: :record,
             # Rack/DC-aware placement: `spread_by` is the global attribute key to spread replicas over
             # (nil = off; a topic's storage policy can override it), `broker_attributes` maps each
             # broker to its attributes (refreshed from membership).
@@ -198,6 +208,8 @@ defmodule Malachi.Broker do
     * `:replication_factor` - replicas per segment, clamped to the broker count (default `1`).
     * `:segment_max_bytes` - the active segment seals once it reaches this many encoded bytes
       (default 64 MiB).
+    * `:segment_format` - how new segments frame their records on disk (`:record`, the default, or
+      `:batch`). Recorded in the control plane when a segment is registered.
     * `:command_fun` - how metadata mutations are routed and applied (default `&DSRSM.command/3`, an
       in-memory single vnode); pass a Raft-backed function to make the metadata authoritative.
     * `:dsrsm` - the initial sharded metadata view (default a single-vnode `DSRSM.single/1`), e.g.
@@ -218,6 +230,7 @@ defmodule Malachi.Broker do
        brokers: brokers,
        replication_factor: replication_factor,
        segment_max_bytes: segment_max_bytes,
+       segment_format: Keyword.get(opts, :segment_format, :record),
        spread_by: Keyword.get(opts, :spread_by),
        policy_fun: Keyword.get(opts, :policy_fun, &PolicyStore.get/1),
        broker_attributes: Keyword.get(opts, :broker_attributes, %{}),
@@ -390,6 +403,7 @@ defmodule Malachi.Broker do
           segment_id: term(),
           replica_set: [Metadata.broker()],
           base_offset: non_neg_integer(),
+          format: Malachi.Log.Frames.format(),
           records: [Record.t()],
           first: non_neg_integer(),
           last: non_neg_integer(),
@@ -732,6 +746,7 @@ defmodule Malachi.Broker do
           segment_id: segment.id,
           replica_set: segment.replica_set,
           base_offset: segment.start_offset,
+          format: segment_format(segment),
           records: records,
           first: first,
           last: last,
@@ -962,7 +977,15 @@ defmodule Malachi.Broker do
   # conflicting re-seal can reject), and any roll this frontend owed for the same segment is cleared.
   # That is how a failover seal performed on another node unblocks a frontend caught mid-roll: without
   # it the frontend keeps re-fencing a segment somebody else already closed.
-  defp apply_replica_command({:seal_segment, segment_id, _length, _bytes, _at} = command, broker) do
+  defp apply_replica_command({:seal_segment, segment_id, _length, _bytes, _at} = command, broker),
+    do: apply_seal_command(segment_id, command, broker)
+
+  defp apply_replica_command({:seal_segment, segment_id, _length, _bytes, _stored, _at} = command, broker),
+    do: apply_seal_command(segment_id, command, broker)
+
+  defp apply_replica_command(command, broker), do: apply_metadata(broker, command)
+
+  defp apply_seal_command(segment_id, command, broker) do
     {broker, reply} = apply_metadata(broker, command)
     {range_id, _seq} = segment_id
 
@@ -979,8 +1002,6 @@ defmodule Malachi.Broker do
 
     {broker, reply}
   end
-
-  defp apply_replica_command(command, broker), do: apply_metadata(broker, command)
 
   # A refused command (a compare-and-swap that found the set moved, or a failed submit) left the control plane's
   # replica set as it was, so the cache keeps the set it had: a produce must not route to a head the control
@@ -1266,13 +1287,13 @@ defmodule Malachi.Broker do
   A `{:already_sealed, existing}` conflict (a roll fence racing a failover seal) converges on the
   winner rather than wedging: this broker adopts `existing` as the length and reports `:ok`.
   """
-  @spec record_seal(t(), roll(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ::
+  @spec record_seal(t(), roll(), non_neg_integer(), Metadata.sizes(), non_neg_integer()) ::
           {t(), :ok | {:error, term()}}
-  def record_seal(%__MODULE__{} = broker, roll, end_offset, byte_size, sealed_at) do
-    start_offset = recorded_start_offset(broker, roll)
-    segment = %{id: roll.segment_id, start_offset: start_offset}
+  def record_seal(%__MODULE__{} = broker, roll, end_offset, sizes, sealed_at) do
+    segment = recorded_segment(broker, roll)
+    start_offset = segment.start_offset
 
-    case apply_metadata(broker, Metadata.seal_command(segment, end_offset, byte_size, sealed_at)) do
+    case apply_metadata(broker, Metadata.seal_command(segment, end_offset, sizes, sealed_at)) do
       {applied, :ok} ->
         {settle_roll(applied, roll, end_offset), :ok}
 
@@ -1290,10 +1311,23 @@ defmodule Malachi.Broker do
   # The control plane's own start offset for the segment, which is what the successor's registration
   # will be checked against. `roll.start_offset` is the fallback for a segment the metadata no longer
   # carries (retention dropped it between the fence and the command).
-  defp recorded_start_offset(broker, roll) do
+  # The segment as the control plane recorded it, so the seal carries its format: a batch segment's seal records
+  # its stored size beside its logical one, which retention counts (`Malachi.Metadata.seal_command/4`). A segment
+  # the cache does not hold is described by the roll, which records no format: the active segment's, or record.
+  defp recorded_segment(broker, roll) do
     case DSRSM.get_segment(broker.dsrsm, topic_of_segment(roll.segment_id), roll.segment_id) do
-      %{start_offset: start_offset} -> start_offset
-      nil -> roll.start_offset
+      %{start_offset: _start_offset} = segment ->
+        segment
+
+      nil ->
+        %{id: roll.segment_id, start_offset: roll.start_offset, format: active_format(broker, roll)}
+    end
+  end
+
+  defp active_format(broker, roll) do
+    case Map.get(broker.segments, roll.range_id) do
+      %{id: id} = active when id == roll.segment_id -> segment_format(active)
+      _other -> :record
     end
   end
 
@@ -2036,7 +2070,14 @@ defmodule Malachi.Broker do
   defp replicate_to_segment(broker, opened, segment, range_id, records, placements, replicate_fun) do
     count = length(records)
 
-    case replicate_fun.(primary(segment), segment.id, segment.replica_set, segment.start_offset, records) do
+    case replicate_fun.(
+           primary(segment),
+           segment.id,
+           segment.replica_set,
+           segment.start_offset,
+           records,
+           segment_format(segment)
+         ) do
       # The primary serializes appends and assigns the REAL offsets (the NorthGuard invariant), so the
       # counter follows its answer rather than a local reservation. A matching answer and an interleaved
       # one were always the same case: adopting an answer that agrees is a no-op.
@@ -2095,7 +2136,13 @@ defmodule Malachi.Broker do
         :none
 
       meta ->
-        active = %{id: meta.id, start_offset: meta.start_offset, bytes: 0, replica_set: meta.replica_set}
+        active = %{
+          id: meta.id,
+          start_offset: meta.start_offset,
+          bytes: 0,
+          replica_set: meta.replica_set,
+          format: Metadata.segment_format(meta)
+        }
 
         broker =
           views_changed(%{
@@ -2126,9 +2173,17 @@ defmodule Malachi.Broker do
   defp register_segment(broker, range_id, segment_id, replica_set, start_offset, seq) do
     # The register command can fail when the metadata is Raft-backed (e.g. an ra timeout); surface
     # it so the produce aborts cleanly instead of crashing. The cache/seq are advanced only on :ok.
-    case apply_metadata(broker, {:register_segment, range_id, segment_id, replica_set, start_offset}) do
+    command = Metadata.register_command(range_id, segment_id, replica_set, start_offset, broker.segment_format)
+
+    case apply_metadata(broker, command) do
       {applied, :ok} ->
-        active = %{id: segment_id, start_offset: start_offset, bytes: 0, replica_set: replica_set}
+        active = %{
+          id: segment_id,
+          start_offset: start_offset,
+          bytes: 0,
+          replica_set: replica_set,
+          format: broker.segment_format
+        }
 
         broker = %{
           applied
@@ -2385,6 +2440,10 @@ defmodule Malachi.Broker do
   end
 
   defp primary(%{replica_set: [primary | _]}), do: primary
+
+  # The format the active segment was registered with; a cache entry built before formats existed is a
+  # record segment.
+  defp segment_format(segment), do: Map.get(segment, :format, :record)
 
   defp batch_bytes(records), do: Enum.reduce(records, 0, fn record, acc -> acc + Record.encoded_size(record) end)
 

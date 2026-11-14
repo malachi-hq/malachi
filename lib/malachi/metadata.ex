@@ -60,24 +60,32 @@ defmodule Malachi.Metadata do
           optional(:logical_start) => non_neg_integer()
         }
 
+  # `:format` is how the segment's records are framed on disk (`t:Malachi.Log.Frames.format/0`), fixed when it
+  # is registered so every replica writes the same frames; `:stored_bytes` is what those frames take on disk
+  # (`nil` while active), which retention's size limit counts, since it exists to bound the disk. Only a batch
+  # segment carries either: a record segment is what every segment was before formats existed, and its
+  # stored size is its logical size (`segment_format/1`, `stored_bytes/1`).
   @type segment_meta :: %{
-          id: segment_id(),
-          range_id: range_id(),
-          replica_set: [broker()],
-          state: :active | :sealed,
-          start_offset: non_neg_integer(),
-          length: non_neg_integer() | nil,
-          # Encoded byte size of the segment (`nil` while active). Set from the seal command, so it is
-          # deterministic across replicas; used by retention to expire by total size per range.
-          byte_size: non_neg_integer() | nil,
+          required(:id) => segment_id(),
+          required(:range_id) => range_id(),
+          required(:replica_set) => [broker()],
+          required(:state) => :active | :sealed,
+          required(:start_offset) => non_neg_integer(),
+          required(:length) => non_neg_integer() | nil,
+          # Logical byte size of the segment (`nil` while active): what its records weigh in the record
+          # frame, whatever format stores them. Set from the seal command, so it is deterministic across
+          # replicas; every replica comparison measures against it.
+          required(:byte_size) => non_neg_integer() | nil,
           # Epoch ms the segment was sealed (`nil` while active). Set from the seal command, so it is
           # deterministic across replicas; used by retention to expire sealed segments by age.
-          sealed_at: non_neg_integer() | nil,
+          required(:sealed_at) => non_neg_integer() | nil,
           # Epoch ms the segment was registered, or `nil` when the apply that registered it had no clock
           # (see `apply/3`). Taken from the timestamp the Raft leader wrote into the log entry, so it is
           # deterministic across replicas and on every replay; used to roll an active segment by age
           # (`Malachi.Cluster.SegmentRoll`).
-          opened_at: non_neg_integer() | nil
+          required(:opened_at) => non_neg_integer() | nil,
+          optional(:format) => Malachi.Log.Frames.format(),
+          optional(:stored_bytes) => non_neg_integer() | nil
         }
 
   @typedoc "A consumer group's name."
@@ -143,7 +151,9 @@ defmodule Malachi.Metadata do
           | {:split_range, range_id()}
           | {:merge_ranges, range_id(), range_id()}
           | {:register_segment, range_id(), segment_id(), [broker()], non_neg_integer()}
+          | {:register_segment, range_id(), segment_id(), [broker()], non_neg_integer(), Malachi.Log.Frames.format()}
           | {:seal_segment, segment_id(), non_neg_integer(), non_neg_integer(), non_neg_integer()}
+          | {:seal_segment, segment_id(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()}
           | {:delete_segment, segment_id()}
           | {:set_segment_replicas, segment_id(), [broker()]}
           | {:set_segment_replicas, segment_id(), [broker()], [broker()]}
@@ -180,7 +190,11 @@ defmodule Malachi.Metadata do
   # 9 adds the ranges' logical starts (`:logical_start` on a range, #198). A member below 9 would store
   # the field and never clamp a reader by it, serving purged records again, so an export carrying one
   # is refused there. An export with no purged range keeps the lower format.
-  @export_format 9
+  #
+  # 10 adds batch segments (`:format` and `:stored_bytes`, #202). An export is format 10 only when one of its
+  # segments is a batch segment, so a topic of record segments still splits while an upgrade holds the
+  # control plane below 10.
+  @export_format 10
 
   @behaviour Malachi.Cluster.MachineVersion
 
@@ -207,6 +221,12 @@ defmodule Malachi.Metadata do
       {:merge_ranges, 3} => 0,
       {:register_segment, 5} => 0,
       {:seal_segment, 5} => 0,
+      # The batch storage format (#202): a segment registered with the format its frames take, and a seal
+      # that records the bytes they take on disk beside their logical size. Wider tuples, so the next
+      # version: an older member refuses them with the state unchanged. Only a batch segment needs either,
+      # and none exists before every member applies them, so record segments keep the shapes above.
+      {:register_segment, 6} => 10,
+      {:seal_segment, 6} => 10,
       {:delete_segment, 2} => 0,
       {:set_segment_replicas, 3} => 0,
       # The compare-and-swap form (`expected` is the set the write was decided against). A wider tuple is a new
@@ -235,8 +255,54 @@ defmodule Malachi.Metadata do
   @spec export_format() :: non_neg_integer()
   def export_format, do: @export_format
 
+  @typedoc """
+  A sealed segment's sizes: what its records weigh in the record frame (`logical`) and what its frames take
+  on disk (`stored`). A plain integer means both, which is what a record segment always is.
+  """
+  @type sizes :: non_neg_integer() | %{logical: non_neg_integer(), stored: non_neg_integer()}
+
+  @doc "The logical bytes of `sizes` (`t:sizes/0`): what every replica comparison measures."
+  @spec logical_bytes(sizes()) :: non_neg_integer()
+  def logical_bytes(bytes) when is_integer(bytes), do: bytes
+  def logical_bytes(%{logical: logical}), do: logical
+
+  @doc "Whether `sizes` is a well formed `t:sizes/0`."
+  @spec sizes?(term()) :: boolean()
+  def sizes?(bytes) when is_integer(bytes) and bytes >= 0, do: true
+  def sizes?(%{logical: logical, stored: stored}) when is_integer(logical) and is_integer(stored), do: true
+  def sizes?(_other), do: false
+
+  @doc "How `segment`'s records are framed on disk: `:record` for a segment registered without a format."
+  @spec segment_format(map()) :: Malachi.Log.Frames.format()
+  def segment_format(segment), do: Map.get(segment, :format) || :record
+
   @doc """
-  The seal command for `segment` ending at `end_offset` with `byte_size` bytes on disk, at `at`.
+  The bytes `segment`'s frames take on disk, for retention: the stored size its seal recorded, or its logical
+  size when they are the same (a record segment). `0` while it is active.
+  """
+  @spec stored_bytes(map()) :: non_neg_integer()
+  def stored_bytes(segment), do: Map.get(segment, :stored_bytes) || segment.byte_size || 0
+
+  @doc "The id of the segment a seal command closes, whichever shape it has."
+  @spec sealed_segment_id(command()) :: segment_id() | nil
+  def sealed_segment_id({:seal_segment, segment_id, _length, _bytes, _at}), do: segment_id
+  def sealed_segment_id({:seal_segment, segment_id, _length, _bytes, _stored, _at}), do: segment_id
+  def sealed_segment_id(_command), do: nil
+
+  @doc "The register command for a segment of `format`: the shape that carries one only for a batch segment."
+  @spec register_command(range_id(), segment_id(), [broker()], non_neg_integer(), Malachi.Log.Frames.format()) ::
+          command()
+  def register_command(range_id, segment_id, replica_set, start_offset, :record),
+    do: {:register_segment, range_id, segment_id, replica_set, start_offset}
+
+  def register_command(range_id, segment_id, replica_set, start_offset, :batch),
+    do: {:register_segment, range_id, segment_id, replica_set, start_offset, :batch}
+
+  @doc """
+  The seal command for `segment` ending at `end_offset` with `sizes` (`t:sizes/0`), at `at`.
+
+  A record segment's stored size is its logical size, so its seal carries one number; a batch segment's seal
+  carries both, the logical size every comparison uses and the stored size retention counts.
 
   One constructor rather than two, because both seal paths (the produce roll in `Malachi.Broker` and
   primary failover in `Malachi.Cluster.Failover`) turn an END OFFSET into a LENGTH the same way, and a
@@ -245,11 +311,19 @@ defmodule Malachi.Metadata do
   @spec seal_command(
           %{:id => segment_id(), :start_offset => non_neg_integer(), optional(atom()) => any()},
           non_neg_integer(),
-          non_neg_integer(),
+          sizes(),
           non_neg_integer()
         ) :: command()
-  def seal_command(segment, end_offset, byte_size, at),
-    do: {:seal_segment, segment.id, end_offset - segment.start_offset, byte_size, at}
+  def seal_command(segment, end_offset, sizes, at) do
+    length = end_offset - segment.start_offset
+
+    case {segment_format(segment), sizes} do
+      {:batch, %{logical: logical, stored: stored}} -> {:seal_segment, segment.id, length, logical, stored, at}
+      {:batch, bytes} when is_integer(bytes) -> {:seal_segment, segment.id, length, bytes, bytes, at}
+      {:record, %{logical: logical}} -> {:seal_segment, segment.id, length, logical, at}
+      {:record, bytes} when is_integer(bytes) -> {:seal_segment, segment.id, length, bytes, at}
+    end
+  end
 
   @doc """
   The topic a command belongs to, for **routing** it to the owning vnode, or `nil` if it names none.
@@ -292,7 +366,13 @@ defmodule Malachi.Metadata do
   def routed_range_topics({:register_segment, range_id, segment_id, _replicas, _off}),
     do: topics([range_id_topic(range_id), segment_routing_topic(segment_id)])
 
+  def routed_range_topics({:register_segment, range_id, segment_id, _replicas, _off, _format}),
+    do: topics([range_id_topic(range_id), segment_routing_topic(segment_id)])
+
   def routed_range_topics({:seal_segment, segment_id, _len, _bytes, _at}),
+    do: topics([segment_routing_topic(segment_id)])
+
+  def routed_range_topics({:seal_segment, segment_id, _len, _bytes, _stored, _at}),
     do: topics([segment_routing_topic(segment_id)])
 
   def routed_range_topics({:delete_segment, segment_id}), do: topics([segment_routing_topic(segment_id)])
@@ -373,13 +453,22 @@ defmodule Malachi.Metadata do
   end
 
   # The one command that reads the clock; every other command is a function of the state alone.
-  defp apply_unfenced(state, {:register_segment, range_id, segment_id, replica_set, start_offset}, at_ms) do
+  defp apply_unfenced(state, {:register_segment, range_id, segment_id, replica_set, start_offset}, at_ms),
+    do: apply_unfenced(state, {:register_segment, range_id, segment_id, replica_set, start_offset, :record}, at_ms)
+
+  # A format this build does not know is refused, never stored: every replica opens the segment with it, and
+  # one that cannot would latch its copy as failed on the first write.
+  defp apply_unfenced(state, {:register_segment, _range_id, _segment_id, _replica_set, _start_offset, format}, _at_ms)
+       when format not in [:record, :batch],
+       do: {state, {:error, {:unknown_format, format}}}
+
+  defp apply_unfenced(state, {:register_segment, range_id, segment_id, replica_set, start_offset, format}, at_ms) do
     # The range is the context, so it is settled first: a range that is unknown or sealed does not
     # accept a segment at any offset, and reporting an offset complaint about it would send the caller
     # off to fix the wrong thing.
     case fetch_active_range(state, range_id) do
       {:error, _reason} = error -> {state, error}
-      {:ok, _range} -> register_into_range(state, range_id, segment_id, replica_set, start_offset, at_ms)
+      {:ok, _range} -> register_into_range(state, range_id, {segment_id, format}, replica_set, start_offset, at_ms)
     end
   end
 
@@ -398,7 +487,15 @@ defmodule Malachi.Metadata do
   defp command_topic(state, {:split_range, range_id}), do: range_topic(state, range_id)
   defp command_topic(state, {:merge_ranges, range_id_a, _range_id_b}), do: range_topic(state, range_id_a)
   defp command_topic(state, {:register_segment, range_id, _seg, _replicas, _off}), do: range_topic(state, range_id)
+
+  defp command_topic(state, {:register_segment, range_id, _seg, _replicas, _off, _format}),
+    do: range_topic(state, range_id)
+
   defp command_topic(state, {:seal_segment, segment_id, _len, _bytes, _at}), do: segment_topic(state, segment_id)
+
+  defp command_topic(state, {:seal_segment, segment_id, _len, _bytes, _stored, _at}),
+    do: segment_topic(state, segment_id)
+
   defp command_topic(state, {:delete_segment, segment_id}), do: segment_topic(state, segment_id)
   defp command_topic(state, {:set_segment_replicas, segment_id, _replicas}), do: segment_topic(state, segment_id)
 
@@ -488,30 +585,11 @@ defmodule Malachi.Metadata do
     end
   end
 
-  defp do_apply(%__MODULE__{} = state, {:seal_segment, segment_id, length, byte_size, sealed_at}) do
-    case Map.fetch(state.segments, segment_id) do
-      :error ->
-        {state, {:error, :no_such_segment}}
+  defp do_apply(%__MODULE__{} = state, {:seal_segment, segment_id, length, byte_size, sealed_at}),
+    do: seal_segment(state, segment_id, length, %{byte_size: byte_size}, sealed_at)
 
-      # An idempotent retry: the fence that produced this length answers the same number every time, and
-      # a caller whose command timed out re-issues it. Nothing is rewritten, so retention's clock
-      # (`sealed_at`) does not move on a retry.
-      {:ok, %{state: :sealed, length: ^length}} ->
-        {state, :ok}
-
-      # Two authorities decided different edges for one segment (a roll fence racing a failover seal).
-      # Overwriting would move the sealed edge after a successor may already have registered at the old
-      # one, breaking the tiling rule, and under `Malachi.Broker`'s read budget a shrunk length HIDES
-      # acknowledged records. The existing length travels back so the loser converges on the winner
-      # instead of wedging its range.
-      {:ok, %{state: :sealed, length: existing}} ->
-        {state, {:error, {:already_sealed, existing}}}
-
-      {:ok, segment} ->
-        sealed = %{segment | state: :sealed, length: length, byte_size: byte_size, sealed_at: sealed_at}
-        {%{state | segments: Map.put(state.segments, segment_id, sealed)}, :ok}
-    end
-  end
+  defp do_apply(%__MODULE__{} = state, {:seal_segment, segment_id, length, byte_size, stored_bytes, sealed_at}),
+    do: seal_segment(state, segment_id, length, %{byte_size: byte_size, stored_bytes: stored_bytes}, sealed_at)
 
   defp do_apply(%__MODULE__{} = state, {:delete_segment, segment_id}) do
     # Retention removes an expired segment from the control plane. Only sealed segments are
@@ -666,7 +744,7 @@ defmodule Malachi.Metadata do
     if active_segment?(state, range_id), do: {:error, :active_segment_exists}, else: :ok
   end
 
-  defp register_into_range(state, range_id, segment_id, replica_set, start_offset, opened_at) do
+  defp register_into_range(state, range_id, {segment_id, format}, replica_set, start_offset, opened_at) do
     cond do
       Map.has_key?(state.segments, segment_id) ->
         {state, {:error, :segment_exists}}
@@ -700,7 +778,32 @@ defmodule Malachi.Metadata do
         {state, {:error, :segment_overlap}}
 
       true ->
-        register_new_segment(state, range_id, segment_id, replica_set, start_offset, opened_at)
+        register_new_segment(state, range_id, {segment_id, format}, replica_set, start_offset, opened_at)
+    end
+  end
+
+  defp seal_segment(state, segment_id, length, sizes, sealed_at) do
+    case Map.fetch(state.segments, segment_id) do
+      :error ->
+        {state, {:error, :no_such_segment}}
+
+      # An idempotent retry: the fence that produced this length answers the same number every time, and
+      # a caller whose command timed out re-issues it. Nothing is rewritten, so retention's clock
+      # (`sealed_at`) does not move on a retry.
+      {:ok, %{state: :sealed, length: ^length}} ->
+        {state, :ok}
+
+      # Two authorities decided different edges for one segment (a roll fence racing a failover seal).
+      # Overwriting would move the sealed edge after a successor may already have registered at the old
+      # one, breaking the tiling rule, and under `Malachi.Broker`'s read budget a shrunk length HIDES
+      # acknowledged records. The existing length travels back so the loser converges on the winner
+      # instead of wedging its range.
+      {:ok, %{state: :sealed, length: existing}} ->
+        {state, {:error, {:already_sealed, existing}}}
+
+      {:ok, segment} ->
+        sealed = Map.merge(segment, Map.merge(sizes, %{state: :sealed, length: length, sealed_at: sealed_at}))
+        {%{state | segments: Map.put(state.segments, segment_id, sealed)}, :ok}
     end
   end
 
@@ -949,14 +1052,15 @@ defmodule Malachi.Metadata do
 
         export = %{topic: topic, ranges: ranges, segments: segments, offsets: offsets}
         export = if fences == %{}, do: export, else: Map.put(export, :fences, fences)
-        Map.put(export, :export_format, topic_export_format(ranges, fences))
+        Map.put(export, :export_format, topic_export_format(ranges, segments, fences))
     end
   end
 
   # The lowest format whose reader understands everything this export carries: a member below it would
   # store state it cannot act on (see `@export_format`).
-  defp topic_export_format(ranges, fences) do
+  defp topic_export_format(ranges, segments, fences) do
     cond do
+      Enum.any?(segments, fn {_id, segment} -> segment_format(segment) == :batch end) -> 10
       Enum.any?(ranges, fn {_id, range} -> logical_start(range) > 0 end) -> 9
       fences != %{} -> 8
       true -> 0
@@ -1279,7 +1383,9 @@ defmodule Malachi.Metadata do
 
   # The insert itself. Every precondition (the range accepts writes, the id is free, the range has no
   # write head, the offset is above what is sealed) is settled by the caller.
-  defp register_new_segment(state, range_id, segment_id, replica_set, start_offset, opened_at) do
+  # A record segment carries no `:format` and no `:stored_bytes`: it is what every segment was before formats
+  # existed, its stored size is its logical size, and `segment_format/1` and `stored_bytes/1` answer for it.
+  defp register_new_segment(state, range_id, {segment_id, format}, replica_set, start_offset, opened_at) do
     segment = %{
       id: segment_id,
       range_id: range_id,
@@ -1291,6 +1397,8 @@ defmodule Malachi.Metadata do
       sealed_at: nil,
       opened_at: opened_at
     }
+
+    segment = if format == :batch, do: Map.merge(segment, %{format: :batch, stored_bytes: nil}), else: segment
 
     state = %{state | segments: Map.put(state.segments, segment_id, segment)}
     {index_add_segment(state, range_id, segment_id), :ok}

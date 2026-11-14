@@ -63,9 +63,10 @@ defmodule Malachi.Cluster.MachineVersioningTest do
         # `Malachi.Auth.UserRegistry` introduced the console roles, 6 where `Malachi.Cluster.Policy`
         # introduced `retention.segment_max_age_ms`, 7 where `Malachi.Metadata` made `{:set_segment_replicas, ...}`
         # a compare-and-swap on the expected replica set, 8 where `Malachi.Metadata` introduced the group
-        # fence, and 9 where `Malachi.Metadata` introduced the manual purge; each time the others moved with
-        # it, paying nothing but a no-op `{:machine_version, n - 1, n}`.
-        assert unquote(machine).version() == 9
+        # fence, 9 where `Malachi.Metadata` introduced the manual purge, and 10 where `Malachi.Metadata`
+        # introduced the batch storage format; each time the others moved with it, paying nothing but a no-op
+        # `{:machine_version, n - 1, n}`.
+        assert unquote(machine).version() == 10
 
         for version <- 0..unquote(machine).version(),
             do: assert(unquote(machine).which_module(version) == unquote(machine))
@@ -142,20 +143,25 @@ defmodule Malachi.Cluster.MachineVersioningTest do
     end
   end
 
-  test "a topic export carries the current export format, and an old export without it still inserts" do
-    {state, {:ok, _root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 2})
+  test "a topic export carries the format its contents need, and an old export without it still inserts" do
+    {state, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 2})
     # a topic with neither a group fence nor a purged range exports as format 0
     assert Metadata.export_topic(state, "events").export_format == 0
     # a group fence is what format 8 adds
     {state, {:ok, 1}} = Metadata.apply(state, {:open_group, "g", "events"})
     assert Metadata.export_topic(state, "events").export_format == 8
-    # a purged range is what the current format adds
+    # a purged range is what format 9 adds
     {state, {:ok, _moves}} = Metadata.apply(state, {:set_range_starts, "events", %{{"events", 0} => 0}})
     assert Metadata.export_topic(state, "events").export_format == 8
     {state, {:ok, _moves}} = Metadata.apply(state, {:set_range_starts, "events", %{{"events", 0} => 1}})
 
     export = Metadata.export_topic(state, "events")
-    assert export.export_format == Metadata.export_format()
+    assert export.export_format == 9
+
+    # a batch segment is what the current format, 10, adds
+    {batch_state, :ok} = Metadata.apply(state, Metadata.register_command(root, {root, 0}, [:a], 1, :batch), 1)
+    assert Metadata.export_topic(batch_state, "events").export_format == Metadata.export_format()
+
     assert {_without, ^export} = Metadata.extract_topic(state, "events")
 
     legacy = Map.delete(export, :export_format)

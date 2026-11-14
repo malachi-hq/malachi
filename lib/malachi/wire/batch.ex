@@ -24,73 +24,52 @@ defmodule Malachi.Wire.Batch do
   ## Reading a batch from a client
 
   A batch comes from an untrusted client, and a compressed one can inflate to far more than it weighs on
-  the wire. `decode/2` refuses, before any work, a batch whose `inflated_size` is above the cap it is
-  given (`:max_inflated_bytes`, kept apart from the frame size limit, which counts bytes as received), or
-  whose zstd frame declares a content size other than `inflated_size`. It then inflates in steps of at
-  most 128 KiB (what OTP's `:zstd` stream produces per call) and stops as soon as the output passes
-  `inflated_size`, so a frame that lies about its size, or declares none, costs at most `inflated_size`
-  (itself at most the cap) plus one 128 KiB step in memory. A zstd payload shorter than the smallest
-  whole frame (9 bytes) is refused unread: OTP reads a frame header out of fewer bytes than it
-  has, and would answer from memory it never wrote.
-  Last, it reads exactly `count` records out of exactly `inflated_size` bytes. Everything that fails is an
-  error tuple, never a raise.
+  the wire. `decode/2` reads it through `Malachi.BatchCodec`, which refuses a batch above the cap it is
+  given (`:max_inflated_bytes`, kept apart from the frame size limit, which counts bytes as received)
+  before any work, and inflates within that bound (see its moduledoc). Everything that fails is an error
+  tuple, never a raise.
   """
 
-  alias Malachi.Log.Record
-  alias Malachi.Wire
-
-  @codecs [none: 0, zstd: 1]
-
-  # magic number (4), frame header descriptor (1), window descriptor or content size (1), block header (3)
-  @min_zstd_frame 9
-
-  # The frame of nothing, as `:zstd.compress/1` writes it on OTP 29: OTP 28 raises on an empty input.
-  @empty_zstd_frame <<40, 181, 47, 253, 32, 0, 1, 0, 0>>
+  alias Malachi.BatchCodec
 
   @typedoc "How a batch's payload is encoded: as is, or compressed with zstd."
-  @type codec :: :none | :zstd
+  @type codec :: BatchCodec.codec()
 
   @typedoc "Plain records (a produce) or records behind their positions (a consume)."
-  @type layout :: :plain | :positioned
+  @type layout :: BatchCodec.layout()
 
   @typedoc "A record of a produce batch, and whether it is a tombstone."
-  @type plain :: {Record.t(), boolean()}
+  @type plain :: BatchCodec.plain()
 
   @typedoc "A record of a consume batch: its position in the range's history, the record, and whether it is a tombstone."
-  @type positioned :: {Wire.position(), Record.t(), boolean()}
+  @type positioned :: BatchCodec.positioned()
 
   @typedoc "Why a batch was refused."
-  @type error ::
-          :batch_too_large
-          | :batch_size_mismatch
-          | :batch_count_mismatch
-          | :malformed_batch
-          | {:unknown_codec, non_neg_integer()}
+  @type error :: BatchCodec.error()
 
   @doc "The codecs, in code order."
   @spec codecs() :: [codec()]
-  def codecs, do: Keyword.keys(@codecs)
+  defdelegate codecs, to: BatchCodec
 
   @doc "The wire code of `codec`."
   @spec codec_code(codec()) :: non_neg_integer()
-  def codec_code(codec), do: Keyword.fetch!(@codecs, codec)
+  defdelegate codec_code(codec), to: BatchCodec
 
   @doc "The codec of a wire code. Raises on an unknown one, like every `Malachi.Wire` decoder."
   @spec codec_of(non_neg_integer()) :: codec()
   def codec_of(code) do
-    case Enum.find(@codecs, fn {_codec, value} -> value == code end) do
-      {codec, _code} -> codec
-      nil -> raise ArgumentError, "unknown codec #{code}"
+    case BatchCodec.codec(code) do
+      {:ok, codec} -> codec
+      {:error, _unknown} -> raise ArgumentError, "unknown codec #{code}"
     end
   end
 
   @doc "A batch of `entries` (plain, or positioned: see the moduledoc), with its payload encoded by `codec`."
   @spec encode([plain()] | [positioned()], codec(), layout()) :: binary()
   def encode(entries, codec, layout \\ :plain) do
-    inflated = entries |> Enum.map(&encode_entry(&1, layout)) |> IO.iodata_to_binary()
-    payload = compress(inflated, codec)
+    {payload, inflated_size} = BatchCodec.encode(entries, codec, layout)
 
-    <<codec_code(codec)::8, length(entries)::32, byte_size(inflated)::32, byte_size(payload)::32, payload::binary>>
+    <<codec_code(codec)::8, length(entries)::32, inflated_size::32, byte_size(payload)::32, payload::binary>>
   end
 
   @doc """
@@ -114,114 +93,28 @@ defmodule Malachi.Wire.Batch do
     cap = Keyword.fetch!(opts, :max_inflated_bytes)
     layout = Keyword.get(opts, :layout, :plain)
 
-    with {:ok, code, count, inflated_size, payload} <- header(batch),
-         {:ok, codec} <- codec(code),
-         :ok <- within(inflated_size, cap),
-         {:ok, inflated} <- inflate(codec, payload, inflated_size) do
-      entries(inflated, count, layout)
+    case batch do
+      <<code::8, count::32, inflated::32, size::32, payload::binary-size(size)>> ->
+        BatchCodec.decode(code, count, inflated, payload, cap, layout)
+
+      _malformed ->
+        {:error, :malformed_batch}
     end
   end
 
-  defp header(<<code::8, count::32, inflated::32, size::32, payload::binary-size(size)>>),
-    do: {:ok, code, count, inflated, payload}
+  @doc """
+  One whole produce batch, read within `max_inflated_bytes`, as a `t:Malachi.BatchCodec.Validated.t/0` the store
+  can append as it is, with its entries. Same refusals as `decode/2`, and a batch with no record is malformed.
+  """
+  @spec validate(binary(), non_neg_integer()) ::
+          {:ok, BatchCodec.Validated.t(), [plain()]} | {:error, error()}
+  def validate(batch, max_inflated_bytes) do
+    case batch do
+      <<code::8, count::32, inflated::32, size::32, payload::binary-size(size)>> ->
+        BatchCodec.validate(code, count, inflated, payload, max_inflated_bytes)
 
-  defp header(_malformed), do: {:error, :malformed_batch}
-
-  defp codec(code) do
-    case Enum.find(@codecs, fn {_codec, value} -> value == code end) do
-      {codec, _code} -> {:ok, codec}
-      nil -> {:error, {:unknown_codec, code}}
+      _malformed ->
+        {:error, :malformed_batch}
     end
   end
-
-  defp within(inflated_size, cap) when inflated_size <= cap, do: :ok
-  defp within(_inflated_size, _cap), do: {:error, :batch_too_large}
-
-  defp compress(inflated, :none), do: inflated
-  defp compress(<<>>, :zstd), do: @empty_zstd_frame
-  defp compress(inflated, :zstd), do: inflated |> :zstd.compress() |> IO.iodata_to_binary()
-
-  defp inflate(:none, payload, inflated_size) when byte_size(payload) == inflated_size, do: {:ok, payload}
-  defp inflate(:none, _payload, _inflated_size), do: {:error, :batch_size_mismatch}
-
-  defp inflate(:zstd, payload, _inflated_size) when byte_size(payload) < @min_zstd_frame,
-    do: {:error, :malformed_batch}
-
-  defp inflate(:zstd, payload, inflated_size) do
-    with :ok <- declared_size(payload, inflated_size) do
-      {:ok, context} = :zstd.context(:decompress)
-      inflate_stream(context, payload, inflated_size, [], 0)
-    end
-  rescue
-    # OTP's :zstd raises on bytes that are not a zstd frame, or a corrupt one
-    ErlangError -> {:error, :malformed_batch}
-  end
-
-  # A frame that states its content size must state the batch's; one that states none is held to it by
-  # the bounded inflation below.
-  defp declared_size(payload, inflated_size) do
-    case :zstd.get_frame_header(payload) do
-      {:ok, %{frameContentSize: size}} when is_integer(size) and size != inflated_size -> {:error, :batch_size_mismatch}
-      {:ok, _header} -> :ok
-      {:error, _reason} -> {:error, :malformed_batch}
-    end
-  end
-
-  # Each call inflates at most one block (128 KiB), so the output is checked against `inflated_size` before
-  # the next one: inflating past it stops at once, at a cost of one block beyond the declaration. OTP answers
-  # with three elements while input remains, at a full output block or at a frame's end (where the output
-  # can be empty), and every call takes input or raises, so the loop ends within the payload's length.
-  defp inflate_stream(context, input, inflated_size, acc, size) do
-    case :zstd.stream(context, input) do
-      {:continue, rest, output} ->
-        produced = IO.iodata_length(output)
-        size = size + produced
-
-        if size > inflated_size,
-          do: {:error, :batch_size_mismatch},
-          else: inflate_stream(context, rest, inflated_size, [acc, output], size)
-
-      {_continue_or_done, output} ->
-        finish(size + IO.iodata_length(output), inflated_size, [acc, output])
-    end
-  end
-
-  defp finish(size, inflated_size, acc) when size == inflated_size, do: {:ok, IO.iodata_to_binary(acc)}
-  defp finish(_size, _inflated_size, _acc), do: {:error, :batch_size_mismatch}
-
-  defp entries(inflated, count, layout) do
-    case take_entries(inflated, count, layout, []) do
-      {entries, <<>>} -> {:ok, entries}
-      {_entries, _rest} -> {:error, :batch_count_mismatch}
-    end
-  rescue
-    # a record cut short or a count past the payload: the record decoders match their input exactly
-    _malformed in [MatchError, FunctionClauseError, CaseClauseError] -> {:error, :malformed_batch}
-  end
-
-  defp take_entries(rest, 0, _layout, acc), do: {Enum.reverse(acc), rest}
-
-  defp take_entries(<<flags::8, rest::binary>>, n, :plain, acc) do
-    {record, tombstone, rest} = take_flagged(flags, rest)
-    take_entries(rest, n - 1, :plain, [{record, tombstone} | acc])
-  end
-
-  defp take_entries(<<source::16, offset::64, flags::8, rest::binary>>, n, :positioned, acc) do
-    {record, tombstone, rest} = take_flagged(flags, rest)
-    take_entries(rest, n - 1, :positioned, [{{source, offset}, record, tombstone} | acc])
-  end
-
-  # Only bit 0 is defined; a reserved bit makes the match fail, which `entries/3` answers as malformed.
-  defp take_flagged(flags, rest) when flags in [0, 1] do
-    {record, rest} = Wire.decode_record(rest)
-    {record, flags == 1, rest}
-  end
-
-  defp encode_entry({%Record{} = record, tombstone}, :plain), do: flagged(record, tombstone)
-
-  defp encode_entry({{source, offset}, %Record{} = record, tombstone}, :positioned),
-    do: <<source::16, offset::64, flagged(record, tombstone)::binary>>
-
-  defp flagged(record, tombstone) when is_boolean(tombstone),
-    do: <<if(tombstone, do: 1, else: 0)::8, Wire.encode_record(record)::binary>>
 end

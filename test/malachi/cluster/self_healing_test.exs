@@ -1,6 +1,8 @@
 defmodule Malachi.Cluster.SelfHealingTest do
   use ExUnit.Case, async: true
 
+  alias Malachi.Test.SegmentFilesHelper
+
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.SelfHealing
   alias Malachi.Log.Record
@@ -311,7 +313,7 @@ defmodule Malachi.Cluster.SelfHealingTest do
     # keep the first frame plus a partial second one: recovery must clamp to the last valid frame
     first_record = Record.new("x", key: "x")
     first_frame_bytes = byte_size(Record.encode(%Record{first_record | offset: 0}))
-    [log_file] = Path.wildcard(Path.join(dir_c, "events-r0-s0/*.log"))
+    [log_file] = SegmentFilesHelper.log_files(Path.join(dir_c, "events-r0-s0"))
 
     c =
       restart_broker_over(dir_c, id_c, fn ->
@@ -367,7 +369,7 @@ defmodule Malachi.Cluster.SelfHealingTest do
     {b, _dir_b, _id_b} = start_broker_with_directory()
     {c, dir_c, id_c} = start_broker_with_directory()
     {metadata, segment_id, _byte_size} = sealed_segment_everywhere([a, b, c], ["x", "y", "z"])
-    [log_file] = Path.wildcard(Path.join(dir_c, "events-r0-s0/*.log"))
+    [log_file] = SegmentFilesHelper.log_files(Path.join(dir_c, "events-r0-s0"))
 
     # c comes back over a copy cut short, on a store whose recovery fails: short, so the probe wants to
     # repair it; unable to say where it ends, so a repair has nothing to start from. It must be skipped,

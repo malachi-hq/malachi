@@ -1,6 +1,8 @@
 defmodule Malachi.Cluster.ScrubberTest do
   use ExUnit.Case, async: false
 
+  alias Malachi.Test.SegmentFilesHelper
+
   import ExUnit.CaptureLog
 
   alias Malachi.Cluster.ReplicationServer
@@ -53,7 +55,7 @@ defmodule Malachi.Cluster.ScrubberTest do
   # Rots a byte inside the second frame, keeping the file's size: the damage the byte-size probe in
   # SelfHealing cannot see and only a checksum scan catches.
   defp rot_copy(directory) do
-    [log_file] = directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+    [log_file] = directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
     {pairs, _valid} = Record.decode_all(File.read!(log_file))
     {_record, position} = Enum.at(pairs, 1)
     flip_at = position + 12
@@ -68,7 +70,7 @@ defmodule Malachi.Cluster.ScrubberTest do
   # sees zeros all the way to the end and correctly calls that unwritten space, so the scan comes back
   # clean and short. Only the control plane's record of what the seal held can catch it.
   defp zero_tail_from(directory, index) do
-    [log_file] = directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+    [log_file] = directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
     {pairs, _valid} = Record.decode_all(File.read!(log_file))
     {_record, position} = Enum.at(pairs, index)
     bytes = File.read!(log_file)
@@ -155,7 +157,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     test "an unreadable latch reports damage and deletes nothing" do
       {scrubber, directory} = unknown_latches(["a", "b", "c"])
       rot_copy(directory)
-      [log_file] = directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+      [log_file] = directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
       rotted = File.read!(log_file)
 
       assert %{damaged: [{@segment, _verdict}], repaired: [], unrepairable: [{@segment, :latch_unknown}]} =
@@ -329,7 +331,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert [{@segment, {:source_read, _reason}}] = result.unrepairable
 
     assert [_log_file] =
-             damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+             damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
   end
 
   test "a peer that fails on a later batch is not a source, and the damaged copy is kept" do
@@ -361,7 +363,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert [{@segment, {:source_read, _reason}}] = result.unrepairable
 
     assert [_log_file] =
-             damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+             damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
   end
 
   test "a peer that stops answering reads defers the repair: the copy is kept and nothing is reported unrepairable" do
@@ -396,7 +398,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert result.unrepairable == []
 
     assert [_log_file] =
-             damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+             damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
 
     :ok = :sys.resume(peer_name)
   end
@@ -426,7 +428,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert result.unrepairable == []
 
     assert [_log_file] =
-             damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+             damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
   end
 
   test "a demote that answers something other than :ok or an error stops the repair before the delete" do
@@ -454,7 +456,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert [{@segment, {:demote, :error}}] = result.unrepairable
 
     assert [_log_file] =
-             damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+             damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
   end
 
   test "a demote whose call to the control plane exits defers the repair and keeps the copy" do
@@ -482,7 +484,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert result.unrepairable == []
 
     assert [_log_file] =
-             damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+             damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
   end
 
   test "a demote is not written over a replica set that changed since the pass took its snapshot" do
@@ -526,7 +528,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     refute_received {:command, {:set_segment_replicas, _id, _replicas, _expected}}
 
     assert [_log_file] =
-             damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+             damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
   end
 
   test "a demote the control plane does not answer within the scrub loop's bound defers the repair" do
@@ -554,7 +556,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert result.unrepairable == []
 
     assert [_log_file] =
-             damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+             damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
   end
 
   test "a rebuilt copy that cannot be sealed again is latched, so it is not left in service unfenced" do
@@ -675,7 +677,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert result.unrepairable == []
 
     assert [_log_file] =
-             damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+             damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
   end
 
   test "a rebuilt copy whose seal does not answer in time is reported as a timeout" do
@@ -774,7 +776,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert [{@segment, :latch_unknown}] = result.unrepairable
 
     assert [_log_file] =
-             damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+             damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
   end
 
   test "a confirmation resumes against the same peer, not against another one that verifies later" do
@@ -1119,7 +1121,7 @@ defmodule Malachi.Cluster.ScrubberTest do
       # The latch did not answer, so the copy was taken away rather than left unfenced, and nothing stays pending.
       assert :sys.get_state(scrubber).unlatched == %{}
       directory = Keyword.fetch!(opts, :directory)
-      assert Path.wildcard(Path.join(Layout.segment_directory(directory, @segment), "*.log")) == []
+      assert SegmentFilesHelper.log_files(Layout.segment_directory(directory, @segment)) == []
     end
 
     test "does not outlive the copy it was for: a repair takes the pending latch away with the copy" do
@@ -1274,7 +1276,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert [{@segment, :latched_before_delete}] = result.unrepairable
 
     assert [_log_file] =
-             damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+             damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
 
     assert {:ok, failed} = ReplicationServer.failed_segments(damaged_replica, [@segment])
     assert MapSet.member?(failed, @segment)
@@ -1317,7 +1319,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     refute_received {:command, {:set_segment_replicas, _id, _replicas, _expected}}
 
     assert [_log_file] =
-             damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+             damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
   end
 
   test "a demote whose re-read of the metadata no longer holds the segment defers the repair" do
@@ -1385,7 +1387,7 @@ defmodule Malachi.Cluster.ScrubberTest do
     assert [{@segment, {:demote, :refused}}] = result.unrepairable
 
     assert [_log_file] =
-             damaged_directory |> Layout.segment_directory(@segment) |> Path.join("*.log") |> Path.wildcard()
+             damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
   end
 
   test "a damaged copy of an empty sealed segment is kept, not deleted, and reported" do

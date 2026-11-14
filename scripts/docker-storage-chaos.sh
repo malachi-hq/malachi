@@ -146,6 +146,9 @@ damage_follower() {
   container=$(container_of "$follower")
   echo "target: $dir on $follower (primary $(seg_field "$line" primary))"
   DAMAGED_LINE="$line" DAMAGED_DIR="$dir" DAMAGED_PRIMARY=$(container_of "$(seg_field "$line" primary)") DAMAGED_FOLLOWER="$container"
+  # The follower's sparse-index sidecars as they were before any damage, which is what a local rebuild must
+  # reproduce (see wait_index_rebuilt).
+  DAMAGED_INDEX_BEFORE=$(docker exec "$container" sh -c "md5sum $dir/*.idx 2>/dev/null | sort")
 
   volume=$(data_volume_of "$container")
   image=$(image_of "$container")
@@ -171,16 +174,18 @@ wait_segment_repaired() {
   fi
 }
 
-# Waits until the damaged dir's sparse index files have the same md5s, file for file, on the damaged
-# follower and on the primary. The index is derived from the records and rebuilt locally, so byte
-# equality is the honest check for "rebuilt". The file names stay in the comparison: the directory is
-# at the same path on both nodes, and hashes alone would let two sidecars with swapped contents pass.
+# Waits until the damaged follower's sparse index files have, file for file, the md5s they had before the
+# damage. The index is derived from the follower's own records, which the event proves untouched, and
+# rebuilt locally, so byte equality with what the follower held before is the honest check for "rebuilt".
+# Not the primary's: copies of a batch segment can hold the same records in batches cut at different
+# places (the header), and their indexes point at different batch starts. The file names stay in the
+# comparison, since hashes alone would let two sidecars with swapped contents pass.
 wait_index_rebuilt() {
   for _ in $(seq 1 12); do
-    a=$(docker exec "$DAMAGED_PRIMARY" sh -c "md5sum $DAMAGED_DIR/*.idx 2>/dev/null | sort")
+    a=$DAMAGED_INDEX_BEFORE
     b=$(docker exec "$DAMAGED_FOLLOWER" sh -c "md5sum $DAMAGED_DIR/*.idx 2>/dev/null | sort")
     if [ -n "$a" ] && [ "$a" = "$b" ]; then
-      echo "index rebuilt: follower matches primary byte for byte (*.idx)"
+      echo "index rebuilt: the follower's sidecars are back to what they were, byte for byte (*.idx)"
       return 0
     fi
     sleep 5

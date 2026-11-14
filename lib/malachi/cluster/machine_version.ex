@@ -102,7 +102,9 @@ defmodule Malachi.Cluster.MachineVersion do
   # generation}` and `{:open_group, group, topic}`, at the next version since 7 is released.
   # 9 introduces the manual purge in `Malachi.Metadata` (#198): `{:set_range_starts, topic, starts}`,
   # and the topic export format that carries a range's logical start.
-  @code_version 9
+  # 10 introduces the batch storage format in `Malachi.Metadata` (#202): `{:register_segment, range, id,
+  # replicas, start, format}` and `{:seal_segment, id, length, byte_size, stored_bytes, at}`.
+  @code_version 10
 
   @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
   @type command_key :: {atom(), non_neg_integer()}

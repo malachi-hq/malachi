@@ -6,6 +6,8 @@ defmodule Malachi.Cluster.StorageFailureMultinodeTest do
   # async: false and tagged, like every test that starts peer nodes.
   use ExUnit.Case, async: false
 
+  alias Malachi.Test.SegmentFilesHelper
+
   @moduletag :multinode
 
   alias Malachi.Cluster.HealCoordinator
@@ -119,7 +121,7 @@ defmodule Malachi.Cluster.StorageFailureMultinodeTest do
   # Flips one byte inside the payload of the frame holding record `index` of the only log file under
   # `segment_dir`: a frame written whole and wrong, which recovery classifies as rot and preserves.
   defp rot_record!(segment_dir, index) do
-    [log_file] = Path.wildcard(Path.join(segment_dir, "*.log"))
+    [log_file] = SegmentFilesHelper.log_files(segment_dir)
     {frames, _valid_bytes} = Record.decode_all(File.read!(log_file))
     {_record, position} = Enum.at(frames, index)
     {:ok, fd} = :file.open(log_file, [:read, :write, :raw, :binary])

@@ -250,7 +250,7 @@ defmodule Malachi.TCPProtocol do
     end
   end
 
-  defp max_inflated_batch_bytes, do: Application.get_env(:malachi, :max_inflated_batch_bytes, 16_777_216)
+  defp max_inflated_batch_bytes, do: Malachi.BatchCodec.max_inflated_bytes()
 
   # api_key is a value (not a literal), so match it against the Wire accessors with a cond.
   defp dispatch(api_key, correlation_id, payload, session) do

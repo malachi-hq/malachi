@@ -241,7 +241,7 @@ defmodule Malachi.Cluster.SelfHealing do
   defp backfill_copy(replica, source, segment, to, opts) do
     case target_durable_end(replica, segment.id, segment.start_offset) do
       {:ok, from} when from >= to -> {:ok, to}
-      {:ok, from} -> Catchup.run(replica, source, segment.id, from, to, opts)
+      {:ok, from} -> Catchup.run(replica, source, segment.id, from, to, with_format(opts, segment))
       {:error, reason} -> {:error, {:target, reason}}
     end
   end
@@ -320,7 +320,8 @@ defmodule Malachi.Cluster.SelfHealing do
 
     with {:ok, from} <- probe_durable_end(replica, segment.id, segment.start_offset),
          true <- from < expected_end,
-         {:ok, ^expected_end} <- Catchup.run(replica, source, segment.id, from, expected_end, opts) do
+         {:ok, ^expected_end} <-
+           Catchup.run(replica, source, segment.id, from, expected_end, with_format(opts, segment)) do
       %{acc | repaired: [{segment.id, replica} | acc.repaired]}
     else
       # Offsets complete but bytes short: not a truncation Catchup can mend; leave it to the scrub,
@@ -378,4 +379,7 @@ defmodule Malachi.Cluster.SelfHealing do
       unsettled: Enum.reverse(acc.unsettled)
     }
   end
+
+  # A copy made here takes the format the control plane registered the segment with.
+  defp with_format(opts, segment), do: Keyword.put(opts, :format, Malachi.Metadata.segment_format(segment))
 end

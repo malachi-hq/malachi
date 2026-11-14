@@ -426,7 +426,8 @@ defmodule StorageChaosTest do
               case "$*" in
                 *.idx*)
                   d=/data/malachi_log/chaos_acked-r0-s1
-                  if [ "$2" = malachi-cluster-1 ]; then
+                  # Before event i corrupts a sidecar the follower lists them as they are; after it, the names are swapped.
+                  if ! grep -qF 'of=$f bs=8 count=1 seek=1' "$STUB_LOG"; then
                     printf 'h1  %s/00000000000000000000.idx\nh2  %s/00000000000000000003.idx\n' "$d" "$d"
                   else
                     # As `md5sum | sort` would list them: by hash, so the swapped names come out in this order.
@@ -436,6 +437,14 @@ defmodule StorageChaosTest do
               esac
             fi
             if [ "${STUB_MD5_DIFFER:-0}" = 1 ]; then
+              # A sidecar that never comes back: after event i's damage, its hash is not what it was before.
+              case "$*" in
+                *.idx*)
+                  if grep -qF 'of=$f bs=8 count=1 seek=1' "$STUB_LOG"; then
+                    echo "md5-after  /data/malachi_log/chaos_acked-r0-s1/00000000000000000000.idx"
+                    exit 0
+                  fi ;;
+              esac
               echo "md5-$2  /data/malachi_log/chaos_acked-r0-s1/00000000000000000000.log"
             else
               echo "same  /data/malachi_log/chaos_acked-r0-s1/00000000000000000000.log"

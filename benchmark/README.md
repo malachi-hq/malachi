@@ -402,6 +402,39 @@ PREALLOC_AB=1 PREALLOC_AB_STAGE=3 PREALLOC_AB_MECHANISM=zeros PREALLOC_AB_SYNC=s
   mix run --no-start benchmark/storage_viability.exs
 ```
 
+### `batch_frame_ab.exs`
+
+The batch frame (#202) against the record frame on the store's own write path: per-flush latency of
+`append` plus `sync` and the bytes each format puts on disk, with `json` payloads of 256 bytes from the
+#192 generator. It is the uncompressed baseline #208 compares compression against. The method is fixed in
+the script's header before any run: interleaved arms shuffled per repetition, an A-A control of two
+identical record arms as the measured noise floor, and the verdict of `support/paired_stats.exs` (a
+difference counts only when it beats the control AND its bootstrapped 95% interval excludes zero). The
+zstd arm compresses before the timed region, because compressing is the connection process's work, not
+the store's.
+
+```
+BENCH_DIR=/data BATCH_AB_OUT=/data/batch-frame-ab.json mix run --no-start benchmark/batch_frame_ab.exs
+```
+
+Measured on 2026-11-13 in the loadtest image (OTP 28, Linux 6.8 in a Colima VM on an Apple host, which
+is virtualized; ext4 named volume, cpuset 1,2,3), 7 repetitions per arm, 200 flushes per repetition:
+
+| records per flush | record p50 | batch, uncompressed, p50 | batch, zstd, p50 | stored bytes per record (record / uncompressed / zstd) |
+| --- | --- | --- | --- | --- |
+| 1 | 0.372ms | 0.370ms (noise) | 0.372ms (noise) | 300 / 345 / 290 |
+| 10 | 0.268ms | 0.269ms (noise) | 0.255ms (noise) | 300 / 289 / 110 |
+| 100 | 0.392ms | 0.359ms (-8.4%, signal) | 0.281ms (-28.3%, signal) | 300 / 284 / 77 |
+| 1000 | 1.592ms | 1.251ms (-21.4%, signal) | 0.355ms (-77.7%, signal) | 300 / 283 / 71 |
+
+What it says: below about ten records per flush the formats cost the same per flush, and a batch of one
+stores more than a record frame does (the batch header is 62 bytes against the record frame's 39), which
+is the case #209 exists for. From a hundred records per flush the batch frame is faster uncompressed,
+because it writes fewer bytes and computes one CRC instead of one per record, and compressed it writes a
+quarter of the bytes and flushes in a quarter of the time at a thousand. Every p99 difference except the
+zstd one at a thousand records stayed inside its noise floor. These are per-flush costs on one segment; the
+end-to-end comparison through the cluster, where the single-process loops are, is #208's to publish.
+
 ### `dashboard_security_benchmark.exs`
 
 Measures the overhead that authentication, security headers, and audit logging add

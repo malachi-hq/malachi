@@ -227,7 +227,16 @@ config :malachi,
   stream_max_window_bytes: parse_int.("MALACHI_STREAM_MAX_WINDOW_BYTES", 16_777_216),
   stream_inflight_soft: parse_int.("MALACHI_STREAM_INFLIGHT_SOFT", 50_000),
   stream_inflight_hard: parse_int.("MALACHI_STREAM_INFLIGHT_HARD", 200_000),
-  max_inflated_batch_bytes: parse_int.("MALACHI_MAX_INFLATED_BATCH_BYTES", 16_777_216),
+  # At most 256 MiB, the ceiling a stored batch frame is judged by (Malachi.Log.BatchFrame.max_stored_inflated/0):
+  # a larger setting would accept batches the disk would then read as damage. Lowering it later is safe.
+  max_inflated_batch_bytes:
+    (case parse_int.("MALACHI_MAX_INFLATED_BATCH_BYTES", 16_777_216) do
+       bytes when bytes <= 268_435_456 ->
+         bytes
+
+       bytes ->
+         raise "MALACHI_MAX_INFLATED_BATCH_BYTES #{bytes} is above 268435456 (256 MiB), the most a stored batch may hold"
+     end),
   # Consumer groups (Malachi.Consumer.GroupCoordinator): how long a member may go without a heartbeat or a
   # commit before it is evicted and its ranges are handed to the others (the eviction runs on a tick of a
   # third of it, at most 10 s). A positive count below 2^32: a whole number outside that is the default,
@@ -276,6 +285,20 @@ config :malachi,
     (case System.get_env("MALACHI_LOG_PLACEMENT_POLICY") do
        "hard" -> :hard
        _soft_or_absent -> :soft
+     end),
+  # How new segments frame their records on disk (#202): "record" (default, one frame per record) or
+  # "batch" (one frame per batch, one CRC per batch). Read only where a segment is registered, so every
+  # replica writes what the control plane recorded. For development and the chaos drills until a cluster
+  # flag replaces it (#207); not supported in production. Set it only when every node runs this release
+  # and the control plane is at machine version 10 (no MALACHI_RA_MACHINE_VERSION pin below 10): a frontend
+  # set to batch cannot register any segment under such a pin, and a broker on an older release cannot
+  # take a batch segment's replication. Anything else than record or batch stops the node at boot.
+  segment_format:
+    (case System.get_env("MALACHI_SEGMENT_FORMAT") do
+       nil -> :record
+       "record" -> :record
+       "batch" -> :batch
+       other -> raise "invalid MALACHI_SEGMENT_FORMAT #{inspect(other)} (expected record or batch)"
      end),
   # Log retention. The coordinator always runs, so a topic's own storage policy can expire with neither
   # of these set; with both unset and no policy bound anywhere, the sweep finds nothing and segments are

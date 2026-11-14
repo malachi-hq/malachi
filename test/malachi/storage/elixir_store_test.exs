@@ -1023,7 +1023,9 @@ defmodule Malachi.Storage.ElixirStoreTest do
       :ok = ElixirStore.close(store)
 
       bytes = File.stat!(Segment.path(store.segment)).size
-      assert ElixirStore.verify(directory, "segment-0") == {:ok, %{records: 5, bytes: bytes}}
+
+      assert {:ok, %{records: 5, bytes: ^bytes, logical_bytes: ^bytes, format: :record}} =
+               ElixirStore.verify(directory, "segment-0")
     end
 
     test "reports a bad checksum with the position of the damaged frame", %{tmp_dir: directory} do
@@ -1690,15 +1692,25 @@ defmodule Malachi.Storage.ElixirStoreTest do
     end
   end
 
-  property "append + sync + read preserves the full sequence and assigns sequential offsets" do
+  property "append + sync + read preserves the full sequence and assigns sequential offsets, in every format" do
     check all(
             records <- StreamData.list_of(record_gen(), min_length: 1, max_length: 50),
+            format <- StreamData.member_of([:record, :batch]),
+            chunk <- StreamData.integer(1..7),
             max_runs: 50
           ) do
       directory = TmpDir.path("ng_prop")
       File.rm_rf!(directory)
-      {:ok, store} = ElixirStore.open(directory, "segment-0", index_interval: 64)
-      {:ok, store, first, last} = ElixirStore.append(store, records)
+      {:ok, store} = ElixirStore.open(directory, "segment-0", index_interval: 64, format: format)
+
+      {store, first, last} =
+        records
+        |> Enum.chunk_every(chunk)
+        |> Enum.reduce({store, nil, nil}, fn part, {acc, first, _last} ->
+          {:ok, acc, part_first, part_last} = ElixirStore.append(acc, part)
+          {acc, first || part_first, part_last}
+        end)
+
       {:ok, store} = ElixirStore.sync(store)
 
       assert first == 0
@@ -1716,15 +1728,25 @@ defmodule Malachi.Storage.ElixirStoreTest do
     end
   end
 
-  property "reading from any committed offset returns the correct suffix" do
+  property "reading from any committed offset returns the correct suffix, in every format" do
     check all(
             records <- StreamData.list_of(record_gen(), min_length: 1, max_length: 30),
+            format <- StreamData.member_of([:record, :batch]),
+            chunk <- StreamData.integer(1..5),
             max_runs: 30
           ) do
       directory = TmpDir.path("ng_prop")
       File.rm_rf!(directory)
-      {:ok, store} = ElixirStore.open(directory, "segment-0", index_interval: 48)
-      {:ok, store, _, _} = ElixirStore.append(store, records)
+      {:ok, store} = ElixirStore.open(directory, "segment-0", index_interval: 48, format: format)
+
+      store =
+        records
+        |> Enum.chunk_every(chunk)
+        |> Enum.reduce(store, fn part, acc ->
+          {:ok, acc, _, _} = ElixirStore.append(acc, part)
+          acc
+        end)
+
       {:ok, store} = ElixirStore.sync(store)
 
       n = length(records)

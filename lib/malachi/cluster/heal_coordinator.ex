@@ -284,12 +284,12 @@ defmodule Malachi.Cluster.HealCoordinator do
     seals = Failover.plan(metadata, live, probe_candidates(state, metadata, live, failed), now_ms, failed)
     # A segment this pass seals for failover may have a primary it just fenced, which the orphaned-fence
     # probe below would find fenced and seal a second time, counting a divergence that never existed.
-    sealed_here = MapSet.new(for {:seal_segment, segment_id, _length, _bytes, _at} <- seals, do: segment_id)
+    sealed_here = MapSet.new(seals, &Metadata.sealed_segment_id/1)
 
     orphans =
       metadata
       |> OrphanedFence.plan(probe_fences(state, metadata, live), now_ms)
-      |> Enum.reject(fn {:seal_segment, segment_id, _length, _bytes, _at} -> segment_id in sealed_here end)
+      |> Enum.reject(&(Metadata.sealed_segment_id(&1) in sealed_here))
 
     applied = healed.applied ++ seals ++ orphans
     state = apply_commands(state, seals ++ orphans ++ healed.applied)
@@ -557,8 +557,8 @@ defmodule Malachi.Cluster.HealCoordinator do
   defp classify({segment_id, replica, _recorded, outcome}) when outcome in [:error, :unreachable],
     do: {:failed, segment_id, replica}
 
-  defp sealed_now?(metadata, {:seal_segment, segment_id, _length, _bytes, _at}) do
-    match?(%{state: :sealed}, Map.get(metadata.segments, segment_id))
+  defp sealed_now?(metadata, command) do
+    match?(%{state: :sealed}, Map.get(metadata.segments, Metadata.sealed_segment_id(command)))
   end
 
   # The failed copies a heal command left out of its segment's new replica set: `SelfHealing` never places
@@ -723,8 +723,11 @@ defmodule Malachi.Cluster.HealCoordinator do
 
   defp probe_with(fun, replica, segment_id, base_offset) do
     case fun.(replica, segment_id, base_offset) do
-      {end_offset, byte_size} when is_integer(end_offset) and is_integer(byte_size) -> {end_offset, byte_size}
-      _other -> nil
+      {end_offset, sizes} when is_integer(end_offset) ->
+        if Metadata.sizes?(sizes), do: {end_offset, sizes}, else: nil
+
+      _other ->
+        nil
     end
   end
 
@@ -797,7 +800,8 @@ defmodule Malachi.Cluster.HealCoordinator do
   defp default_settle_copy(timeout) do
     fn replica, segment_id, base_offset, end_offset ->
       case ReplicationServer.seal_at(replica, segment_id, base_offset, end_offset, timeout) do
-        {:ok, held_end, byte_size, dropped} -> {:ok, dropped, byte_size, held_end}
+        # The settle check compares against the recorded `byte_size`, which is logical.
+        {:ok, held_end, sizes, dropped} -> {:ok, dropped, Metadata.logical_bytes(sizes), held_end}
         {:error, :unreachable} -> :unreachable
         {:error, _reason} -> :error
       end

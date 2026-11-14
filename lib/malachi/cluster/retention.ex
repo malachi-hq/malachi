@@ -252,5 +252,7 @@ defmodule Malachi.Cluster.Retention do
     expired
   end
 
-  defp bytes(segment), do: segment.byte_size || 0
+  # The bytes the segment takes on disk, not its logical size: a size limit exists to bound the disk, so a
+  # compressed segment counts what it actually occupies (`Malachi.Metadata.stored_bytes/1`).
+  defp bytes(segment), do: Malachi.Metadata.stored_bytes(segment)
 end

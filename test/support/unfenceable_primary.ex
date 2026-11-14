@@ -102,6 +102,15 @@ defmodule Malachi.Test.UnfenceablePrimary do
   defp rewrite({:append, segment_id, replica_set, base_offset, records}, state),
     do: {:append, segment_id, inner_set(replica_set, state), base_offset, records}
 
+  defp rewrite({:replicate, segment_id, replica_set, base_offset, records, format, ctx}, state),
+    do: {:replicate, segment_id, inner_set(replica_set, state), base_offset, records, format, ctx}
+
+  defp rewrite({:replicate_async, segment_id, replica_set, base_offset, records, format, notify, ctx}, state),
+    do: {:replicate_async, segment_id, inner_set(replica_set, state), base_offset, records, format, notify, ctx}
+
+  defp rewrite({:append, segment_id, replica_set, base_offset, records, format}, state),
+    do: {:append, segment_id, inner_set(replica_set, state), base_offset, records, format}
+
   defp rewrite(request, _state), do: request
 
   defp inner_set(replica_set, state) do
