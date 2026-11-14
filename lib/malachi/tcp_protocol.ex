@@ -25,6 +25,7 @@ defmodule Malachi.TCPProtocol do
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.ConsumeStreams
   alias Malachi.DataPlaneRouter
+  alias Malachi.LegalHold
   alias Malachi.LogApi
   alias Malachi.Metadata
   alias Malachi.Metrics
@@ -287,6 +288,9 @@ defmodule Malachi.TCPProtocol do
       api_key == Wire.bind_topic_policy_key() -> bind_topic_policy(correlation_id, payload, session)
       api_key == Wire.get_topic_policy_key() -> get_topic_policy(correlation_id, payload, session)
       api_key == Wire.purge_topic_key() -> purge_topic(correlation_id, payload, session)
+      api_key == Wire.set_topic_hold_key() -> set_topic_hold(correlation_id, payload, session)
+      api_key == Wire.release_topic_hold_key() -> release_topic_hold(correlation_id, payload, session)
+      api_key == Wire.get_topic_hold_key() -> get_topic_hold(correlation_id, payload, session)
       true -> dispatch_routing(api_key, correlation_id, payload, session)
     end
   end
@@ -833,6 +837,36 @@ defmodule Malachi.TCPProtocol do
       end
     end)
   end
+
+  # The legal hold (#307), gated by the :admin permission: a hold overrides every retention policy on the
+  # topic, and releasing it lets retention delete what the hold kept. The actor is the session's user.
+  defp set_topic_hold(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      {topic, reason} = Wire.decode_set_topic_hold_req(payload)
+      hold_reply(correlation_id, LegalHold.set(topic, reason, session.username), <<>>)
+    end)
+  end
+
+  defp release_topic_hold(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      topic = Wire.decode_topic_hold_topic_req(payload)
+      hold_reply(correlation_id, LegalHold.release(topic, session.username), <<>>)
+    end)
+  end
+
+  defp get_topic_hold(correlation_id, payload, session) do
+    with_permission(session, :admin, correlation_id, fn ->
+      case LegalHold.get(Wire.decode_topic_hold_topic_req(payload)) do
+        {:ok, hold} -> Wire.encode_ok(correlation_id, Wire.encode_topic_hold_resp(hold))
+        error -> hold_reply(correlation_id, error, <<>>)
+      end
+    end)
+  end
+
+  defp hold_reply(correlation_id, :ok, payload), do: Wire.encode_ok(correlation_id, payload)
+
+  defp hold_reply(correlation_id, {:error, reason}, _payload),
+    do: Wire.encode_error(correlation_id, LegalHold.reason_string(reason))
 
   # The manual purge (#198), gated by the :admin permission: a purge removes data from every reader. The
   # permission is checked before the frame is decoded, so a refused caller has nothing recorded. A frame with

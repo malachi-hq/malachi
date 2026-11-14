@@ -99,10 +99,22 @@ defmodule OciDailyRunScriptTest do
       *"compute instance action"*) exit 0 ;;
       *"summarize-metrics-data"*) echo "${FAKE_MEMORY-12}" ;;
       *"ons message publish"*) exit 0 ;;
+      # The list of what is left, written to the report when the count after the destroy never reaches zero.
+      *"structured-search"*"--output table"*)
+        [ "${FAKE_LIST_AFTER:-ok}" = "fail" ] && exit 1
+        echo "| name          | state       | type   |"
+        echo "| malachi-nodes | TERMINATING | Subnet |" ;;
+      # After the destroy, FAKE_LEFTOVERS_AFTER is the sequence of counts the search answers, one per count, the
+      # last one repeated: "2 0" is an index that has not caught up with the destroy at first, then has. A "fail"
+      # in the sequence is a search that fails at that count.
       *"structured-search"*)
         if grep -q "create-destroy-job" "$FAKE_LOG"; then
           [ "${FAKE_SEARCH_AFTER:-ok}" = "fail" ] && exit 1
-          echo "${FAKE_LEFTOVERS_AFTER:-0}"
+          n=$(sed -n '/create-destroy-job/,$p' "$FAKE_LOG" | grep -c 'structured-search.*length')
+          read -r -a counts <<<"${FAKE_LEFTOVERS_AFTER:-0}"
+          i=$((n - 1)); [ "$i" -lt "${#counts[@]}" ] || i=$((${#counts[@]} - 1))
+          [ "${counts[$i]}" = "fail" ] && exit 1
+          echo "${counts[$i]}"
         else
           [ "${FAKE_SEARCH:-ok}" = "fail" ] && exit 1
           echo "${FAKE_LEFTOVERS:-0}"
@@ -157,7 +169,9 @@ defmodule OciDailyRunScriptTest do
         {"FAKE_LOG", ctx.log},
         {"REPO_URL", "file://" <> ctx.repo},
         {"WORK", work},
-        {"DOCKER", "docker"}
+        {"DOCKER", "docker"},
+        # The real limit is 10 minutes; with the 0.05 s sleep stub, one second still allows about 20 recounts.
+        {"SWEEP_SETTLE_LIMIT", "1"}
       ] ++ @config_vars
 
     {out, status} =
@@ -472,6 +486,72 @@ defmodule OciDailyRunScriptTest do
     assert r.status != 0
     assert report(r) =~ "LEAK: resources remain after destroy"
     assert report(r) =~ "result: leak"
+  end
+
+  @tag :tmp_dir
+  test "a leak lists each resource left, with its type, name and state", ctx do
+    r = run(ctx, FAKE_LEFTOVERS_AFTER: "2")
+    assert report(r) =~ "sweep after destroy: 2 resource(s) still left after 1 s:"
+    assert report(r) =~ "| malachi-nodes | TERMINATING | Subnet |"
+    assert index_of(r.calls, "--output table") > index_of(r.calls, "create-destroy-job")
+  end
+
+  @tag :tmp_dir
+  test "a leak whose resources cannot be listed is still a leak, and says the list failed", ctx do
+    r = run(ctx, FAKE_LEFTOVERS_AFTER: "2", FAKE_LIST_AFTER: "fail")
+    assert report(r) =~ "the resources left could not be listed (see sweep.err)"
+    assert report(r) =~ "result: leak"
+  end
+
+  @tag :tmp_dir
+  test "resources the index still lists right after the destroy are not a leak once it catches up", ctx do
+    r = run(ctx, FAKE_LEFTOVERS_AFTER: "2 2 0")
+    assert r.status == 0, r.out
+    assert report(r) =~ "sweep after destroy: 2 resource(s) left in the cluster compartment"
+    assert report(r) =~ "sweep after destroy: 0 resource(s) left once the index caught up"
+    refute report(r) =~ "LEAK"
+    assert report(r) =~ "result: pass"
+    after_destroy = Enum.drop(r.calls, index_of(r.calls, "create-destroy-job"))
+    assert count(after_destroy, "length(data.items)") == 3
+    assert count(after_destroy, "sleep 30") == 2
+    assert count(after_destroy, "--output table") == 0
+  end
+
+  @tag :tmp_dir
+  test "a run that found no capacity keeps that result when the index catches up after the destroy", ctx do
+    r = run(ctx, FAKE_APPLY: "capacity", FAKE_LEFTOVERS_AFTER: "2 0")
+    assert report(r) =~ "result: no-capacity"
+  end
+
+  @tag :tmp_dir
+  test "a search that fails while waiting for the index is sweep-failed at once, not retried", ctx do
+    r = run(ctx, FAKE_LEFTOVERS_AFTER: "2 fail 0")
+    assert r.status != 0
+    assert report(r) =~ "result: sweep-failed"
+    refute report(r) =~ "LEAK"
+    after_destroy = Enum.drop(r.calls, index_of(r.calls, "create-destroy-job"))
+    assert count(after_destroy, "length(data.items)") == 2
+  end
+
+  @tag :tmp_dir
+  test "a clean sweep after the destroy is a single count, with no wait", ctx do
+    r = run(ctx)
+    after_destroy = Enum.drop(r.calls, index_of(r.calls, "create-destroy-job"))
+    assert count(after_destroy, "length(data.items)") == 1
+    assert count(after_destroy, "sleep") == 0
+  end
+
+  @tag :tmp_dir
+  test "leftovers before the apply are a single count: the index has had a day to catch up", ctx do
+    r = run(ctx, FAKE_LEFTOVERS: "2")
+    before_destroy = Enum.take(r.calls, index_of(r.calls, "create-destroy-job"))
+    assert count(before_destroy, "length(data.items)") == 1
+    assert count(before_destroy, "sleep 30") == 0
+  end
+
+  @tag :tmp_dir
+  test "the sweep after the destroy waits ten minutes by default", _ctx do
+    assert File.read!(@script) =~ ~s[SWEEP_SETTLE_LIMIT="${SWEEP_SETTLE_LIMIT:-600}"]
   end
 
   @tag :tmp_dir

@@ -1,6 +1,7 @@
 # Dev-mode image that runs `mix malachi.loadtest`. The shipped malachi image is a prod `mix release`, which
 # has no `mix` or source, so the load generator needs its own image. It copies only the source it compiles
-# (mix files, config, lib), never the host `_build`/`deps` (wrong arch), mirroring the release Dockerfile.
+# (mix files, config, lib, priv/static), never the host `_build`/`deps` (wrong arch), mirroring the release
+# Dockerfile.
 FROM elixir:1.19-otp-28-alpine@sha256:07b2cb62c04ce868a1cc7105ab4b673511a8bd18cd1c3fea68d1ba99b969be59
 
 WORKDIR /app
@@ -15,6 +16,9 @@ RUN mix deps.get
 
 COPY config config
 COPY lib lib
+# Malachi.Dashboard.Assets embeds priv/static/dashboard when it compiles, so the files must be here first.
+# Only priv/static, as in the release Dockerfile: a checkout's priv also holds gitignored keys and PLTs.
+COPY priv/static priv/static
 RUN mix compile
 
 # Args after this (e.g. --host malachi --scenario produce ...) are the load-test flags.

@@ -5,6 +5,7 @@ defmodule Malachi.Console.AccessTest do
   alias Malachi.Auth
   alias Malachi.Auth.UserStore
   alias Malachi.Console.Access
+  alias Malachi.Dashboard.Assets
   alias Malachi.Test.AccessHelper
 
   doctest Access
@@ -20,6 +21,9 @@ defmodule Malachi.Console.AccessTest do
             {"GET", "/health"},
             {"GET", "/ready"},
             {"GET", "/logo.svg"},
+            {"GET", "/app.css"},
+            {"GET", "/app.js"},
+            {"GET", "/login.js"},
             {"OPTIONS", "/metrics"},
             {"OPTIONS", "/anything/at/all"}
           ],
@@ -47,6 +51,19 @@ defmodule Malachi.Console.AccessTest do
       assert Access.required_role("GET", "/api/v1/unknown") == :admin
       assert Access.required_role("PUT", "/policies/") == :admin
       assert Access.required_role("PUT", "/topics//policy") == :admin
+    end
+
+    test "every dashboard asset is public for GET and for nothing else, and its neighbors are not" do
+      # The login page loads its assets before there is a session, so a forgotten row would break login.
+      for path <- Assets.paths() do
+        assert Access.required_role("GET", path) == :public, "GET #{path}"
+        assert Access.required_role("POST", path) == :admin, "POST #{path}"
+        assert Access.required_role("PUT", path) == :admin, "PUT #{path}"
+      end
+
+      assert Access.required_role("GET", "/app.js.map") == :admin
+      assert Access.required_role("GET", "/static/app.js") == :admin
+      assert Access.required_role("GET", "/foo.js") == :admin
     end
 
     test "every row has a known method and level" do

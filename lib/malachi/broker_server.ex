@@ -183,6 +183,26 @@ defmodule Malachi.BrokerServer do
           {:ok, Malachi.Metadata.policy_name() | nil} | {:error, :no_such_topic | :metadata_unavailable}
   def topic_policy_name(server, topic), do: GenServer.call(server, {:topic_policy_name, topic})
 
+  @doc """
+  Places a legal hold on `topic` or releases it with `nil` (#307, `Malachi.Broker.set_topic_hold/3`).
+  """
+  @spec set_topic_hold(GenServer.server(), Malachi.Metadata.topic_name(), Malachi.Metadata.hold_request()) ::
+          :ok | {:error, term()}
+  def set_topic_hold(server, topic, request),
+    do: GenServer.call(server, {:set_topic_hold, topic, request}, @bind_call_timeout_ms)
+
+  @doc """
+  The legal hold on `topic` (`nil` for none), `{:error, :no_such_topic}`, or `{:error, :metadata_unavailable}`
+  while this node has not yet heard from the topic's vnode.
+  """
+  @spec legal_hold(GenServer.server(), Malachi.Metadata.topic_name()) ::
+          {:ok, Malachi.Metadata.legal_hold() | nil} | {:error, :no_such_topic | :metadata_unavailable}
+  def legal_hold(server, topic), do: GenServer.call(server, {:legal_hold, topic})
+
+  @doc "Deletes `topic` from the control plane (`Malachi.Broker.delete_topic/2`); a held topic is refused."
+  @spec delete_topic(GenServer.server(), Malachi.Metadata.topic_name()) :: :ok | {:error, term()}
+  def delete_topic(server, topic), do: GenServer.call(server, {:delete_topic, topic}, @bind_call_timeout_ms)
+
   @doc "The topics bound to the policy `name`, sorted."
   @spec topics_bound_to(GenServer.server(), Malachi.Metadata.policy_name()) :: [Malachi.Metadata.topic_name()]
   def topics_bound_to(server, name), do: GenServer.call(server, {:topics_bound_to, name})
@@ -640,6 +660,24 @@ defmodule Malachi.BrokerServer do
   def handle_call({:bind_topic_policy, topic, policy_name}, _from, state) do
     {broker, reply} = Broker.bind_topic_policy(state.broker, topic, policy_name)
     {:reply, reply, %{state | broker: broker}}
+  end
+
+  def handle_call({:set_topic_hold, topic, request}, _from, state) do
+    {broker, reply} = Broker.set_topic_hold(state.broker, topic, request)
+    {:reply, reply, %{state | broker: broker}}
+  end
+
+  def handle_call({:delete_topic, topic}, _from, state) do
+    {broker, reply} = Broker.delete_topic(state.broker, topic)
+    {:reply, reply, %{state | broker: broker}}
+  end
+
+  def handle_call({:legal_hold, topic}, _from, state) do
+    if topic_metadata_ready?(state, topic) do
+      {:reply, Broker.legal_hold(state.broker, topic), state}
+    else
+      {:reply, {:error, :metadata_unavailable}, state}
+    end
   end
 
   def handle_call({:purge, topic, point, before_submit, deadline}, _from, state) do

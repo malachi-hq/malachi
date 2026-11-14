@@ -31,6 +31,11 @@ defmodule Malachi.AuditLog do
     commits leaves a record of what it set out to move
   - `:purge_request_recorded` - An administrator recorded a data subject request before applying its purge
     (`Malachi.Purge.Request`): the request id, the reason, the topic and the point
+  - `:topic_hold_set` - An administrator placed a legal hold on a topic (`Malachi.LegalHold`), recorded with
+    its reason
+  - `:topic_hold_released` - An administrator released a topic's legal hold
+  - `:topic_deleted` - An administrator deleted a topic (`Malachi.Topics.delete/2`); a topic under a legal
+    hold is refused, and the refusal is recorded like any other
   - `:user_role_changed` - An administrator set or removed a user's console role (`Malachi.Auth.set_role/3`)
 
   ## Event Structure

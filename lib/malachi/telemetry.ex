@@ -113,6 +113,12 @@ defmodule Malachi.Telemetry do
     * `[:malachi, :retention, :unresolved_policy]`. `%{count: 1}` / `%{topic}` - a sweep found `topic`
       bound to a policy name it could not resolve, and expired nothing of it. Once per sweep per topic,
       so it is a gauge of the misconfiguration rather than a count of anything.
+    * `[:malachi, :retention, :held]`. `%{topics}` / `%{held}` - what a legal hold (#307) kept from the
+      latest sweep: `held` maps each held topic to the `segments` and `bytes` the retention rules would
+      have expired, and `topics` is how many it names. Each retention coordinator (one per vnode a node
+      leads) emits it after every sweep it completes, and empty on a tick where it does not lead, so it
+      replaces that coordinator's previous report rather than adding to it. A tick that skips its sweep
+      (the policies or the metadata could not be read) emits nothing, and the last report stands.
 
   Reserved for later retention work, not emitted yet, so that the names are chosen once:
 
@@ -307,6 +313,15 @@ defmodule Malachi.Telemetry do
   @spec retention_unresolved_policy(String.t()) :: :ok
   def retention_unresolved_policy(topic) do
     :telemetry.execute([:malachi, :retention, :unresolved_policy], %{count: 1}, %{topic: topic})
+  end
+
+  @doc """
+  What a legal hold kept from the latest retention sweep, per held topic (`Malachi.Cluster.Retention.plan/5`);
+  an empty map when nothing was held or this node did not sweep.
+  """
+  @spec retention_held(%{String.t() => %{segments: non_neg_integer(), bytes: non_neg_integer()}}) :: :ok
+  def retention_held(held) when is_map(held) do
+    :telemetry.execute([:malachi, :retention, :held], %{topics: map_size(held)}, %{held: held})
   end
 
   @doc "The orphan sweeper reclaimed `count` replica directories in one pass."

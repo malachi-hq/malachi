@@ -185,6 +185,16 @@ defmodule Malachi.I18n do
         "Request arrived with X-Forwarded-Proto: https, but the session cookie is not marked Secure. Set " <>
           "MALACHI_DASHBOARD_SECURE_COOKIE=true so the browser will not send it over plain HTTP"
     },
+    dashboard_csp_weak_override: %{
+      "pt_BR" =>
+        "MALACHI_DASHBOARD_CSP permite código inline ou eval (%{csp}). Isso reabre o dashboard a script " <>
+          "injetado; remova 'unsafe-inline', 'unsafe-eval' e 'unsafe-hashes' ou deixe a variável sem valor " <>
+          "para usar a política padrão",
+      "en_US" =>
+        "MALACHI_DASHBOARD_CSP allows inline code or eval (%{csp}). That reopens the dashboard to injected " <>
+          "script; drop 'unsafe-inline', 'unsafe-eval' and 'unsafe-hashes', or leave the variable unset for the " <>
+          "default policy"
+    },
     rate_limiter_started: %{
       "pt_BR" => "✅ RateLimiter iniciado",
       "en_US" => "✅ RateLimiter started"
@@ -302,6 +312,18 @@ defmodule Malachi.I18n do
     purge_request_recorded: %{
       "pt_BR" => "📋 Pedido de purge %{request} registrado por %{actor} para o tópico %{topic} até %{point}",
       "en_US" => "📋 Purge request %{request} recorded by %{actor} for topic %{topic} up to %{point}"
+    },
+    legal_hold_set: %{
+      "pt_BR" => "🔒 Legal hold colocado no tópico %{topic} por %{actor}: %{reason}",
+      "en_US" => "🔒 Legal hold placed on topic %{topic} by %{actor}: %{reason}"
+    },
+    legal_hold_released: %{
+      "pt_BR" => "🔓 Legal hold liberado no tópico %{topic} por %{actor}; a próxima varredura aplica a retenção de novo",
+      "en_US" => "🔓 Legal hold released on topic %{topic} by %{actor}; the next sweep applies retention again"
+    },
+    topic_deleted: %{
+      "pt_BR" => "🗑️ Tópico %{topic} removido por %{actor}",
+      "en_US" => "🗑️ Topic %{topic} deleted by %{actor}"
     },
     audit_event_logged: %{
       "pt_BR" => "📝 Evento de auditoria registrado: %{event_type}",

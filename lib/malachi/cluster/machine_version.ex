@@ -104,7 +104,9 @@ defmodule Malachi.Cluster.MachineVersion do
   # and the topic export format that carries a range's logical start.
   # 10 introduces the batch storage format in `Malachi.Metadata` (#202): `{:register_segment, range, id,
   # replicas, start, format}` and `{:seal_segment, id, length, byte_size, stored_bytes, at}`.
-  @code_version 10
+  # 11 introduces the legal hold in `Malachi.Metadata` (#307): `{:set_topic_hold, topic, request}`, and the
+  # topic export format that carries a topic's hold.
+  @code_version 11
 
   @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
   @type command_key :: {atom(), non_neg_integer()}

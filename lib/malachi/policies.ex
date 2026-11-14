@@ -58,7 +58,8 @@ defmodule Malachi.Policies do
           definition: Policy.t() | nil,
           resolution: Retention.resolution(),
           retention: %{atom() => {non_neg_integer() | nil, Retention.origin()}},
-          spread_by: {String.t() | nil, :policy | :global}
+          spread_by: {String.t() | nil, :policy | :global},
+          legal_hold: Malachi.Metadata.legal_hold() | nil
         }
 
   @typedoc "Why a request was refused. `reason_string/1` renders every one of them."
@@ -152,11 +153,15 @@ defmodule Malachi.Policies do
   applies, over this node's configured global limits and its replica of the policy store, so what this
   reports is what the data sees. A store that cannot be read is an error here, never an empty store:
   answering "no policies" would report the global limits for a topic whose policy holds its data longer.
+
+  `legal_hold` is the topic's legal hold (`Malachi.LegalHold`), or `nil`: while one is in place, none of
+  the retention bounds reported here expires anything.
   """
   @spec topic_policy(String.t()) :: {:ok, topic_policy()} | {:error, reason()}
   def topic_policy(topic) do
     with :ok <- check_topic(topic),
          {:ok, name} <- broker_call(fn -> BrokerServer.topic_policy_name(DataPlaneRouter.shard_for(topic), topic) end),
+         {:ok, hold} <- broker_call(fn -> BrokerServer.legal_hold(DataPlaneRouter.shard_for(topic), topic) end),
          {:ok, policies} <- PolicyStore.fetch_all() do
       definition = if name, do: Map.get(policies, name)
       unresolved_backstop = Application.get_env(:malachi, :retention_unresolved_policy_max_age_ms)
@@ -169,7 +174,8 @@ defmodule Malachi.Policies do
          definition: definition,
          resolution: effective.resolution,
          retention: effective.retention,
-         spread_by: Policy.effective_spread_by(definition, Application.get_env(:malachi, :log_spread_by))
+         spread_by: Policy.effective_spread_by(definition, Application.get_env(:malachi, :log_spread_by)),
+         legal_hold: hold
        }}
     end
   end

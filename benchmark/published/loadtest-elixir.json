@@ -2,7 +2,7 @@
   "regime_label": "batch 10 x 256B (2.5KB of values per request, group commit off, segment preallocation 64MB)",
   "redirects": 0,
   "error_reasons": {},
-  "ops": 48181,
+  "ops": 56947,
   "curve": [
     {
       "batch": 10,
@@ -12,30 +12,30 @@
       "payload": "constant",
       "payload_seed": null,
       "peak": {
-        "connections": 64,
+        "connections": 256,
         "errors": 0,
         "flush_latency_error": null,
         "flush_latency_seconds": {
-          "bytes": 143322459,
-          "flushes": 47961,
-          "mean": 2.6332019766059925e-4,
-          "p50": 2.3156379758782018e-4,
-          "p99": 5.813540885524181e-4,
-          "p999": 0.0018042522899056998,
-          "records": 479610
+          "bytes": 169744265,
+          "flushes": 56795,
+          "mean": 2.1425680077471606e-4,
+          "p50": 1.8013403494052422e-4,
+          "p99": 5.836446725831545e-4,
+          "p999": 0.0026294349700579553,
+          "records": 567950
         },
-        "generator_cpu_cores": 0.44,
+        "generator_cpu_cores": 0.54,
         "latency_ms": {
-          "p50": 19.48,
-          "p99": 27.55,
-          "p99_9": 74.63,
-          "p99_99": 77.94
+          "p50": 65.54,
+          "p99": 115.1,
+          "p99_9": 162.77,
+          "p99_99": 162.77
         },
-        "records_per_s": 32121,
-        "records_per_s_max": 32121,
-        "records_per_s_min": 32121,
+        "records_per_s": 37965,
+        "records_per_s_max": 37965,
+        "records_per_s_min": 37965,
         "repetitions_completed": 1,
-        "server_cpu_cores": 1.3
+        "server_cpu_cores": 1.61
       },
       "peak_at_ladder_limit": false,
       "record_size": 256,
@@ -46,27 +46,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 135491213,
-            "flushes": 45366,
-            "mean": 2.8334990962394747e-4,
-            "p50": 2.3423619922234226e-4,
-            "p99": 7.366222994895283e-4,
-            "p999": 0.0026553616715863765,
-            "records": 453660
+            "bytes": 163434110,
+            "flushes": 54722,
+            "mean": 2.2500884470596835e-4,
+            "p50": 1.8505158866908254e-4,
+            "p99": 5.175083031359297e-4,
+            "p999": 0.00264648505861384,
+            "records": 547220
           },
-          "generator_cpu_cores": 0.41,
+          "generator_cpu_cores": 0.5,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 9.33,
-            "p99": 20.35,
-            "p99_9": 101.07,
-            "p99_99": 230.2
+            "p50": 7.84,
+            "p99": 18.66,
+            "p99_9": 81.39,
+            "p99_99": 202.14
           },
-          "records_per_s": 30286,
-          "records_per_s_max": 30286,
-          "records_per_s_min": 30286,
+          "records_per_s": 36583,
+          "records_per_s_max": 36583,
+          "records_per_s_min": 36583,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.22,
+          "server_cpu_cores": 1.49,
           "status": "clean"
         },
         {
@@ -74,27 +74,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 143322459,
-            "flushes": 47961,
-            "mean": 2.6332019766059925e-4,
-            "p50": 2.3156379758782018e-4,
-            "p99": 5.813540885524181e-4,
-            "p999": 0.0018042522899056998,
-            "records": 479610
+            "bytes": 168409322,
+            "flushes": 56356,
+            "mean": 2.1783006246007522e-4,
+            "p50": 1.90882882501427e-4,
+            "p99": 5.053670034435148e-4,
+            "p999": 0.0014444262901268617,
+            "records": 563560
           },
-          "generator_cpu_cores": 0.44,
+          "generator_cpu_cores": 0.51,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 19.48,
-            "p99": 27.55,
-            "p99_9": 74.63,
-            "p99_99": 77.94
+            "p50": 16.38,
+            "p99": 25.27,
+            "p99_9": 65.54,
+            "p99_99": 68.44
           },
-          "records_per_s": 32121,
-          "records_per_s_max": 32121,
-          "records_per_s_min": 32121,
+          "records_per_s": 37658,
+          "records_per_s_max": 37658,
+          "records_per_s_min": 37658,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.3,
+          "server_cpu_cores": 1.49,
           "status": "clean"
         },
         {
@@ -102,27 +102,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 141474919,
-            "flushes": 47343,
-            "mean": 2.6567562258412016e-4,
-            "p50": 2.322989442976105e-4,
-            "p99": 6.86424926907208e-4,
-            "p999": 0.0021271982559802425,
-            "records": 473430
+            "bytes": 168193272,
+            "flushes": 56284,
+            "mean": 2.1483974131191814e-4,
+            "p50": 1.834644578757506e-4,
+            "p99": 5.63560715068297e-4,
+            "p999": 0.002071120604901037,
+            "records": 562840
           },
-          "generator_cpu_cores": 0.45,
+          "generator_cpu_cores": 0.53,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 38.97,
+            "p50": 32.77,
             "p99": 65.54,
-            "p99_9": 105.55,
-            "p99_99": 110.22
+            "p99_9": 96.79,
+            "p99_99": 105.55
           },
-          "records_per_s": 31819,
-          "records_per_s_max": 31819,
-          "records_per_s_min": 31819,
+          "records_per_s": 37815,
+          "records_per_s_max": 37815,
+          "records_per_s_min": 37815,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.32,
+          "server_cpu_cores": 1.52,
           "status": "clean"
         },
         {
@@ -130,27 +130,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 142307782,
-            "flushes": 47615,
-            "mean": 2.641804473380237e-4,
-            "p50": 2.2848373757187166e-4,
-            "p99": 7.205880131819564e-4,
-            "p999": 0.00261274467900387,
-            "records": 476150
+            "bytes": 169744265,
+            "flushes": 56795,
+            "mean": 2.1425680077471606e-4,
+            "p50": 1.8013403494052422e-4,
+            "p99": 5.836446725831545e-4,
+            "p999": 0.0026294349700579553,
+            "records": 567950
           },
-          "generator_cpu_cores": 0.46,
+          "generator_cpu_cores": 0.54,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 77.94,
-            "p99": 136.88,
-            "p99_9": 202.14,
-            "p99_99": 211.09
+            "p50": 65.54,
+            "p99": 115.1,
+            "p99_9": 162.77,
+            "p99_99": 162.77
           },
-          "records_per_s": 31938,
-          "records_per_s_max": 31938,
-          "records_per_s_min": 31938,
+          "records_per_s": 37965,
+          "records_per_s_max": 37965,
+          "records_per_s_min": 37965,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.41,
+          "server_cpu_cores": 1.61,
           "status": "clean"
         },
         {
@@ -161,16 +161,16 @@
           "generator_cpu_cores": null,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 18295.68,
-            "p99": 18295.68,
-            "p99_9": 18295.68,
-            "p99_99": 18295.68
+            "p50": 17520.01,
+            "p99": 20834.92,
+            "p99_9": 20834.92,
+            "p99_99": 20834.92
           },
           "records_per_s": 385,
           "records_per_s_max": 385,
           "records_per_s_min": 385,
           "repetitions_completed": 1,
-          "server_cpu_cores": 2.22,
+          "server_cpu_cores": 2.69,
           "status": "clean"
         }
       ],
@@ -189,26 +189,26 @@
         "errors": 0,
         "flush_latency_error": null,
         "flush_latency_seconds": {
-          "bytes": 915061272,
-          "flushes": 30618,
-          "mean": 3.0082516820171136e-4,
-          "p50": 2.8362357373902644e-4,
-          "p99": 7.472506212289305e-4,
-          "p999": 0.002101551970904889,
-          "records": 3061800
+          "bytes": 1049460098,
+          "flushes": 35115,
+          "mean": 2.450989320803076e-4,
+          "p50": 2.1560972812409242e-4,
+          "p99": 6.721994017200496e-4,
+          "p999": 0.0011710870884415912,
+          "records": 3511500
         },
-        "generator_cpu_cores": 0.5,
+        "generator_cpu_cores": 0.57,
         "latency_ms": {
-          "p50": 6.89,
-          "p99": 11.59,
-          "p99_9": 57.55,
-          "p99_99": 60.1
+          "p50": 6.05,
+          "p99": 9.74,
+          "p99_9": 50.54,
+          "p99_99": 57.55
         },
-        "records_per_s": 205620,
-        "records_per_s_max": 205620,
-        "records_per_s_min": 205620,
+        "records_per_s": 235773,
+        "records_per_s_max": 235773,
+        "records_per_s_min": 235773,
         "repetitions_completed": 1,
-        "server_cpu_cores": 1.29
+        "server_cpu_cores": 1.44
       },
       "peak_at_ladder_limit": false,
       "record_size": 256,
@@ -219,27 +219,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 915061272,
-            "flushes": 30618,
-            "mean": 3.0082516820171136e-4,
-            "p50": 2.8362357373902644e-4,
-            "p99": 7.472506212289305e-4,
-            "p999": 0.002101551970904889,
-            "records": 3061800
+            "bytes": 1049460098,
+            "flushes": 35115,
+            "mean": 2.450989320803076e-4,
+            "p50": 2.1560972812409242e-4,
+            "p99": 6.721994017200496e-4,
+            "p999": 0.0011710870884415912,
+            "records": 3511500
           },
-          "generator_cpu_cores": 0.5,
+          "generator_cpu_cores": 0.57,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 6.89,
-            "p99": 11.59,
-            "p99_9": 57.55,
-            "p99_99": 60.1
+            "p50": 6.05,
+            "p99": 9.74,
+            "p99_9": 50.54,
+            "p99_99": 57.55
           },
-          "records_per_s": 205620,
-          "records_per_s_max": 205620,
-          "records_per_s_min": 205620,
+          "records_per_s": 235773,
+          "records_per_s_max": 235773,
+          "records_per_s_min": 235773,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.29,
+          "server_cpu_cores": 1.44,
           "status": "clean"
         },
         {
@@ -247,27 +247,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 906810576,
-            "flushes": 30341,
-            "mean": 3.0046135592103095e-4,
-            "p50": 2.820441964982433e-4,
-            "p99": 7.363731464643342e-4,
-            "p999": 0.0018207829556509956,
-            "records": 3034200
+            "bytes": 1016822104,
+            "flushes": 34023,
+            "mean": 2.5244852011874317e-4,
+            "p50": 2.1772351193133493e-4,
+            "p99": 7.120757848505721e-4,
+            "p999": 0.002237291879790039,
+            "records": 3402300
           },
-          "generator_cpu_cores": 0.51,
+          "generator_cpu_cores": 0.58,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 14.39,
-            "p99": 65.54,
-            "p99_9": 68.44,
-            "p99_99": 68.44
+            "p50": 12.63,
+            "p99": 55.11,
+            "p99_9": 60.1,
+            "p99_99": 62.76
           },
-          "records_per_s": 203240,
-          "records_per_s_max": 203240,
-          "records_per_s_min": 203240,
+          "records_per_s": 226980,
+          "records_per_s_max": 226980,
+          "records_per_s_min": 226980,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.31,
+          "server_cpu_cores": 1.52,
           "status": "clean"
         },
         {
@@ -275,27 +275,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 877870398,
-            "flushes": 29372,
-            "mean": 3.086641699577829e-4,
-            "p50": 2.8375883305097646e-4,
-            "p99": 8.553305875932188e-4,
-            "p999": 0.002418882273171421,
-            "records": 2937200
+            "bytes": 985795848,
+            "flushes": 32982,
+            "mean": 2.5510936268267545e-4,
+            "p50": 2.1465581106520625e-4,
+            "p99": 6.742894825231513e-4,
+            "p999": 0.0026151621197020103,
+            "records": 3298300
           },
-          "generator_cpu_cores": 0.51,
+          "generator_cpu_cores": 0.57,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 30.05,
-            "p99": 84.99,
-            "p99_9": 96.79,
+            "p50": 26.39,
+            "p99": 74.63,
+            "p99_9": 101.07,
             "p99_99": 105.55
           },
-          "records_per_s": 196613,
-          "records_per_s_max": 196613,
-          "records_per_s_min": 196613,
+          "records_per_s": 220633,
+          "records_per_s_max": 220633,
+          "records_per_s_min": 220633,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.34,
+          "server_cpu_cores": 1.51,
           "status": "clean"
         },
         {
@@ -303,27 +303,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 826008058,
-            "flushes": 27636,
-            "mean": 3.307579968157476e-4,
-            "p50": 2.9748736184268356e-4,
-            "p99": 0.0012436785914914658,
-            "p999": 0.0044917931483747404,
-            "records": 2763600
+            "bytes": 936178280,
+            "flushes": 31322,
+            "mean": 2.623819360194113e-4,
+            "p50": 2.182067096911303e-4,
+            "p99": 6.940209321320421e-4,
+            "p999": 0.004764481438860505,
+            "records": 3132200
           },
-          "generator_cpu_cores": 0.5,
+          "generator_cpu_cores": 0.58,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 65.54,
-            "p99": 125.52,
+            "p50": 57.55,
+            "p99": 110.22,
             "p99_9": 136.88,
-            "p99_99": 149.26
+            "p99_99": 155.87
           },
-          "records_per_s": 184673,
-          "records_per_s_max": 184673,
-          "records_per_s_min": 184673,
+          "records_per_s": 210613,
+          "records_per_s_max": 210613,
+          "records_per_s_min": 210613,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.31,
+          "server_cpu_cores": 1.55,
           "status": "clean"
         },
         {
@@ -331,27 +331,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 740824066,
-            "flushes": 24785,
-            "mean": 3.517550534597539e-4,
-            "p50": 3.059933200717225e-4,
-            "p99": 0.00113128800249115,
-            "p999": 0.01048141264301885,
-            "records": 2478600
+            "bytes": 859842642,
+            "flushes": 28768,
+            "mean": 2.8098439238042266e-4,
+            "p50": 2.2585601560982276e-4,
+            "p99": 7.697219291786847e-4,
+            "p999": 0.011641742633246733,
+            "records": 2876800
           },
-          "generator_cpu_cores": 0.49,
+          "generator_cpu_cores": 0.56,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 149.26,
-            "p99": 298.53,
-            "p99_9": 325.55,
-            "p99_99": 325.55
+            "p50": 125.52,
+            "p99": 240.39,
+            "p99_9": 273.75,
+            "p99_99": 285.87
           },
-          "records_per_s": 167207,
-          "records_per_s_max": 167207,
-          "records_per_s_min": 167207,
+          "records_per_s": 193287,
+          "records_per_s_max": 193287,
+          "records_per_s_min": 193287,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.37,
+          "server_cpu_cores": 1.59,
           "status": "clean"
         }
       ],
@@ -370,26 +370,26 @@
         "errors": 0,
         "flush_latency_error": null,
         "flush_latency_seconds": {
-          "bytes": 1735092438,
-          "flushes": 11339,
-          "mean": 4.963431519534351e-4,
-          "p50": 4.5822556573469844e-4,
-          "p99": 0.0014290700655445636,
-          "p999": 0.0033514253200561503,
-          "records": 5805568
+          "bytes": 1915043674,
+          "flushes": 12515,
+          "mean": 3.897487015581302e-4,
+          "p50": 3.5804161025692493e-4,
+          "p99": 9.670658198306168e-4,
+          "p999": 0.0018011730627680975,
+          "records": 6407680
         },
-        "generator_cpu_cores": 0.58,
+        "generator_cpu_cores": 0.63,
         "latency_ms": {
-          "p50": 8.55,
-          "p99": 57.55,
-          "p99_9": 62.76,
-          "p99_99": 71.47
+          "p50": 7.84,
+          "p99": 48.39,
+          "p99_9": 52.77,
+          "p99_99": 55.11
         },
-        "records_per_s": 388506,
-        "records_per_s_max": 388506,
-        "records_per_s_min": 388506,
+        "records_per_s": 429773,
+        "records_per_s_max": 429773,
+        "records_per_s_min": 429773,
         "repetitions_completed": 1,
-        "server_cpu_cores": 1.43
+        "server_cpu_cores": 1.57
       },
       "peak_at_ladder_limit": false,
       "record_size": 256,
@@ -400,27 +400,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1735092438,
-            "flushes": 11339,
-            "mean": 4.963431519534351e-4,
-            "p50": 4.5822556573469844e-4,
-            "p99": 0.0014290700655445636,
-            "p999": 0.0033514253200561503,
-            "records": 5805568
+            "bytes": 1915043674,
+            "flushes": 12515,
+            "mean": 3.897487015581302e-4,
+            "p50": 3.5804161025692493e-4,
+            "p99": 9.670658198306168e-4,
+            "p999": 0.0018011730627680975,
+            "records": 6407680
           },
-          "generator_cpu_cores": 0.58,
+          "generator_cpu_cores": 0.63,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 8.55,
-            "p99": 57.55,
-            "p99_9": 62.76,
-            "p99_99": 71.47
+            "p50": 7.84,
+            "p99": 48.39,
+            "p99_9": 52.77,
+            "p99_99": 55.11
           },
-          "records_per_s": 388506,
-          "records_per_s_max": 388506,
-          "records_per_s_min": 388506,
+          "records_per_s": 429773,
+          "records_per_s_max": 429773,
+          "records_per_s_min": 429773,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.43,
+          "server_cpu_cores": 1.57,
           "status": "clean"
         },
         {
@@ -428,27 +428,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1673800813,
-            "flushes": 10938,
-            "mean": 5.116634668129457e-4,
-            "p50": 4.612763176432924e-4,
-            "p99": 0.0017578999733623007,
-            "p999": 0.0034121850796299306,
-            "records": 5600256
+            "bytes": 1808004972,
+            "flushes": 11815,
+            "mean": 4.165555649597968e-4,
+            "p50": 3.6365835532506884e-4,
+            "p99": 0.0012292684158681543,
+            "p999": 0.003780202719471025,
+            "records": 6049280
           },
-          "generator_cpu_cores": 0.58,
+          "generator_cpu_cores": 0.61,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 18.66,
-            "p99": 71.47,
-            "p99_9": 74.63,
-            "p99_99": 84.99
+            "p50": 17.11,
+            "p99": 60.1,
+            "p99_9": 65.54,
+            "p99_99": 101.07
           },
-          "records_per_s": 374989,
-          "records_per_s_max": 374989,
-          "records_per_s_min": 374989,
+          "records_per_s": 405470,
+          "records_per_s_max": 405470,
+          "records_per_s_min": 405470,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.48,
+          "server_cpu_cores": 1.58,
           "status": "clean"
         },
         {
@@ -456,27 +456,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1475970308,
-            "flushes": 9645,
-            "mean": 5.236077760497668e-4,
-            "p50": 4.711697858886969e-4,
-            "p99": 0.0016297909477153466,
-            "p999": 0.005489403663106959,
-            "records": 4938240
+            "bytes": 1650117593,
+            "flushes": 10783,
+            "mean": 4.0708207363442453e-4,
+            "p50": 3.575308849412871e-4,
+            "p99": 0.0010794709193368676,
+            "p999": 0.006197592481582105,
+            "records": 5520896
           },
-          "generator_cpu_cores": 0.54,
+          "generator_cpu_cores": 0.57,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 44.38,
-            "p99": 105.55,
-            "p99_9": 120.19,
-            "p99_99": 136.88
+            "p50": 38.97,
+            "p99": 88.75,
+            "p99_9": 96.79,
+            "p99_99": 101.07
           },
-          "records_per_s": 331776,
-          "records_per_s_max": 331776,
-          "records_per_s_min": 331776,
+          "records_per_s": 369084,
+          "records_per_s_max": 369084,
+          "records_per_s_min": 369084,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.47,
+          "server_cpu_cores": 1.57,
           "status": "clean"
         },
         {
@@ -484,27 +484,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1436657364,
-            "flushes": 9388,
-            "mean": 5.273027268853857e-4,
-            "p50": 4.6548736149261655e-4,
-            "p99": 0.0016802641239169777,
-            "p999": 0.010704899957628659,
-            "records": 4806656
+            "bytes": 1525566925,
+            "flushes": 9969,
+            "mean": 4.156678703982345e-4,
+            "p50": 3.5374968879180174e-4,
+            "p99": 0.0011715253281593767,
+            "p999": 0.011598827961021022,
+            "records": 5104128
           },
-          "generator_cpu_cores": 0.55,
+          "generator_cpu_cores": 0.56,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 92.68,
-            "p99": 169.98,
-            "p99_9": 211.09,
-            "p99_99": 211.09
+            "p50": 88.75,
+            "p99": 177.5,
+            "p99_9": 193.57,
+            "p99_99": 202.14
           },
-          "records_per_s": 322799,
-          "records_per_s_max": 322799,
-          "records_per_s_min": 322799,
+          "records_per_s": 342562,
+          "records_per_s_max": 342562,
+          "records_per_s_min": 342562,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.49,
+          "server_cpu_cores": 1.58,
           "status": "clean"
         },
         {
@@ -512,27 +512,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1278421384,
-            "flushes": 8354,
-            "mean": 5.693343308594685e-4,
-            "p50": 4.8218082428405526e-4,
-            "p99": 0.001953244523634232,
-            "p999": 0.009193290107223072,
-            "records": 4277248
+            "bytes": 1392737588,
+            "flushes": 9101,
+            "mean": 4.3954005054389625e-4,
+            "p50": 3.5902715915700153e-4,
+            "p99": 0.0013629543334821234,
+            "p999": 0.011538695369334467,
+            "records": 4659712
           },
-          "generator_cpu_cores": 0.57,
+          "generator_cpu_cores": 0.6,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 202.14,
-            "p99": 404.28,
-            "p99_9": 440.87,
-            "p99_99": 440.87
+            "p50": 193.57,
+            "p99": 370.73,
+            "p99_9": 422.18,
+            "p99_99": 422.18
           },
-          "records_per_s": 286925,
-          "records_per_s_max": 286925,
-          "records_per_s_min": 286925,
+          "records_per_s": 313310,
+          "records_per_s_max": 313310,
+          "records_per_s_min": 313310,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.52,
+          "server_cpu_cores": 1.58,
           "status": "clean"
         }
       ],
@@ -551,26 +551,26 @@
         "errors": 0,
         "flush_latency_error": null,
         "flush_latency_seconds": {
-          "bytes": 1770513801,
-          "flushes": 5785,
-          "mean": 6.990134831460676e-4,
-          "p50": 5.865201623507941e-4,
-          "p99": 0.002420866214029196,
-          "p999": 0.004010737449625046,
-          "records": 5923840
+          "bytes": 1897525485,
+          "flushes": 6200,
+          "mean": 5.852596774193549e-4,
+          "p50": 4.710544320531291e-4,
+          "p99": 0.002208669144291091,
+          "p999": 0.003809257155426878,
+          "records": 6348800
         },
-        "generator_cpu_cores": 0.61,
+        "generator_cpu_cores": 0.63,
         "latency_ms": {
-          "p50": 17.11,
-          "p99": 71.47,
-          "p99_9": 77.94,
-          "p99_99": 88.75
+          "p50": 15.69,
+          "p99": 60.1,
+          "p99_9": 65.54,
+          "p99_99": 68.44
         },
-        "records_per_s": 395742,
-        "records_per_s_max": 395742,
-        "records_per_s_min": 395742,
+        "records_per_s": 426257,
+        "records_per_s_max": 426257,
+        "records_per_s_min": 426257,
         "repetitions_completed": 1,
-        "server_cpu_cores": 1.74
+        "server_cpu_cores": 1.82
       },
       "peak_at_ladder_limit": false,
       "record_size": 256,
@@ -581,27 +581,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1770513801,
-            "flushes": 5785,
-            "mean": 6.990134831460676e-4,
-            "p50": 5.865201623507941e-4,
-            "p99": 0.002420866214029196,
-            "p999": 0.004010737449625046,
-            "records": 5923840
+            "bytes": 1897525485,
+            "flushes": 6200,
+            "mean": 5.852596774193549e-4,
+            "p50": 4.710544320531291e-4,
+            "p99": 0.002208669144291091,
+            "p999": 0.003809257155426878,
+            "records": 6348800
           },
-          "generator_cpu_cores": 0.61,
+          "generator_cpu_cores": 0.63,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 17.11,
-            "p99": 71.47,
-            "p99_9": 77.94,
-            "p99_99": 88.75
+            "p50": 15.69,
+            "p99": 60.1,
+            "p99_9": 65.54,
+            "p99_99": 68.44
           },
-          "records_per_s": 395742,
-          "records_per_s_max": 395742,
-          "records_per_s_min": 395742,
+          "records_per_s": 426257,
+          "records_per_s_max": 426257,
+          "records_per_s_min": 426257,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.74,
+          "server_cpu_cores": 1.82,
           "status": "clean"
         },
         {
@@ -609,27 +609,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1677510714,
-            "flushes": 5481,
-            "mean": 6.892607188469258e-4,
-            "p50": 5.749055130714125e-4,
-            "p99": 0.0024422311337410013,
-            "p999": 0.006482827700144978,
-            "records": 5612544
+            "bytes": 1749434628,
+            "flushes": 5716,
+            "mean": 5.860314905528342e-4,
+            "p50": 4.7273429426714536e-4,
+            "p99": 0.002283497673275543,
+            "p999": 0.006074072753889171,
+            "records": 5853184
           },
-          "generator_cpu_cores": 0.59,
+          "generator_cpu_cores": 0.6,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 37.32,
-            "p99": 92.68,
-            "p99_9": 105.55,
-            "p99_99": 110.22
+            "p50": 35.73,
+            "p99": 84.99,
+            "p99_9": 96.79,
+            "p99_99": 96.79
           },
-          "records_per_s": 376900,
-          "records_per_s_max": 376900,
-          "records_per_s_min": 376900,
+          "records_per_s": 392329,
+          "records_per_s_max": 392329,
+          "records_per_s_min": 392329,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.72,
+          "server_cpu_cores": 1.8,
           "status": "clean"
         },
         {
@@ -637,27 +637,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1519294836,
-            "flushes": 4964,
-            "mean": 7.206212731668009e-4,
-            "p50": 5.957713452854619e-4,
-            "p99": 0.0024192014607229556,
-            "p999": 0.010696789645234843,
-            "records": 5083136
+            "bytes": 1312396431,
+            "flushes": 4288,
+            "mean": 6.036466884328358e-4,
+            "p50": 4.7518208904967225e-4,
+            "p99": 0.002566199553084597,
+            "p999": 0.008743794548252758,
+            "records": 4390912
           },
-          "generator_cpu_cores": 0.56,
+          "generator_cpu_cores": 0.47,
           "generator_saturated": false,
           "latency_ms": {
             "p50": 84.99,
-            "p99": 149.26,
-            "p99_9": 193.57,
-            "p99_99": 211.09
+            "p99": 162.77,
+            "p99_9": 1923.1,
+            "p99_99": 2190.0
           },
-          "records_per_s": 339217,
-          "records_per_s_max": 339217,
-          "records_per_s_min": 339217,
+          "records_per_s": 293956,
+          "records_per_s_max": 293956,
+          "records_per_s_min": 293956,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.69,
+          "server_cpu_cores": 1.92,
           "status": "clean"
         },
         {
@@ -665,27 +665,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 980624433,
-            "flushes": 3204,
-            "mean": 8.054328963795255e-4,
-            "p50": 5.875423610094212e-4,
-            "p99": 0.003929819487804203,
-            "p999": 0.024042894733014068,
-            "records": 3280896
+            "bytes": 1428088117,
+            "flushes": 4666,
+            "mean": 6.743701243034719e-4,
+            "p50": 4.963478439143311e-4,
+            "p99": 0.0035066875954064968,
+            "p999": 0.02009961581303488,
+            "records": 4777984
           },
-          "generator_cpu_cores": 0.36,
+          "generator_cpu_cores": 0.56,
           "generator_saturated": false,
           "latency_ms": {
             "p50": 185.36,
-            "p99": 325.55,
-            "p99_9": 4380.0,
-            "p99_99": 4380.0
+            "p99": 355.01,
+            "p99_9": 460.39,
+            "p99_99": 480.77
           },
-          "records_per_s": 220160,
-          "records_per_s_max": 220160,
-          "records_per_s_min": 220160,
+          "records_per_s": 321331,
+          "records_per_s_max": 321331,
+          "records_per_s_min": 321331,
           "repetitions_completed": 1,
-          "server_cpu_cores": 2.02,
+          "server_cpu_cores": 1.73,
           "status": "clean"
         },
         {
@@ -693,27 +693,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1297399828,
-            "flushes": 4239,
-            "mean": 8.155480066053314e-4,
-            "p50": 5.873164831796819e-4,
-            "p99": 0.004235886117920719,
-            "p999": 0.011438391695217626,
-            "records": 4340736
+            "bytes": 1320660819,
+            "flushes": 4315,
+            "mean": 6.692477404403245e-4,
+            "p50": 4.4879181493648476e-4,
+            "p99": 0.0042011775322712405,
+            "p999": 0.01308676391768245,
+            "records": 4418560
           },
-          "generator_cpu_cores": 0.64,
+          "generator_cpu_cores": 0.63,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 355.01,
-            "p99": 679.92,
-            "p99_9": 710.02,
-            "p99_99": 710.02
+            "p50": 339.96,
+            "p99": 881.74,
+            "p99_9": 881.74,
+            "p99_99": 881.74
           },
-          "records_per_s": 292250,
-          "records_per_s_max": 292250,
-          "records_per_s_min": 292250,
+          "records_per_s": 295663,
+          "records_per_s_max": 295663,
+          "records_per_s_min": 295663,
           "repetitions_completed": 1,
-          "server_cpu_cores": 1.67,
+          "server_cpu_cores": 1.76,
           "status": "clean"
         }
       ],
@@ -732,26 +732,26 @@
         "errors": 0,
         "flush_latency_error": null,
         "flush_latency_seconds": {
-          "bytes": 1194855315,
-          "flushes": 976,
-          "mean": 0.002548926229508197,
-          "p50": 0.002223295887118711,
-          "p99": 0.007416490943086267,
-          "p999": 0.010685730128333642,
-          "records": 3997696
+          "bytes": 1220564415,
+          "flushes": 997,
+          "mean": 0.0024054112337011037,
+          "p50": 0.0019999709502324277,
+          "p99": 0.006826086696004905,
+          "p999": 0.02757013425382884,
+          "records": 4083712
         },
-        "generator_cpu_cores": 0.63,
+        "generator_cpu_cores": 0.61,
         "latency_ms": {
           "p50": 46.34,
-          "p99": 115.1,
+          "p99": 110.22,
           "p99_9": 131.07,
-          "p99_99": 136.88
+          "p99_99": 142.94
         },
-        "records_per_s": 269244,
-        "records_per_s_max": 269244,
-        "records_per_s_min": 269244,
+        "records_per_s": 274978,
+        "records_per_s_max": 274978,
+        "records_per_s_min": 274978,
         "repetitions_completed": 1,
-        "server_cpu_cores": 2.33
+        "server_cpu_cores": 2.43
       },
       "peak_at_ladder_limit": false,
       "record_size": 256,
@@ -762,27 +762,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1194855315,
-            "flushes": 976,
-            "mean": 0.002548926229508197,
-            "p50": 0.002223295887118711,
-            "p99": 0.007416490943086267,
-            "p999": 0.010685730128333642,
-            "records": 3997696
+            "bytes": 1220564415,
+            "flushes": 997,
+            "mean": 0.0024054112337011037,
+            "p50": 0.0019999709502324277,
+            "p99": 0.006826086696004905,
+            "p999": 0.02757013425382884,
+            "records": 4083712
           },
-          "generator_cpu_cores": 0.63,
+          "generator_cpu_cores": 0.61,
           "generator_saturated": false,
           "latency_ms": {
             "p50": 46.34,
-            "p99": 115.1,
+            "p99": 110.22,
             "p99_9": 131.07,
-            "p99_99": 136.88
+            "p99_99": 142.94
           },
-          "records_per_s": 269244,
-          "records_per_s_max": 269244,
-          "records_per_s_min": 269244,
+          "records_per_s": 274978,
+          "records_per_s_max": 274978,
+          "records_per_s_min": 274978,
           "repetitions_completed": 1,
-          "server_cpu_cores": 2.33,
+          "server_cpu_cores": 2.43,
           "status": "clean"
         },
         {
@@ -790,27 +790,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1167934791,
-            "flushes": 954,
-            "mean": 0.002655571278825996,
-            "p50": 0.0020834958325061594,
-            "p99": 0.011386166198739734,
-            "p999": 0.021998166214399095,
-            "records": 3907584
+            "bytes": 1147122732,
+            "flushes": 937,
+            "mean": 0.002568833511205976,
+            "p50": 0.001956812273817054,
+            "p99": 0.014324665025338315,
+            "p999": 0.03943243845425731,
+            "records": 3837952
           },
-          "generator_cpu_cores": 0.61,
+          "generator_cpu_cores": 0.59,
           "generator_saturated": false,
           "latency_ms": {
             "p50": 101.07,
             "p99": 193.57,
-            "p99_9": 220.44,
-            "p99_99": 220.44
+            "p99_9": 325.55,
+            "p99_99": 339.96
           },
-          "records_per_s": 262690,
-          "records_per_s_max": 262690,
-          "records_per_s_min": 262690,
+          "records_per_s": 258594,
+          "records_per_s_max": 258594,
+          "records_per_s_min": 258594,
           "repetitions_completed": 1,
-          "server_cpu_cores": 2.3,
+          "server_cpu_cores": 2.39,
           "status": "clean"
         },
         {
@@ -818,27 +818,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1105498458,
-            "flushes": 903,
-            "mean": 0.0023472480620155035,
-            "p50": 0.001987521352513412,
-            "p99": 0.007751024261754941,
-            "p999": 0.023595724822644656,
-            "records": 3698688
+            "bytes": 1096928511,
+            "flushes": 896,
+            "mean": 0.0022654296875000003,
+            "p50": 0.001795931890491017,
+            "p99": 0.008780994180718864,
+            "p999": 0.02809669838659043,
+            "records": 3670016
           },
-          "generator_cpu_cores": 0.62,
+          "generator_cpu_cores": 0.56,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 220.44,
-            "p99": 370.73,
-            "p99_9": 404.28,
-            "p99_99": 404.28
+            "p50": 230.2,
+            "p99": 355.01,
+            "p99_9": 387.14,
+            "p99_99": 387.14
           },
-          "records_per_s": 249037,
-          "records_per_s_max": 249037,
-          "records_per_s_min": 249037,
+          "records_per_s": 245760,
+          "records_per_s_max": 245760,
+          "records_per_s_min": 245760,
           "repetitions_completed": 1,
-          "server_cpu_cores": 2.16,
+          "server_cpu_cores": 2.19,
           "status": "clean"
         },
         {
@@ -846,27 +846,27 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1105498424,
-            "flushes": 903,
-            "mean": 0.0024278903654485046,
-            "p50": 0.0019078391008729193,
-            "p99": 0.009292489127132632,
-            "p999": 0.014030101921367671,
-            "records": 3698688
+            "bytes": 1046735033,
+            "flushes": 855,
+            "mean": 0.002582437426900585,
+            "p50": 0.0016815200916178508,
+            "p99": 0.017902984992380272,
+            "p999": 0.06733398223587843,
+            "records": 3502080
           },
-          "generator_cpu_cores": 0.56,
+          "generator_cpu_cores": 0.54,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 460.39,
-            "p99": 774.28,
-            "p99_9": 808.56,
+            "p50": 480.77,
+            "p99": 808.56,
+            "p99_9": 844.36,
             "p99_99": 844.36
           },
-          "records_per_s": 247671,
-          "records_per_s_max": 247671,
-          "records_per_s_min": 247671,
+          "records_per_s": 235383,
+          "records_per_s_max": 235383,
+          "records_per_s_min": 235383,
           "repetitions_completed": 1,
-          "server_cpu_cores": 2.12,
+          "server_cpu_cores": 2.14,
           "status": "clean"
         },
         {
@@ -874,25 +874,25 @@
           "errors": 0,
           "flush_latency_error": null,
           "flush_latency_seconds": {
-            "bytes": 1052856918,
-            "flushes": 860,
-            "mean": 0.0028820581395348835,
-            "p50": 0.0020033903853816128,
-            "p99": 0.013448445462833377,
-            "p999": 0.05656876922425785,
-            "records": 3522560
+            "bytes": 968383369,
+            "flushes": 791,
+            "mean": 0.0027531984829329958,
+            "p50": 0.001569037557238972,
+            "p99": 0.021493114942579973,
+            "p999": 0.06812757439516236,
+            "records": 3239936
           },
           "generator_cpu_cores": 0.62,
           "generator_saturated": false,
           "latency_ms": {
-            "p50": 961.55,
-            "p99": 1763.49,
-            "p99_9": 1841.56,
-            "p99_99": 1841.56
+            "p50": 881.74,
+            "p99": 1548.56,
+            "p99_9": 1617.13,
+            "p99_99": 1617.13
           },
-          "records_per_s": 236749,
-          "records_per_s_max": 236749,
-          "records_per_s_min": 236749,
+          "records_per_s": 223915,
+          "records_per_s_max": 223915,
+          "records_per_s_min": 223915,
           "repetitions_completed": 1,
           "server_cpu_cores": 2.23,
           "status": "clean"
@@ -903,40 +903,40 @@
     }
   ],
   "latency_ms": {
-    "p50": 19.48,
-    "p99": 27.55,
-    "p99_9": 74.63,
-    "p99_99": 77.94
+    "p50": 65.54,
+    "p99": 115.1,
+    "p99_9": 162.77,
+    "p99_99": 162.77
   },
   "headline_status": "peak",
-  "route_refreshes": 128,
+  "route_refreshes": 512,
   "record_size": 256,
   "rate_limited": 0,
   "linger_bytes": 2820,
   "lower_bound_reasons": [],
-  "records": 481810,
+  "records": 569470,
   "meta": {
-    "command": "mix malachi.loadtest --scenario=produce --connections=64 --duration=15 --warmup=3 --batch=10 --record-size=256 --keys=1000 --pipeline=1 --max=100 --window=100 --prepopulate=0 --topics=1 --topic=loadtest_1794624534623 --host=127.0.0.1 --port=4040 --connect-strategy=bounded --connect-concurrency=32 --linger-ms=0 --linger-bytes=2820 --user=admin --json",
-    "git_ref": "eaeda6f",
-    "git_ref_date": "2026-11-13T23:43:41-03:00",
+    "command": "mix malachi.loadtest --scenario=produce --connections=256 --duration=15 --warmup=3 --batch=10 --record-size=256 --keys=1000 --pipeline=1 --max=100 --window=100 --prepopulate=0 --topics=1 --topic=loadtest_1794678313889 --host=127.0.0.1 --port=4040 --connect-strategy=bounded --connect-concurrency=32 --linger-ms=0 --linger-bytes=2820 --user=admin --json",
+    "git_ref": "6b689d0",
+    "git_ref_date": "2026-11-14T14:35:27-03:00",
     "hardware": {
       "cores": 1,
       "cpu": "x86_64-pc-linux-gnu",
       "os": "linux 7.0.0",
       "schedulers": 1
     },
-    "malachi_version": "0.25.0",
-    "timestamp": "2026-11-14T02:49:17.688239Z"
+    "malachi_version": "0.26.2",
+    "timestamp": "2026-11-14T17:45:51.890481Z"
   },
   "pipeline": 1,
   "dropped": 0,
-  "ops_per_s": 3212,
-  "connections": 64,
-  "mb_per_s": 7.84,
+  "ops_per_s": 3796,
+  "connections": 256,
+  "mb_per_s": 9.27,
   "payload_seed": null,
   "linger_ms": 0,
-  "moved": 128,
-  "records_per_s": 32121,
+  "moved": 768,
+  "records_per_s": 37965,
   "flush_latency_error": null,
   "segment_prealloc_bytes": 67108864,
   "peak_at_ladder_limit": false,
@@ -944,17 +944,17 @@
   "generator_cpu_budget": 1,
   "server_cpu_budget": 3,
   "payload_pool_values": null,
-  "server_cpu_cores": 1.3,
+  "server_cpu_cores": 1.61,
   "scenario": "produce",
   "payload": "constant",
   "sweep": {
     "aa_control": {
       "batch": 10,
-      "connections": 64,
-      "delta_pct": -4.7,
-      "first_records_per_s": 32121,
+      "connections": 256,
+      "delta_pct": -3.4,
+      "first_records_per_s": 37965,
       "repeat_errors": 0,
-      "repeat_records_per_s": 30600
+      "repeat_records_per_s": 36681
     },
     "aa_control_reason": null,
     "batch_ladder": [
@@ -1014,15 +1014,15 @@
   },
   "duration_s": 15,
   "flush_latency_seconds": {
-    "bytes": 143322459,
-    "flushes": 47961,
-    "mean": 2.6332019766059925e-4,
-    "p50": 2.3156379758782018e-4,
-    "p99": 5.813540885524181e-4,
-    "p999": 0.0018042522899056998,
-    "records": 479610
+    "bytes": 169744265,
+    "flushes": 56795,
+    "mean": 2.1425680077471606e-4,
+    "p50": 1.8013403494052422e-4,
+    "p99": 5.836446725831545e-4,
+    "p999": 0.0026294349700579553,
+    "records": 567950
   },
-  "generator_cpu_cores": 0.44,
+  "generator_cpu_cores": 0.54,
   "group_commit": false,
   "overloaded": 0,
   "batch": 10,

@@ -1,7 +1,7 @@
 defmodule Malachi.MixProject do
   use Mix.Project
 
-  @version "0.26.0"
+  @version "0.27.0"
   @source_url "https://github.com/malachi-hq/malachi"
   # Where the published site lives. Once the site's staging task is wired into the docs build (see Malachi.Site),
   # its sitemap and robots.txt will be built from this value, so a custom domain will change this one line.
@@ -145,6 +145,7 @@ defmodule Malachi.MixProject do
       "docs/guides/per-topic-retention.md": [title: "Per-topic retention"],
       "docs/guides/purging-a-topic.md": [title: "Purging a topic"],
       "docs/guides/data-subject-requests.md": [title: "Data subject requests"],
+      "docs/guides/legal-hold.md": [title: "Legal hold"],
       "docs/guides/clustering-and-resharding.md": [title: "Clustering and re-sharding"],
       "docs/guides/operations.md": [title: "Operations"],
       "README.md": [title: "Overview"],
@@ -194,6 +195,7 @@ defmodule Malachi.MixProject do
         "docs/guides/per-topic-retention.md",
         "docs/guides/purging-a-topic.md",
         "docs/guides/data-subject-requests.md",
+        "docs/guides/legal-hold.md",
         "docs/guides/clustering-and-resharding.md",
         "docs/guides/operations.md",
         "README.md"

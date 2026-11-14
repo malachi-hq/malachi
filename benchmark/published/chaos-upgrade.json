@@ -1,10 +1,10 @@
 {
   "meta": {
-    "timestamp": "2026-11-13T12:04:40Z",
+    "timestamp": "2026-11-14T11:27:08Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "a4e29a1",
-    "git_ref_date": "2026-11-13T03:31:48Z",
-    "malachi_version": "0.23.5",
+    "git_ref": "35dc082",
+    "git_ref_date": "2026-11-14T04:48:14Z",
+    "malachi_version": "0.26.1",
     "hardware": {
       "cpu": "x86_64",
       "cores": 4,
@@ -15,27 +15,27 @@
   "verdict": "passed",
   "replication_factor": 3,
   "events": [
-    "p1: rolling every node from OLD to NEW (pin 8)",
+    "p1: rolling every node from OLD to NEW (pin 9)",
     "p1: mixed cluster (node 3 on NEW, nodes 1 and 2 on OLD)",
     "p1: splitting the metadata ring from 4 to 5 vnodes on NEW",
-    "p2: rolling every node from NEW back to OLD (pin 8)",
-    "p3: rolling every node from OLD to NEW (pin 8)",
+    "p2: rolling every node from NEW back to OLD (pin 9)",
+    "p3: rolling every node from OLD to NEW (pin 9)",
     "p3: finalizing: the pin removed node by node",
     "p3: switching the canary flag on",
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 66495,
-    "post_chaos_records_per_s": 18017
+    "acked_writes": 60388,
+    "post_chaos_records_per_s": 1057
   },
   "failures": [],
   "evidence_dir": null,
   "details": {
-    "old_ref": "v0.23.4",
-    "old_rule": "the newest release whose code differs from this tree, which is release v0.23.5's",
-    "old_sha": "f6f5452d2db49e49936170f40f6a6dfe0e7b37e6",
-    "old_version": "0.23.4",
-    "old_machine_version": 8,
+    "old_ref": "v0.25.0",
+    "old_rule": "the newest release whose code differs from this tree, which is release v0.26.1's",
+    "old_sha": "a4de9a1f9a222e003f1220a5720777d4d5f89975",
+    "old_version": "0.25.0",
+    "old_machine_version": 9,
     "data_ref": null,
     "data_rule": null,
     "data_sha": null,
@@ -45,12 +45,12 @@
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 20527,
-      "phase2": 13760,
-      "phase3": 32208
+      "phase1": 18863,
+      "phase2": 11806,
+      "phase3": 29719
     },
     "vnodes": 4,
-    "vnode_rule": "sharded: v0.23.4 resumes its vnode members after a restart",
+    "vnode_rule": "sharded: v0.25.0 resumes its vnode members after a restart",
     "vnodes_after_split": 5
   },
   "skip_reason": null

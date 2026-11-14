@@ -39,7 +39,7 @@ defmodule Malachi.Metrics do
   @retention_groups_table :malachi_retention_groups
   @default_retention_max_groups 1000
   # Every refusal a delete can get, so each has a series at zero from boot (`Retention.reply_label/1`).
-  @retention_failure_replies [:migrating, :segment_active, :other]
+  @retention_failure_replies [:migrating, :segment_active, :legal_hold, :other]
 
   @doc "Starts the metrics server (owns the ETS counter table)."
   def start_link(_) do
@@ -259,6 +259,40 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
+  The refusals the expire-failure counter keeps apart, by `Malachi.Cluster.Retention.reply_label/1`; any
+  other reply counts as `:other`. The exporter lists every one, zero included.
+  """
+  @spec retention_failure_replies() :: [atom()]
+  def retention_failure_replies, do: @retention_failure_replies
+
+  @doc """
+  Replaces what legal holds kept from `reporter`'s latest retention sweep with `held` (topic to `segments`
+  and `bytes`). A gauge, not a counter, kept per reporter: a node runs one retention coordinator per vnode it
+  leads (or one for the node when the control plane is not sharded), each sweeping only its own topics, so
+  each replaces only the rows it reported. A topic missing from `held` (released, or a coordinator that no
+  longer leads its vnode) is dropped from that reporter's rows; the new values are written before the stale
+  ones are dropped, so a scrape in between sees no held topic vanish and return.
+
+  A reporter that stops (its vnode moved to another node) never reports again, so the first report of a
+  reporter has this server monitor it, and its rows go when it does.
+  """
+  @spec record_retention_held(pid(), %{String.t() => %{segments: non_neg_integer(), bytes: non_neg_integer()}}) ::
+          :ok
+  def record_retention_held(reporter, held) when is_pid(reporter) and is_map(held) do
+    rows = for {topic, %{segments: n, bytes: b}} <- held, do: {{:retention_held, reporter, topic}, n, b}
+    :ets.insert(@metrics_table, rows)
+
+    for [topic] <- :ets.match(@metrics_table, {{:retention_held, reporter, :"$1"}, :_, :_}),
+        not Map.has_key?(held, topic),
+        do: :ets.delete(@metrics_table, {:retention_held, reporter, topic})
+
+    if :ets.insert_new(@metrics_table, {{:retention_held_reporter, reporter}}),
+      do: GenServer.cast(__MODULE__, {:watch_held_reporter, reporter})
+
+    :ok
+  end
+
+  @doc """
   Records `count` replica directories the orphan sweeper reclaimed (from the retention orphan
   telemetry event). Unlabeled: a reclaimed directory is named by the sweeper's log line, and the
   segment it belonged to is exactly what the control plane no longer knows.
@@ -292,6 +326,7 @@ defmodule Malachi.Metrics do
           orphans_left: [map()],
           orphans_removed: non_neg_integer(),
           unresolved_policies: [map()],
+          held: [map()],
           failures: %{atom() => non_neg_integer()},
           sweeps: map()
         }
@@ -329,12 +364,25 @@ defmodule Malachi.Metrics do
         %{topic: topic, sweeps: sweeps}
       end
 
+    # One row per topic. A topic belongs to one vnode, so one reporter names it; two do only while a vnode
+    # split moves it between two vnodes this node leads, and then the larger report is the one that stands,
+    # rather than a sum that would count the same disk twice.
+    held =
+      @metrics_table
+      |> :ets.match({{:retention_held, :_, :"$1"}, :"$2", :"$3"})
+      |> Enum.group_by(&hd/1)
+      |> Enum.map(fn {topic, rows} ->
+        [_topic, segments, bytes] = Enum.max_by(rows, &List.last/1)
+        %{topic: topic, segments: segments, bytes: bytes}
+      end)
+
     %{
       skips: Enum.sort(skips),
       expired: Enum.sort(expired),
       orphans_left: Enum.sort(orphans_left),
       orphans_removed: get_counter(:retention_orphan_removed),
       unresolved_policies: Enum.sort(unresolved_policies),
+      held: Enum.sort(held),
       failures: Map.new(@retention_failure_replies, &{&1, get_counter({:retention_expire_failure, &1})}),
       sweeps: histogram_snapshot(:persistent_term.get(@retention_sweep_key, nil))
     }
@@ -792,6 +840,18 @@ defmodule Malachi.Metrics do
   end
 
   @impl true
+  def handle_cast({:watch_held_reporter, reporter}, state) do
+    _ref = Process.monitor(reporter)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:DOWN, _ref, :process, reporter, _reason}, state) do
+    :ets.match_delete(@metrics_table, {{:retention_held, reporter, :_}, :_, :_})
+    :ets.delete(@metrics_table, {:retention_held_reporter, reporter})
+    {:noreply, state}
+  end
+
   def handle_info(:snapshot, state) do
     take_snapshot()
     schedule_snapshot()

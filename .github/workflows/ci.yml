@@ -165,6 +165,21 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The browser for the dashboard check in the next step (#38): the same pinned Playwright as the landing
+      # page checks, and only its headless shell, which is all a scripted check needs.
+      - name: 🟢 Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          # setup-node v5+ restores an npm cache by itself when package.json names npm in packageManager; opt out explicitly.
+          package-manager-cache: false
+
+      - name: 🌐 Install the browser checks
+        working-directory: site/checks
+        run: |
+          npm ci
+          npx playwright install --with-deps --only-shell chromium
+
       - name: 🧪 Test Docker image
         run: |
           # Cleanup function to ensure container removal
@@ -297,6 +312,22 @@ jobs:
           fi
           if docker logs malachi-test 2>&1 | grep -F '[error]'; then
             echo "❌ The container logged the errors above while booting healthy"
+            exit 1
+          fi
+
+          # The dashboard in a real browser under its Content-Security-Policy (#38): login, the live stream,
+          # the topic drill-down and logout, failing on any violation the browser reports. The password
+          # reaches the check through its environment, never its argv (#180).
+          echo "🌐 Checking the dashboard in a browser under its CSP..."
+          if ! docker exec malachi-test bin/malachi rpc \
+            'IO.inspect(Malachi.BrokerServer.create_topic(Malachi.LogBroker, "csp-check", 8))' | grep -qF ':ok'; then
+            echo "❌ Could not create the topic the browser check expands"
+            docker logs malachi-test
+            exit 1
+          fi
+          if ! (cd site/checks && DASHBOARD_USER=admin DASHBOARD_PASS="$ADMIN_PASS" node dashboard.mjs "$DASHBOARD_URL" csp-check); then
+            echo "📋 Container logs:"
+            docker logs malachi-test
             exit 1
           fi
 

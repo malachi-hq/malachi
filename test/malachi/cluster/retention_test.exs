@@ -355,4 +355,112 @@ defmodule Malachi.Cluster.RetentionTest do
       end
     end
   end
+
+  describe "legal hold (#307)" do
+    @hold %{reason: "case 2026-114", actor: "admin"}
+
+    defp held(metadata, topic \\ "t") do
+      {metadata, :ok} = Metadata.apply(metadata, {:set_topic_hold, topic, @hold}, 1)
+      metadata
+    end
+
+    defp released(metadata, topic \\ "t") do
+      {metadata, :ok} = Metadata.apply(metadata, {:set_topic_hold, topic, nil}, 1)
+      metadata
+    end
+
+    # Topics "t" and "u", each with one sealed segment per entry of `segments` in its root range.
+    defp two_topics(segments) do
+      base = elem(Metadata.apply(Metadata.new(), {:create_topic, "t", 4}), 0)
+      base = elem(Metadata.apply(base, {:create_topic, "u", 4}), 0)
+
+      for topic <- ["t", "u"], {id, start_offset, bytes, sealed_at} <- segments, reduce: base do
+        metadata ->
+          range = {topic, 0}
+          {metadata, :ok} = Metadata.apply(metadata, {:register_segment, range, {topic, id}, [:b1], start_offset})
+          elem(Metadata.apply(metadata, {:seal_segment, {topic, id}, 1, bytes, sealed_at}), 0)
+      end
+    end
+
+    test "expired/3 returns nothing for a held topic, whatever its age, size and purged start" do
+      metadata = [{"s0", 0, 100, 0}, {"s1", 1, 100, 0}, {"s2", 2, 100, 0}] |> with_sealed() |> purged(2)
+      policy = %{max_age_ms: 0, max_bytes: 0}
+
+      assert Retention.expired(metadata, 10_000, policy) != []
+      assert Retention.expired(held(metadata), 10_000, policy) == []
+    end
+
+    test "releasing the hold makes the next sweep expire the same segments" do
+      metadata = with_sealed([{"s0", 0, 100, 0}, {"s1", 1, 100, 9_999}])
+      policy = %{max_age_ms: 5_000}
+      before_hold = expired(metadata, 10_000, policy)
+
+      assert before_hold == ["s0"]
+      assert expired(held(metadata), 10_000, policy) == []
+      assert metadata |> held() |> released() |> expired(10_000, policy) == before_hold
+    end
+
+    test "plan/5 reports what the hold keeps, per topic, with the bytes the segments take on disk" do
+      metadata = [{"s0", 0, 100, 0}, {"s1", 1, 250, 0}, {"s2", 2, 40, 9_999}] |> two_topics() |> held("t")
+
+      assert %{expired: expired, held: held} = Retention.plan(metadata, 10_000, %{max_age_ms: 5_000})
+      assert Enum.sort(expired) == [{"u", "s0"}, {"u", "s1"}]
+      assert held == %{"t" => %{segments: 2, bytes: 350}}
+    end
+
+    test "a held topic that no rule touches is not listed" do
+      metadata = [{"s0", 0, 100, 9_999}] |> with_sealed() |> held()
+      assert Retention.plan(metadata, 10_000, %{max_age_ms: 5_000}) == %{expired: [], held: %{}}
+    end
+
+    test "a held topic's ranges are summed under the topic" do
+      base = elem(Metadata.apply(Metadata.new(), {:create_topic, "t", 4}), 0)
+      {base, {:ok, left, right}} = Metadata.apply(base, {:split_range, @range})
+
+      metadata =
+        for {range, id} <- [{left, "l"}, {right, "r"}], reduce: base do
+          metadata ->
+            {metadata, :ok} = Metadata.apply(metadata, {:register_segment, range, id, [:b1], 0})
+            elem(Metadata.apply(metadata, {:seal_segment, id, 1, 100, 0}), 0)
+        end
+
+      assert Retention.plan(held(metadata), 10_000, %{max_age_ms: 0}).held == %{"t" => %{segments: 2, bytes: 200}}
+    end
+
+    test "a refusal for a hold is labeled and keeps the replicas' bytes" do
+      assert Retention.reply_label({:error, :legal_hold}) == :legal_hold
+      refute Retention.delete_replicas?({:error, :legal_hold})
+    end
+
+    property "the hold moves exactly what would expire into what it reports, and touches no other topic" do
+      check all(
+              segments <- list_of(tuple({integer(1..500), integer(0..10_000)}), max_length: 6),
+              max_age <- one_of([constant(nil), integer(0..10_000)]),
+              max_bytes <- one_of([constant(nil), integer(0..1_500)]),
+              max_runs: 200
+            ) do
+        # Contiguous one-offset segments, so each registers right after the one before it seals.
+        metadata =
+          segments
+          |> Enum.with_index()
+          |> Enum.map(fn {{bytes, sealed_at}, offset} -> {"s#{offset}", offset, bytes, sealed_at} end)
+          |> two_topics()
+
+        policy = %{max_age_ms: max_age, max_bytes: max_bytes}
+
+        free = Retention.plan(metadata, 10_000, policy)
+        kept = Retention.plan(held(metadata), 10_000, policy)
+
+        {of_t, of_u} = Enum.split_with(free.expired, &(elem(&1, 0) == "t"))
+        assert Enum.sort(kept.expired) == Enum.sort(of_u)
+        assert free.held == %{}
+
+        bytes =
+          for id <- of_t, reduce: 0, do: (total -> total + Metadata.stored_bytes(Metadata.get_segment(metadata, id)))
+
+        expected_held = if of_t == [], do: %{}, else: %{"t" => %{segments: length(of_t), bytes: bytes}}
+        assert kept.held == expected_held
+      end
+    end
+  end
 end

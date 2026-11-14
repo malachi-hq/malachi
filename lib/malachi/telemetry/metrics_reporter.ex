@@ -33,6 +33,7 @@ defmodule Malachi.Telemetry.MetricsReporter do
     [:malachi, :retention, :orphan_left],
     [:malachi, :retention, :orphan_removed],
     [:malachi, :retention, :unresolved_policy],
+    [:malachi, :retention, :held],
     [:malachi, :retention, :sweep],
     [:malachi, :process, :unexpected_message]
   ]
@@ -144,6 +145,11 @@ defmodule Malachi.Telemetry.MetricsReporter do
 
   def handle_event([:malachi, :retention, :unresolved_policy], %{count: count}, %{topic: topic}, _config) do
     Metrics.record_retention_unresolved_policy(topic, count)
+  end
+
+  def handle_event([:malachi, :retention, :held], _measurements, %{held: held}, _config) do
+    # The handler runs in the process that emitted the event, the coordinator that swept: its own rows.
+    Metrics.record_retention_held(self(), held)
   end
 
   def handle_event([:malachi, :retention, :sweep], %{duration_us: duration_us}, _metadata, _config) do

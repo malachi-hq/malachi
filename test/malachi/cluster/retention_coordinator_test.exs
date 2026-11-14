@@ -192,6 +192,138 @@ defmodule Malachi.Cluster.RetentionCoordinatorTest do
     BrokerServer.stop(broker)
   end
 
+  describe "legal hold (#307)" do
+    # A real broker over a named ReplicationServer, with at least one one-record segment of "events" sealed.
+    defp held_broker(directory) do
+      repl_name = :"hold_repl_#{System.unique_integer([:positive])}"
+      start_supervised!({ReplicationServer, name: repl_name, directory: Path.join(directory, "repl")}, id: repl_name)
+
+      one_record = Record.encoded_size(Record.new("value", key: "key"))
+      {:ok, broker} = BrokerServer.start_link(directory, brokers: [repl_name], segment_max_bytes: one_record)
+      {:ok, _root} = BrokerServer.create_topic(broker, "events", 4)
+
+      for key <- ["k0", "k1", "k2"],
+          do: {:ok, _} = BrokerServer.produce(broker, "events", [Record.new("value", key: key)])
+
+      sealed = fn -> for {_id, %{state: :sealed} = segment} <- BrokerServer.metadata(broker).segments, do: segment end
+      wait_until!(fn -> sealed.() != [] end)
+      {broker, repl_name, sealed.()}
+    end
+
+    defp coordinator(broker, metadata_source) do
+      {:ok, coordinator} =
+        RetentionCoordinator.start_link(
+          metadata_source: metadata_source,
+          expire_segment: &Malachi.Application.expire_segment(&1, broker),
+          policy: %{max_age_ms: 0},
+          clock: fn -> System.system_time(:millisecond) + 60_000 end,
+          interval: 60_000
+        )
+
+      coordinator
+    end
+
+    defp readable?(repl_name, segment),
+      do: ReplicationServer.read(repl_name, segment.id, segment.start_offset, 10) != :eof
+
+    @tag :tmp_dir
+    test "a held topic keeps its segments on every replica, and the next sweep after release expires them",
+         %{tmp_dir: directory} do
+      {broker, repl_name, sealed} = held_broker(directory)
+      :ok = BrokerServer.set_topic_hold(broker, "events", %{reason: "case 7", actor: "admin"})
+      coordinator = coordinator(broker, fn -> BrokerServer.metadata(broker) end)
+
+      assert RetentionCoordinator.run_now(coordinator) == []
+      assert Enum.all?(sealed, &readable?(repl_name, &1))
+
+      :ok = BrokerServer.set_topic_hold(broker, "events", nil)
+      # a roll still settling may have sealed one more segment meanwhile; the ones the hold kept are all expired
+      expired = RetentionCoordinator.run_now(coordinator)
+      assert Enum.all?(sealed, &(&1.id in expired))
+      refute Enum.any?(sealed, &readable?(repl_name, &1))
+
+      BrokerServer.stop(broker)
+    end
+
+    @tag :tmp_dir
+    test "a sweep planned before the hold landed is refused at the delete and keeps the bytes", %{tmp_dir: directory} do
+      {broker, repl_name, sealed} = held_broker(directory)
+      # the sweep reads the metadata as it was before the hold, then the hold lands before its deletes
+      before_hold = BrokerServer.metadata(broker)
+      :ok = BrokerServer.set_topic_hold(broker, "events", %{reason: "case 7", actor: "admin"})
+
+      parent = self()
+      handler = "hold-race-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:malachi, :retention, :expire],
+        fn
+          _event, _measurements, %{topic: "events"} = metadata, _config -> send(parent, {:expire, metadata.result})
+          # An async test sweeping another topic emits the same event; without this clause the handler would
+          # raise in that test's process and :telemetry would detach it for good.
+          _event, _measurements, _metadata, _config -> :ok
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      coordinator = coordinator(broker, fn -> before_hold end)
+      _planned = RetentionCoordinator.run_now(coordinator)
+
+      for _segment <- sealed, do: assert_receive({:expire, :legal_hold})
+      assert Enum.all?(sealed, &readable?(repl_name, &1))
+      assert Enum.all?(sealed, &(broker |> BrokerServer.metadata() |> Metadata.get_segment(&1.id)))
+
+      BrokerServer.stop(broker)
+    end
+
+    test "every sweep reports what the hold kept; a node that does not sweep reports nothing" do
+      parent = self()
+      handler = "hold-held-#{System.unique_integer([:positive])}"
+      marker = make_ref()
+
+      :telemetry.attach(
+        handler,
+        [:malachi, :retention, :held],
+        fn _event, measurements, metadata, _config ->
+          if Process.get(:hold_marker) == marker, do: send(parent, {:held, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      metadata = with_sealed([{"old", 0, 100, 1_000}, {"new", 1, 100, 9_500}])
+      {metadata, :ok} = Metadata.apply(metadata, {:set_topic_hold, "t", %{reason: "r", actor: "a"}}, 1)
+
+      server =
+        start(
+          metadata_source: fn ->
+            Process.put(:hold_marker, marker)
+            metadata
+          end
+        )
+
+      assert RetentionCoordinator.run_now(server) == []
+      assert_receive {:held, %{topics: 1}, %{held: %{"t" => %{segments: 1, bytes: 100}}}}
+      refute_receive {:expired, _}
+
+      _follower =
+        start(
+          interval: 20,
+          leader?: fn ->
+            Process.put(:hold_marker, marker)
+            false
+          end
+        )
+
+      assert_receive {:held, %{topics: 0}, %{held: held}}, 1_000
+      assert held == %{}
+    end
+  end
+
   describe "sweep telemetry" do
     # Each test sweeps its own topic, so events from the other tests of this async module are ignored.
     setup do

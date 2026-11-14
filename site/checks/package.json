@@ -2,9 +2,10 @@
   "name": "malachi-landing-checks",
   "private": true,
   "type": "module",
-  "description": "Browser checks for the landing page: Lighthouse scores, 360px layout, JavaScript-off content, reduced motion.",
+  "description": "Browser checks: the landing page (Lighthouse scores, 360px layout, JavaScript-off content, reduced motion) and the dashboard under its Content-Security-Policy.",
   "scripts": {
-    "check": "node run.mjs"
+    "check": "node run.mjs",
+    "dashboard": "node dashboard.mjs"
   },
   "devDependencies": {
     "chrome-launcher": "1.2.0",
