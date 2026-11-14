@@ -44,12 +44,15 @@ defmodule Malachi.AdminCallTest do
   end
 
   describe "log/3" do
+    # capture_log captures every process's lines, and this module is async, so another test's line can
+    # land in a capture: each assertion looks for this test's own line, never for an empty capture.
     test "logs the I18n line for :ok and {:ok, _}, nothing for a refusal" do
-      bindings = [topic: "t", policy: "p", actor: "a"]
+      bindings = [topic: "log-#{System.unique_integer([:positive])}", policy: "p", actor: "a"]
+      line = Malachi.I18n.t(:topic_policy_bound, bindings)
 
-      assert capture_log(fn -> AdminCall.log(:ok, :topic_policy_bound, bindings) end) =~ "t"
-      assert capture_log(fn -> AdminCall.log({:ok, %{}}, :topic_policy_bound, bindings) end) =~ "t"
-      assert capture_log(fn -> AdminCall.log({:error, :x}, :topic_policy_bound, bindings) end) == ""
+      assert capture_log(fn -> AdminCall.log(:ok, :topic_policy_bound, bindings) end) =~ line
+      assert capture_log(fn -> AdminCall.log({:ok, %{}}, :topic_policy_bound, bindings) end) =~ line
+      refute capture_log(fn -> AdminCall.log({:error, :x}, :topic_policy_bound, bindings) end) =~ bindings[:topic]
     end
   end
 
