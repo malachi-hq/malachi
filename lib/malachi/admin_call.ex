@@ -61,15 +61,26 @@ defmodule Malachi.AdminCall do
   """
   @spec audit(atom(), actor(), String.t(), result, map(), (term() -> String.t())) :: :ok
   def audit(event, actor, action, result, metadata, render \\ &reason_string/1) do
-    {status, metadata} =
-      case result do
-        {:error, reason} -> {:failure, Map.put(metadata, :reason, render.(reason))}
-        _ok -> {:success, metadata}
-      end
-
+    {status, metadata} = entry(result, metadata, render)
     AuditLog.log_event(event, %{username: actor}, action, status, metadata)
     :ok
   end
+
+  @doc """
+  Like `audit/6`, for an entry the caller must not act without: it answers `:ok` only once the entry is
+  written out (`Malachi.AuditLog.log_event_durably/6`), and `{:error, :audit_unavailable}` when the audit
+  log is not running, does not answer within `timeout`, or fails while writing it.
+  """
+  @spec audit_durably(atom(), actor(), String.t(), result, map(), timeout()) :: :ok | {:error, :audit_unavailable}
+  def audit_durably(event, actor, action, result, metadata, timeout \\ 5_000) do
+    {status, metadata} = entry(result, metadata, &reason_string/1)
+    AuditLog.log_event_durably(event, %{username: actor}, action, status, metadata, timeout)
+  catch
+    :exit, _reason -> {:error, :audit_unavailable}
+  end
+
+  defp entry({:error, reason}, metadata, render), do: {:failure, Map.put(metadata, :reason, render.(reason))}
+  defp entry(_ok, metadata, _render), do: {:success, metadata}
 
   @doc """
   How a refused field is recorded in an audit entry: by its size, never by its bytes, so an arbitrary

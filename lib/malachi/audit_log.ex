@@ -89,6 +89,18 @@ defmodule Malachi.AuditLog do
   end
 
   @doc """
+  Records an event and writes it out before answering: the pending events and this one go to ETS and,
+  with file output, to the file with a sync to disk; with stdout output they are handed to the logger.
+  Unlike `log_event/5`, a cast that is dropped when the log is not running, this is a call: it exits when
+  the log is not running, does not answer within `timeout`, or fails while writing, so a caller that must
+  not act unrecorded can tell (`Malachi.AdminCall.audit_durably/5`).
+  """
+  @spec log_event_durably(atom(), map(), String.t(), atom(), map(), timeout()) :: :ok
+  def log_event_durably(event_type, context, action, status, metadata, timeout \\ 5_000) do
+    GenServer.call(__MODULE__, {:log_event_durably, event_type, context, action, status, metadata}, timeout)
+  end
+
+  @doc """
   Flush buffered events to disk immediately.
   Useful for testing or ensuring events are written before shutdown.
   """
@@ -331,6 +343,13 @@ defmodule Malachi.AuditLog do
     {:reply, :ok, new_state}
   end
 
+  def handle_call({:log_event_durably, event_type, context, action, status, metadata}, _from, state) do
+    # Earlier casts first, so the trail keeps the order the events were sent in
+    state = drain_pending_events(state)
+    {:noreply, state} = handle_cast({:log_event, event_type, context, action, status, metadata}, state)
+    {:reply, :ok, flush_buffer(state)}
+  end
+
   @impl true
   def handle_info(:cleanup, state) do
     perform_cleanup(state)
@@ -530,7 +549,7 @@ defmodule Malachi.AuditLog do
       {:error, _} ->
         # File handle is invalid/terminated, write directly to file
         events_data = Enum.map_join(events, "\n", &safe_encode/1) <> "\n"
-        File.write!(file_path, events_data, [:append])
+        write_synced!(file_path, events_data, :append)
         nil
     end
   end
@@ -547,10 +566,10 @@ defmodule Malachi.AuditLog do
       # Find first complete line
       case String.split(truncated_data, "\n", parts: 2) do
         [_incomplete, rest] ->
-          File.write!(file_path, rest)
+          write_synced!(file_path, rest, :write)
 
         _ ->
-          File.write!(file_path, truncated_data)
+          write_synced!(file_path, truncated_data, :write)
       end
     else
       # Read existing file and keep last N lines that fit
@@ -575,7 +594,7 @@ defmodule Malachi.AuditLog do
 
       # Write kept old lines + new events
       final_content = Enum.join(kept_lines, "\n") <> if(kept_lines == [], do: "", else: "\n") <> new_events_data
-      File.write!(file_path, final_content)
+      write_synced!(file_path, final_content, :write)
     end
 
     # Reopen file in append mode
@@ -586,6 +605,20 @@ defmodule Malachi.AuditLog do
       {:error, reason} ->
         Logger.error(I18n.t(:audit_log_file_reopen_failed, reason: inspect(reason)))
         nil
+    end
+  end
+
+  # Writes `data` and syncs it to disk before returning, as the normal flush does through its handle, so a
+  # rotation or a write after the handle was lost is as durable as any other. Raises on failure, which
+  # takes the process down the way File.write!/3 did, and makes a durable call exit.
+  defp write_synced!(file_path, data, mode) do
+    {:ok, io} = File.open(file_path, [mode, :binary])
+
+    try do
+      :ok = IO.binwrite(io, data)
+      :ok = :file.datasync(io)
+    after
+      File.close(io)
     end
   end
 end

@@ -156,6 +156,50 @@ defmodule Malachi.AuditLogIntegrationTest do
     end
   end
 
+  describe "durable events (#308)" do
+    test "log_event_durably answers only once the event, and those sent before it, are in the file" do
+      Application.put_env(:malachi, :audit_log_output, :file)
+      Application.put_env(:malachi, :audit_log_file, @test_log_file)
+      _pid = restart_audit_log()
+
+      Malachi.AuditLog.log_event(:dashboard_access, %{username: "before_durable"}, "a", :success, %{})
+
+      assert :ok =
+               Malachi.AuditLog.log_event_durably(:purge_request_recorded, %{username: "durable"}, "r", :success, %{
+                 request_id: "DSR-1"
+               })
+
+      # no wait: the call returned after the write and the sync
+      content = File.read!(@test_log_file)
+      assert content =~ "before_durable"
+      assert content =~ "DSR-1"
+      assert String.split(content, "before_durable") |> List.last() =~ "DSR-1"
+    end
+
+    test "a durable event that rotates the file is in the rewritten file when the call returns" do
+      Application.put_env(:malachi, :audit_log_output, :file)
+      Application.put_env(:malachi, :audit_log_file, @test_log_file)
+      Application.put_env(:malachi, :audit_log_max_size_mb, 0.001)
+      _pid = restart_audit_log()
+
+      for i <- 1..30 do
+        Malachi.AuditLog.log_event(:dashboard_access, %{username: "filler_#{i}"}, "a", :success, %{
+          pad: String.duplicate("x", 50)
+        })
+      end
+
+      assert :ok =
+               Malachi.AuditLog.log_event_durably(:purge_request_recorded, %{username: "rotated"}, "r", :success, %{
+                 request_id: "DSR-ROTATED"
+               })
+
+      content = File.read!(@test_log_file)
+      assert content =~ "DSR-ROTATED"
+      assert byte_size(content) < 2048
+      for line <- String.split(content, "\n", trim: true), do: assert({:ok, _} = Jason.decode(line))
+    end
+  end
+
   describe "file rotation by size" do
     test "file is truncated when exceeding max size" do
       # Set very small max size (1KB)
