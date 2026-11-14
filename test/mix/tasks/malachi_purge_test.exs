@@ -7,6 +7,7 @@ defmodule Mix.Tasks.Malachi.PurgeTest do
   alias Malachi.Log.Record
   alias Malachi.LogApi
   alias Malachi.Position
+  alias Malachi.Purge.Request
   alias Mix.Tasks.Malachi.Purge, as: Task
 
   defp recording_call(result) do
@@ -60,6 +61,7 @@ defmodule Mix.Tasks.Malachi.PurgeTest do
       moves = %{{"t", 0} => {0, 4}, {"t", 1} => {2, 9}}
       assert {:ok, message} = Task.execute(["t"], [group: "g"], recording_call({:ok, {:ok, moves}}))
       assert message =~ "logical purge, not erasure"
+      assert message =~ "from every subject"
       assert message =~ ~s({"t", 0}\t0 -> 4)
       assert message =~ ~s({"t", 1}\t2 -> 9)
 
@@ -68,6 +70,74 @@ defmodule Mix.Tasks.Malachi.PurgeTest do
 
       assert {:error, message} = Task.execute(["t"], [group: "g"], recording_call({:error, :nodedown}))
       assert is_binary(message)
+    end
+  end
+
+  describe "execute/3: a data subject request" do
+    @request [request: "DSR-42", reason: "LGPD art. 18 request"]
+
+    test "--request and --reason are validated here and dispatched to purge/4 as a Request" do
+      call = recording_call({:ok, {:ok, %{{"t", 0} => {0, 4}}}})
+
+      assert {:ok, message} = Task.execute(["t"], [{:group, "g"} | @request], call)
+
+      assert_received {:called, Malachi.Purge, :purge,
+                       ["t", {:group, "g"}, "cli@" <> _node, %Request{id: "DSR-42", reason: "LGPD art. 18 request"}]}
+
+      assert message =~ "t: request DSR-42 applied, logical start moved up to group:g"
+      assert message =~ "every record below the point, from every subject, is no longer readable"
+      assert message =~ "the bytes stay on disk until their segment expires"
+      assert message =~ ~s({"t", 0}\t0 -> 4)
+    end
+
+    test "a request that moves nothing says it was recorded and that nothing was readable" do
+      call = recording_call({:ok, {:ok, %{}}})
+
+      assert Task.execute(["t"], [{:before, "0"} | @request], call) ==
+               {:ok, "t: request DSR-42 recorded; nothing below before:0 was readable"}
+    end
+
+    test "one flag without the other is refused before anything is sent" do
+      call = recording_call({:ok, {:ok, %{}}})
+
+      for opts <- [[group: "g", request: "DSR-42"], [group: "g", reason: "why"]] do
+        assert {:error, "--request and --reason go together" <> _} = Task.execute(["t"], opts, call)
+      end
+
+      refute_received {:called, _, _, _}
+    end
+
+    test "an invalid id or reason is refused before anything is sent, with the limits" do
+      call = recording_call({:ok, {:ok, %{}}})
+
+      for {id, reason} <- [{"DSR 42", "why"}, {"DSR-42", "line\nbreak"}, {"", "why"}, {"DSR-42", ""}] do
+        assert {:error, "invalid_request: " <> _} =
+                 Task.execute(["t"], [group: "g", request: id, reason: reason], call)
+      end
+
+      refute_received {:called, _, _, _}
+    end
+
+    test "a refusal under a request is printed as the refusal" do
+      assert {:error, "no_such_topic"} =
+               Task.execute(["t"], [{:group, "g"} | @request], recording_call({:ok, {:error, :no_such_topic}}))
+    end
+
+    test "against the running application, the request and its purge are both audited" do
+      topic = "purge-task-req-#{System.unique_integer([:positive])}"
+      shard = DataPlaneRouter.shard_for(topic)
+      :ok = LogApi.create_topic(shard, topic)
+      {:ok, _} = BrokerServer.produce(shard, topic, for(i <- 0..2, do: Record.new("v#{i}", key: "k#{i}")))
+      hex = Base.encode16(Position.encode({topic, 0}, {0, 1}))
+      id = "DSR-#{topic}"
+
+      assert {:ok, message} = Task.execute([topic], [cursor: hex, request: id, reason: "art. 18"], local_call())
+      assert message =~ "request #{id} applied"
+
+      _ = :sys.get_state(Malachi.AuditLog)
+      events = Enum.filter(Malachi.AuditLog.get_events_by_user("cli@#{node()}"), &(&1.metadata[:request_id] == id))
+
+      assert events |> Enum.map(& &1.event_type) |> Enum.sort() == [:purge_request_recorded, :topic_purged]
     end
   end
 
