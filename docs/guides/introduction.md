@@ -20,7 +20,7 @@ data independently, and a consumer can rewind.
 ## What you get
 
 - **An append-only log per topic**, durable on disk (segments with CRC-checked records, fsync before ack)
-  and replicated across nodes by **quorum**.
+  and replicated across nodes: a write is acknowledged once a **majority** of its replicas has fsynced it.
 - **A client that never chooses partitions.** You produce by *key*, and every record you consume comes with
   its **position in its range's history**, which a split only extends. That is the point: the broker can
   split, merge and restripe the underlying ranges while the cluster runs, without breaking any client.

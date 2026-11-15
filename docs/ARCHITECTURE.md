@@ -213,7 +213,7 @@ Replication is split deliberately, because metadata and records have opposite sh
   linearizability, which is exactly Raft's strength.
 - The **data plane** (records in segments) does **not** go through `ra`. `Malachi.Cluster.ReplicationServer`
   ships each batch from the primary to the followers as pipelined, windowed replica-appends and
-  acknowledges the write only once a quorum has `fsync`ed it, tolerating up to ⌊(N-1)/2⌋ slow or
+  acknowledges the write only once a majority has `fsync`ed it, tolerating up to ⌊(N-1)/2⌋ slow or
   unreachable followers and returning `{:error, :no_quorum}` beyond that. Routing high-volume sequential
   records through a consensus log would pay for a second durable write and gain nothing, because the
   segment already **is** the log. Fsyncs can be coalesced (group commit, the NorthGuard triggers of
@@ -237,6 +237,26 @@ flowchart LR
 > to agree before a line is written. The data plane is the warehouse: shipments arrive constantly, and one
 > only needs a majority of the shelves to confirm they stored it before signing off. Different jobs, so
 > different rules.
+
+### What an acknowledgement covers
+
+A produce is acknowledged once a strict majority of the segment's replicas has fsynced the batch:
+`Malachi.Cluster.ReplicaTracker.quorum_size/1` is `div(n, 2) + 1`, and `Malachi.Cluster.ReplicationServer`
+replies to the producer as soon as `Malachi.Cluster.ReplicaTracker.committed?/2` covers the batch's last
+offset. Producer streams follow the same rule. With three replicas an ack means at least two copies are on
+disk; the third keeps up through the next pushes or through catch-up.
+
+- **What it guarantees.** An acknowledged record survives the loss of up to ⌊(N-1)/2⌋ replicas, so with
+  three replicas any one node. When a primary fails, its segment is sealed at the highest durable end among
+  `n - q + 1` answering replicas, and that set always includes one holding every acknowledged record (the
+  argument is in the [log model guide](guides/log-model.md#what-the-guarantee-does-not-cover)).
+- **Under replication group commit** (`MALACHI_REPLICATION_GROUP_COMMIT`, off by default), the followers can
+  form the majority before the primary's own flush tick. The records are durable on that majority, and the
+  primary serves them once its own next flush succeeds. If that flush fails, the primary's copy is taken out
+  of service and the records are served from a follower once the heal pass seals the segment (#177).
+
+NorthGuard waits for every replica's fsync before it acknowledges; Malachi acknowledges on a majority, and
+its seal rule is built on that quorum. Acknowledging on every replica is tracked in #360.
 
 ## Client protocol
 

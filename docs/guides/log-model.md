@@ -87,8 +87,9 @@ flowchart TD
   sealed segment's extent can never disagree with what its replicas hold. Sealed segments are immutable,
   which is what makes re-replicating them safe.
 - **Replica set.** Each segment is replicated across nodes chosen by rendezvous (HRW) hashing. A write is
-  acknowledged when a **quorum** has it durably (fsync before counting), so the system tolerates
-  ⌊(N-1)/2⌋ slow or failed replicas.
+  acknowledged when a **majority** of the segment's replicas has it durably (fsync before counting), so
+  the system tolerates ⌊(N-1)/2⌋ slow or failed replicas (see
+  [what an acknowledgement covers](../ARCHITECTURE.md#what-an-acknowledgement-covers)).
 
 Reads never expose segments or replicas: a reader names a range and a position in its history, and gets
 back records with the position of each (`fetch_range` and consume streams, see `Malachi.Wire`).
@@ -115,7 +116,8 @@ assigns each member a share of the topic's ranges, and each reads only those, fr
   global across a topic. Note the guarantee is the range's, not the key's: two different keys that land in
   the same range are also ordered relative to each other, but you must not rely on that, because a range
   split can separate them later.
-- **Durability**: a produce is acknowledged after a quorum of the segment's replicas has fsynced it.
+- **Durability**: a produce is acknowledged after a majority of the segment's replicas has fsynced it, and
+  it survives the loss of up to ⌊(N-1)/2⌋ of them ([what an acknowledgement covers](../ARCHITECTURE.md#what-an-acknowledgement-covers)).
 - **Delivery**: at-least-once. A consumer group commits positions, so a crash between processing and commit
   re-delivers; make your handlers idempotent.
 

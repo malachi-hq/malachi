@@ -123,9 +123,10 @@ Worth alerting on:
 
 ## Durability tuning (group commit)
 
-Every produce is fsynced before its ack; group commit coalesces those fsyncs. Two independent knobs,
-one per path (the [clustering guide](clustering-and-resharding.md#durability-and-group-commit) explains
-the decision rule with examples):
+Every produce is fsynced before its ack (with rf>1, on a majority of the segment's replicas); group
+commit coalesces those fsyncs. Two independent knobs, one per path (the
+[clustering guide](clustering-and-resharding.md#durability-and-group-commit) explains the decision rule
+with examples):
 
 ```bash
 # rf=1, broker-level. Recommended on for throughput workloads. It writes a segment's primary alone, so it
