@@ -301,6 +301,72 @@ churn low.
 > domains) so one mishap does not take them all out, and keep the tables evenly filled (max skew) rather
 > than crowding one. The seating rule is fixed, so every planner drawing the chart lands on the same seats.
 
+### Known divergence: who replenishes the replicas of a vnode
+
+In NorthGuard, replenishing a replication factor needs no external balancer: the vnode coordinators choose
+the replacement replica themselves, under the placement policies. Malachi does the same for **segment
+replicas**, without yet applying the topic's policy to the choice, and does it differently for the
+**members of a vnode's own Raft group**. Everything below describes a sharded control plane
+(`MALACHI_LOG_VNODES` above 1, in a cluster); with a single metadata group there is no lease and no
+rebalancing, and one healing and one retention coordinator run for the whole cluster on the membership
+leader.
+
+Segment replicas are replenished where NorthGuard replenishes them. The leader of the vnode that owns a
+segment re-replicates it when a replica is lost (`Malachi.Cluster.HealCoordinator`, one per vnode this node
+leads, running `Malachi.Cluster.SelfHealing`), choosing the replacement with `Malachi.Cluster.Placement`.
+The choice spreads only over the cluster-wide attribute (`MALACHI_LOG_SPREAD_BY`), best effort: a topic
+whose policy sets its own `spread_by` or a minimum number of domains has its new segments placed by that
+policy, and its healed replicas placed without it, so a replacement can land in a domain that already holds
+a replica (#362). Every new segment picks its replica set over the brokers alive at that moment, so
+a broker that joins can be chosen for new segments from the next roll on, without any existing data
+moving.
+
+A vnode's own members are not. Which nodes hold a vnode's Raft members, including replacing a member that
+was lost, is planned and committed by one process on the node holding the cluster-wide lease
+(`Malachi.Cluster.RebalanceCoordinator`, gated on `Malachi.Cluster.LeaseHolder`). Nothing moves until an
+operator calls `Malachi.Cluster.RebalanceCoordinator.commit/1` on the lease holder's node (any other node
+answers `{:error, :not_leader}`), unless `MALACHI_AUTO_REBALANCE` turns on
+`Malachi.Cluster.AutoRebalancer`, which commits a plan once it has stayed the same for several ticks. The
+NorthGuard talk says only that vnode replicas are chosen in a balanced way, not which component moves
+them, so this half is recorded as a decision rather than as a measured gap.
+
+What the single coordinator gives: only the lease holder commits, and its commit applies one change at a
+time, fail-fast, adding a vnode's new members before removing the leaving ones and re-checking the lease
+before each change (`Malachi.Cluster.Rebalance`). Any node can compute a plan; only the commit is gated.
+Three limits apply, each tracked:
+
+- **The lease does not fence a change in flight.** Unlike the ring writes of a split, the member changes do
+  not carry the lease's fencing token. The lease timing triangle (see [Prior art](#prior-art)) bounds when
+  a holder stops starting new changes, not how long the change it already started takes: starting the new
+  member's server has no timeout, and each membership step retries for up to five seconds on top of its
+  call. A holder whose lease expired meanwhile can still apply that change after another node has taken
+  the lease and committed its own plan. `ra` orders the two holders' changes, one per group at a time, but
+  refuses neither (#363).
+- **Add-before-remove keeps quorum only while the current members are alive.** The new member joins as a
+  voter before its server starts. Replacing a member on a dead node, a vnode of three with one dead becomes
+  four voters with two alive, below the quorum of three, until the new member runs and catches up; if it
+  never starts, the commit stops before removing the dead member and the vnode stays without quorum until
+  the commit is run again or the dead node returns (#364).
+- **It is one process.** The cost is below.
+
+What it costs: the plan reads every vnode's membership one vnode at a time on the lease holder, and the
+commit applies one member change at a time, so both grow with the vnode count rather than spreading across
+the vnode leaders. With automatic rebalancing off, the default, a vnode that lost a member stays one member
+short until an operator commits.
+
+What would reopen it, with the per-vnode decision of NorthGuard or with per-vnode proposals admitted by one
+fenced gate: a measurement on Linux, on the lease holder, at 128, 512 and 2048 vnodes, in which either
+
+- the 99th percentile wall time of one plan exceeds 10% of the automatic rebalancing interval (3 s at the
+  30 s default), or
+- after a node is killed with automatic rebalancing on, the serial commit that brings every vnode back to
+  its replication factor takes longer than the stabilization wait before it (two intervals after the plan
+  first appears, 60 s at the defaults), so that the single coordinator, rather than the protection against
+  membership flaps, dominates the time to repair.
+
+Both bounds are design choices, written down so the measurement has something to be compared against.
+Nothing measures either one today.
+
 ## Key design decisions
 
 Four choices shape everything above. Each is stated with its reason and the code that implements it.
@@ -425,9 +491,11 @@ on the same pattern for coordinating shards: a single elected coordinator, fence
   `duration > renew-deadline > retry-period` triangle over a linearizable CAS, proactively giving up
   leadership when a renewal fails (to avoid split brain), and level-triggered, idempotent controllers where
   only the leader acts. In Malachi the lease lives in an `ra` cluster; `ra`'s fencing-by-name already
-  covers the single self-fencing bootstrap, and the lease is what fences the leader's continuous work
-  (retention, healing, rebalancing). A single etcd is Kubernetes's scale ceiling; Malachi shards precisely
-  to scale past one quorum.
+  covers the single self-fencing bootstrap, and the lease is what gates the cluster-wide work: rebalancing a
+  vnode's members, splitting a vnode, and resharding. Retention and healing are not under it: in a sharded
+  control plane each vnode's leader runs them for its own vnode (see
+  [who replenishes the replicas of a vnode](#known-divergence-who-replenishes-the-replicas-of-a-vnode)).
+  A single etcd is Kubernetes's scale ceiling; Malachi shards precisely to scale past one quorum.
 
 ## Dependencies
 
