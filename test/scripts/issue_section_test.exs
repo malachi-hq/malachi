@@ -179,6 +179,82 @@ defmodule IssueSectionTest do
     end
   end
 
+  describe "the release highlights (#366)" do
+    test "release-highlights reads the PR description's section, without the template's comment", ctx do
+      body = """
+      ## 📝 Description
+
+      Text.
+
+      ## Release highlights
+
+      <!--
+      Optional. The template's instructions,
+      ## with a heading inside the comment.
+      -->
+      Range reads are here. <!-- an aside --> Replay any window.
+
+      ```
+      <!-- kept: a code block is shown as written -->
+      ## kept too
+      ```
+
+      ## 🔖 Type of Change
+
+      - [x] Minor
+      """
+
+      issue = write(ctx.dir, "pr.md", body)
+
+      assert run(["release-highlights", issue]) ==
+               {"Range reads are here.  Replay any window.\n\n```\n<!-- kept: a code block is shown as written -->\n" <>
+                  "## kept too\n```\n\n", 0}
+    end
+
+    test "release-highlights matches the heading in any case and drops carriage returns", ctx do
+      issue = write(ctx.dir, "crlf.md", "## RELEASE HIGHLIGHTS\r\nText.\r\n## Next\r\n")
+      assert run(["release-highlights", issue]) == {"Text.\n", 0}
+    end
+
+    test "a section holding only a comment, a comment left open, or no section exits 3", ctx do
+      for body <- [
+            "## Release highlights\n<!-- only the template -->\n\n## Next\n",
+            "## Release highlights\nText <!-- never closed\nmore\n",
+            "## Description\nNothing.\n"
+          ] do
+        assert run(["release-highlights", write(ctx.dir, "h.md", body)]) == {"", 3}, body
+      end
+    end
+
+    test "pr-highlights reads the block after **Release highlights** in the issue's PR section", ctx do
+      body =
+        "## PR\n\n**Branch**\n\n```\nfeat/x\n```\n\n**Description**\n\n```\nThe description.\n```\n\n" <>
+          "**Release highlights**\n\n<!-- Optional -->\n\n```\nA milestone, in two sentences.\n```\n"
+
+      issue = write(ctx.dir, "issue-hl.md", body)
+      assert run(["pr-highlights", issue]) == {"A milestone, in two sentences.\n", 0}
+      assert run(["pr-description", issue]) == {"The description.\n", 0}
+    end
+
+    test "pr-highlights matches the marker in any case, and skips a block inside a comment", ctx do
+      body =
+        "## PR\n\n**release HIGHLIGHTS**\n\n<!--\nAn example:\n```\nnot the highlights\n```\n-->\n\n" <>
+          "```\nThe real ones.\n```\n"
+
+      issue = write(ctx.dir, "issue-case.md", body)
+      assert run(["pr-highlights", issue]) == {"The real ones.\n", 0}
+    end
+
+    test "pr-highlights is optional: an issue without the marker exits 3", ctx do
+      assert run(["pr-highlights", ctx.issue]) == {"", 3}
+    end
+
+    test "the existing sections still match their heading in its own case only", ctx do
+      issue = write(ctx.dir, "case.md", "## PLAN\n- step\n## Verification\n- check\n")
+      assert run(["plan", issue]) == {"", 3}
+    end
+  end
+
   test "a missing section exits 3 and prints nothing", ctx do
     bare = write(ctx.dir, "bare.md", "## Context\n\nNothing else.\n")
 

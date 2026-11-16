@@ -1,7 +1,11 @@
 name: Release & Publish
 
-# Every pull request merged into main publishes a release: the version in mix.exs is bumped, the bump is committed
-# to main, the commit is tagged, and the image is built from the tag.
+# Publishes a release when the commits merged since the previous release include something a user acts on
+# (issue #366): a feat, fix or perf pull request, a dependency or base image update, a breaking change, or one
+# labelled `release`. docs, chore, ci, test, refactor, style and build merges publish nothing on their own and
+# are listed in the next release's notes. scripts/release_lib.sh holds the rule; a release bumps the version in
+# mix.exs, commits the bump to main, tags it and builds the image from the tag. The image of main itself is
+# docker-build.yml's, tagged `main` and `sha-<sha>`, never a version.
 #
 # main takes changes only through a reviewed pull request, and the daily OCI run executes whatever main holds, so
 # no workflow token may write to it. The bump is the one exception, and it is pushed with a short-lived token of
@@ -23,7 +27,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Find the merged pull request this push came from, and check that its CI passed.
+  # Find the merged pull request this push came from, check that its CI passed, and decide whether the commits
+  # since the previous release publish one.
   verify-ci:
     # The bump commit pushed by the release job is itself a push to main. It has no pull request, so the step
     # below would skip it anyway; this condition says so before a runner starts.
@@ -34,15 +39,22 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      release: ${{ steps.pr.outputs.release }}
-      title: ${{ steps.pr.outputs.title }}
-      labels: ${{ steps.pr.outputs.labels }}
+      release: ${{ steps.gate.outputs.release || steps.pr.outputs.release }}
+      bump: ${{ steps.gate.outputs.bump }}
 
     steps:
       - name: 🛡️ Harden the runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
+      # The pushed commit with the whole history and its tags: the gate reads every commit since the previous
+      # release. Nothing here writes, so the token is not kept on disk.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: 🔍 Find the merged pull request and verify its CI passed
         id: pr
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -55,14 +67,15 @@ jobs:
             });
 
             // Only the pull request whose merge produced this exact commit. A direct push (an admin's, or the
-            // bump) has none, and is not released.
+            // published results) has none: it is not released for itself, but the gate below still reads the
+            // merges since the previous release, since this run may have replaced a merge's queued run.
             const pr = prs.find(p => p.merged_at && p.base.ref === 'main' && p.merge_commit_sha === context.sha);
             if (!pr) {
-              console.log(`No merged pull request produced ${context.sha}; nothing to release.`);
+              console.log(`No merged pull request produced ${context.sha}; only the earlier merges can release.`);
               core.setOutput('release', 'false');
               return;
             }
-            console.log(`Commit ${context.sha} is the merge of #${pr.number}: ${pr.title}`);
+            console.log(`Commit ${context.sha} is the merge of #${pr.number}.`);
 
             const { data: checkRuns } = await github.rest.checks.listForRef({
               owner: context.repo.owner,
@@ -87,9 +100,28 @@ jobs:
               console.log('✅ CI passed, proceeding with release');
             }
 
-            core.setOutput('release', 'true');
-            core.setOutput('title', pr.title);
-            core.setOutput('labels', pr.labels.map(l => l.name).join(','));
+            core.setOutput('pr', String(pr.number));
+
+      # The decision is the largest bump among the commits since the previous release, not this merge's alone:
+      # releases run one at a time and a newer push replaces a queued run, so a feat whose own run was cancelled
+      # is released by the next run, a merge's or a direct push's (the published results follow most merges).
+      # The merge this run is for fails here when its subject has no recognised type, with what to do
+      # (scripts/release-bump.sh); a direct push names no such merge.
+      - name: Decide whether the merged commits publish a release
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.pr.outputs.pr }}
+        run: |
+          PREV=$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || true)
+          PRS="$RUNNER_TEMP/release-prs"
+          scripts/release-prs.sh "$PREV" HEAD "$PRS"
+          TRIGGER=()
+          if [ -n "$PR" ]; then TRIGGER=(--trigger "$GITHUB_SHA"); fi
+          BUMP=$(scripts/release-bump.sh --range "$PREV" HEAD "$PRS" "${TRIGGER[@]}")
+          echo "Since ${PREV:-the first commit}: $BUMP"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+          if [ "$BUMP" = none ]; then echo "release=false"; else echo "release=true"; fi >> "$GITHUB_OUTPUT"
 
   release:
     needs: verify-ci
@@ -98,10 +130,12 @@ jobs:
     # The App's key is an environment secret: only a run from main passes the environment's branch rule.
     environment: release
     # Scoped here (not workflow-wide) so only this job holds write: it creates the GitHub release (contents) and
-    # dispatches the Pages workflow (actions). The push to main uses the App's token, not this one.
+    # dispatches the Pages workflow (actions), and reads the merged pull requests' labels and descriptions
+    # (pull-requests). The push to main uses the App's token, not this one.
     permissions:
       contents: write
       actions: write
+      pull-requests: read
 
     outputs:
       new_version: ${{ steps.bump.outputs.NEW_VERSION }}
@@ -150,64 +184,55 @@ jobs:
         # Commit as the App's bot user, so the history says which actor wrote to main outside a pull request.
         run: scripts/app-bot-git-identity.sh "$APP_SLUG"
 
+      - name: Find the previous release
+        if: steps.released.outputs.SKIP == 'false'
+        id: prev
+        run: echo "TAG=$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+
+      # Read again here, not passed from verify-ci: the tip of main may hold merges that run never saw.
+      - name: Read the merged pull requests
+        if: steps.released.outputs.SKIP == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREV: ${{ steps.prev.outputs.TAG }}
+        run: scripts/release-prs.sh "$PREV" HEAD "$RUNNER_TEMP/release-prs"
+
       - name: Determine version bump type
         if: steps.released.outputs.SKIP == 'false'
         id: bump_type
         env:
-          PR_TITLE: ${{ needs.verify-ci.outputs.title }}
-          PR_LABELS: ${{ needs.verify-ci.outputs.labels }}
+          PREV: ${{ steps.prev.outputs.TAG }}
         run: |
-          # Check labels first
-          if [[ "$PR_LABELS" == *"major"* ]] || [[ "$PR_TITLE" == *"[major]"* ]]; then
-            echo "BUMP_TYPE=major" >> "$GITHUB_OUTPUT"
-          elif [[ "$PR_LABELS" == *"minor"* ]] || [[ "$PR_TITLE" == *"[minor]"* ]] || [[ "$PR_TITLE" == *"feat:"* ]]; then
-            echo "BUMP_TYPE=minor" >> "$GITHUB_OUTPUT"
-          else
-            echo "BUMP_TYPE=patch" >> "$GITHUB_OUTPUT"
-          fi
+          BUMP=$(scripts/release-bump.sh --range "$PREV" HEAD "$RUNNER_TEMP/release-prs")
+          echo "Since ${PREV:-the first commit}: $BUMP"
+          echo "BUMP_TYPE=$BUMP" >> "$GITHUB_OUTPUT"
 
       - name: Bump version
-        if: steps.released.outputs.SKIP == 'false'
+        if: steps.released.outputs.SKIP == 'false' && steps.bump_type.outputs.BUMP_TYPE != 'none'
         id: bump
-        run: |
-          chmod +x ./scripts/bump-version.sh
-          ./scripts/bump-version.sh ${{ steps.bump_type.outputs.BUMP_TYPE }}
+        env:
+          BUMP_TYPE: ${{ steps.bump_type.outputs.BUMP_TYPE }}
+        run: scripts/bump-version.sh "$BUMP_TYPE"
 
       - name: Get new version
-        if: steps.released.outputs.SKIP == 'false'
+        if: steps.released.outputs.SKIP == 'false' && steps.bump_type.outputs.BUMP_TYPE != 'none'
         id: version
         run: |
           NEW_VERSION=$(grep '@version' mix.exs | head -1 | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
           echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "New version: $NEW_VERSION"
 
-      - name: Generate changelog
-        if: steps.released.outputs.SKIP == 'false'
-        id: changelog
-        run: |
-          # Get previous tag
-          PREVIOUS_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-
-          if [ -z "$PREVIOUS_TAG" ]; then
-            # First release
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
-          else
-            # Get commits since last tag
-            CHANGELOG=$(git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
-          fi
-
-          # Save changelog to file
-          echo "## Changes" > /tmp/changelog.md
-          echo "" >> /tmp/changelog.md
-          echo "$CHANGELOG" >> /tmp/changelog.md
-
-          # Set output for GitHub release
-          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGELOG" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+      # Before anything is pushed: notes that cannot be written leave no bump and no tag behind, and the next
+      # run releases the same commits.
+      - name: Write the release notes
+        if: steps.released.outputs.SKIP == 'false' && steps.bump_type.outputs.BUMP_TYPE != 'none'
+        env:
+          PREV: ${{ steps.prev.outputs.TAG }}
+          NEW_VERSION: ${{ steps.version.outputs.NEW_VERSION }}
+        run: scripts/release-notes.sh "$PREV" HEAD "$NEW_VERSION" "$RUNNER_TEMP/release-prs" > "$RUNNER_TEMP/release-notes.md"
 
       - name: Commit version bump
-        if: steps.released.outputs.SKIP == 'false'
+        if: steps.released.outputs.SKIP == 'false' && steps.bump_type.outputs.BUMP_TYPE != 'none'
         run: |
           git add mix.exs
           git commit -m "chore: bump version to ${{ steps.version.outputs.NEW_VERSION }}"
@@ -215,33 +240,18 @@ jobs:
           git push origin HEAD:main
 
       - name: Create Git tag
-        if: steps.released.outputs.SKIP == 'false'
+        if: steps.released.outputs.SKIP == 'false' && steps.bump_type.outputs.BUMP_TYPE != 'none'
         run: |
           git tag -a "v${{ steps.version.outputs.NEW_VERSION }}" -m "Release v${{ steps.version.outputs.NEW_VERSION }}"
           git push origin "v${{ steps.version.outputs.NEW_VERSION }}"
 
       - name: Create GitHub Release
-        if: steps.released.outputs.SKIP == 'false'
+        if: steps.released.outputs.SKIP == 'false' && steps.bump_type.outputs.BUMP_TYPE != 'none'
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: v${{ steps.version.outputs.NEW_VERSION }}
           name: Release v${{ steps.version.outputs.NEW_VERSION }}
-          body: |
-            ## 🚀 Malachi v${{ steps.version.outputs.NEW_VERSION }}
-
-            ${{ steps.changelog.outputs.CHANGELOG }}
-
-            ### 🐳 Docker
-            ```bash
-            docker pull hectorcardoso/malachi:${{ steps.version.outputs.NEW_VERSION }}
-            ```
-
-            ### 📦 Installation
-            ```bash
-            git clone https://github.com/malachi-hq/malachi.git
-            cd malachi
-            git checkout v${{ steps.version.outputs.NEW_VERSION }}
-            ```
+          body_path: ${{ runner.temp }}/release-notes.md
           draft: false
           prerelease: false
         env:
@@ -250,7 +260,7 @@ jobs:
       # The Pages site is built by pages.yml, which runs after Publish results or on a dispatch, never on a push.
       # Dispatch it here so it checks out main (now bumped) and republishes the site with the new version.
       - name: Rebuild the documentation site for the new version
-        if: steps.released.outputs.SKIP == 'false'
+        if: steps.released.outputs.SKIP == 'false' && steps.bump_type.outputs.BUMP_TYPE != 'none'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run pages.yml --ref main
@@ -275,8 +285,9 @@ jobs:
 
       - name: Extract version components
         id: version
+        env:
+          VERSION: ${{ needs.release.outputs.new_version }}
         run: |
-          VERSION="${{ needs.release.outputs.new_version }}"
           MAJOR=$(echo $VERSION | cut -d. -f1)
           MINOR=$(echo $VERSION | cut -d. -f2)
           echo "MAJOR=$MAJOR" >> $GITHUB_OUTPUT

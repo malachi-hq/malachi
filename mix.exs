@@ -1,7 +1,7 @@
 defmodule Malachi.MixProject do
   use Mix.Project
 
-  @version "0.28.0"
+  @version "0.28.3"
   @source_url "https://github.com/malachi-hq/malachi"
   # Where the published site lives. Once the site's staging task is wired into the docs build (see Malachi.Site),
   # its sitemap and robots.txt will be built from this value, so a custom domain will change this one line.
@@ -39,7 +39,9 @@ defmodule Malachi.MixProject do
       main: "introduction",
       logo: "priv/static/logo.svg",
       favicon: "priv/static/logo.svg",
-      source_ref: "v#{@version}",
+      # The release's tag, unless the build names the commit it was made from (pages.yml does): most merges
+      # publish no release, so the site's own build would otherwise link to a tag missing newer modules.
+      source_ref: System.get_env("MALACHI_DOCS_SOURCE_REF", "v#{@version}"),
       # HTML only: the site is what gets published, and skipping the epub halves the build (CI runs this).
       formatters: ["html"],
       # Render ```mermaid fenced blocks as diagrams. GitHub renders them natively; ExDoc needs this hook.

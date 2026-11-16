@@ -96,3 +96,15 @@ an approach becomes a lie when the plan changes.
 ```
 
 ```
+
+**Release highlights**
+
+<!--
+Optional, for a milestone: two or three sentences on what the change means for someone using Malachi, in a
+code block. open-issue-pr copies them into the PR's `## Release highlights` section, and the release notes
+show them above the grouped list of changes. Delete this marker and its block when there are none.
+-->
+
+```
+
+```

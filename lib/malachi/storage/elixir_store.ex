@@ -20,9 +20,9 @@ defmodule Malachi.Storage.ElixirStore do
 
   ## Preallocation
 
-  With `:prealloc_bytes` set, a new segment is sized to that many bytes at creation
-  (`Malachi.Storage.Preallocation`) so that appends overwrite an already-allocated region instead
-  of extending the file. Measured on an `ubuntu-latest` runner in the regime the pinned ceiling
+  With `:prealloc_bytes` set, an active segment's file is sized ahead of its writes, up to that many
+  bytes (`Malachi.Storage.Preallocation`), so that appends overwrite an already-allocated region
+  instead of extending the file. When and by whom the room is made is below. Measured on an `ubuntu-latest` runner in the regime the pinned ceiling
   harness runs (batch 10 x 256B, one sync per produce), that takes the per-flush p50 from 317us to
   96us, a 70% cut, against a measured noise floor of 2us. The reason is that a growing file changes
   its size on every append, and a size change is metadata the following sync has to journal; a
@@ -32,10 +32,25 @@ defmodule Malachi.Storage.ElixirStore do
   costs more than the journal saves once a flush is large. The crossover is around 170KB per flush
   and `Malachi.Storage.Preallocation` carries the measured curve.
 
-  It costs one full-size write at creation (36ms for 64MB on that runner) and it changes what the
+  It costs writing those zeros (36ms for 64MB on that runner, paid a step at a time) and it changes what the
   unwritten tail looks like, which recovery has to understand: see `classify_tail/2`. The tail is
   truncated away on `seal/1` and on `close/1`, so a segment this store is not actively writing is
   byte-exact, and every size the rest of the system reads off disk keeps meaning what it meant.
+
+  ### Who pays the zeros, and when (issue #283)
+
+  The handle that writes a segment is owned by a process every other segment of the node waits on
+  (`Malachi.Cluster.ReplicationServer`), so the zeros are never written all at once on its behalf:
+
+    * `open/3` creates an empty file. Its room is made in steps of `:prealloc_step_bytes` (4MB by
+      default): a flush that would end past the room made so far first makes room to one step past its
+      end, up to `:prealloc_bytes` and never past it. One step costs a bounded write; the whole region,
+      never. A pool of files zeroed ahead of time was measured against the steps and lost: its refills
+      wrote whole regions while appends ran, and the appends of a burst of new segments waited longer
+      behind them than behind the steps (the measurement is on #283).
+    * `recover/3` does not extend a segment at all. Learning where a segment ends (the recovery after a
+      restart, a probe, a cold read) must not cost a write, and before #283 it cost the whole region for
+      every active segment a broker asked about. Its first flush makes room in steps, like a new one.
 
   ## Failures
 
@@ -43,9 +58,10 @@ defmodule Malachi.Storage.ElixirStore do
   `Malachi.Storage.SegmentStore`. That includes a read that fails while recovery scans the segment:
   it is answered as the storage failure it is, never classified as damage to the bytes and recovered
   around. The one deliberate exception is preallocation: it is an optimization, so an extension that
-  fails degrades to an unpreallocated segment rather than failing the open or recovery, and the next
-  commit reports the condition if it persists. It degrades only if the file can be put back to its
-  previous size; when it cannot, the handle is refused (see `Malachi.Storage.Preallocation.extend_or_restore/4`).
+  fails degrades the handle to an unpreallocated segment rather than failing the flush that needed the
+  room, and that handle asks for no room again. It degrades only if the file can be put back to its
+  previous size; when it cannot, the flush fails with the error, before writing anything (see
+  `Malachi.Storage.Preallocation.extend_or_restore/4`).
   """
 
   @behaviour Malachi.Storage.SegmentStore
@@ -72,6 +88,9 @@ defmodule Malachi.Storage.ElixirStore do
   # Off unless asked for. A store is a library and `open/3` writing tens of megabytes by default
   # would be hostile; `Malachi.Application` is what turns it on for a real deployment.
   @default_prealloc_bytes 0
+  # How much room one extension makes: bounded, so a flush that has
+  # to make room pays a few megabytes of zeros instead of the whole region (see the moduledoc).
+  @default_prealloc_step_bytes 4 * 1_048_576
   # How far past the last valid frame recovery looks to tell a torn write from rot. Bounded on
   # purpose: the alternative is scanning the whole preallocated region on every damaged recovery,
   # and what a bounded window cannot see (isolated garbage stranded in the middle of the unwritten
@@ -120,7 +139,8 @@ defmodule Malachi.Storage.ElixirStore do
           flush_bytes: pos_integer(),
           flush_count: pos_integer(),
           prealloc_bytes: non_neg_integer(),
-          preallocated_to: non_neg_integer() | nil,
+          prealloc_step_bytes: pos_integer(),
+          preallocated_to: non_neg_integer() | :deferred | nil,
           integrity: :ok | integrity_verdict(),
           append_refusal: nil | :damaged_tail
         }
@@ -159,11 +179,17 @@ defmodule Malachi.Storage.ElixirStore do
     # still reads, but `append/2` answers `{:error, :damaged_tail}` instead of writing over the damage.
     append_refusal: nil,
     flush_count: @default_flush_count,
+    # How far this handle may still preallocate. A failed extension sets it to 0, so a device that refused
+    # room once is not asked again on every flush (see `make_room/2`).
     prealloc_bytes: @default_prealloc_bytes,
-    # How far this handle preallocated, or `nil` when it did not. It is what authorizes trimming
-    # the tail on `seal/1` and `close/1`, and it is deliberately a field rather than a test on
-    # `prealloc_bytes`: a read-only handle from `open_read/3` must never be able to truncate a
-    # sealed segment, whatever options it was passed.
+    prealloc_step_bytes: @default_prealloc_step_bytes,
+    # How far this handle preallocated: an integer when it made room, `:deferred` when it is allowed to and
+    # has not yet (its first flush will), or `nil` when it did not and must not. It is what authorizes
+    # trimming the tail on `seal/1` and `close/1`, which only `nil` skips, and it is deliberately a field
+    # rather than a test on `prealloc_bytes`: a read-only
+    # handle from `open_read/3` must never be able to truncate a sealed segment, whatever options it was
+    # passed. A `:deferred` handle trims too: recovery can leave a tail behind it (a crash's blank space,
+    # or a torn run zeroed by `discard_tail/4`) that a seal must not count as the segment's size.
     preallocated_to: nil,
     integrity: :ok
   ]
@@ -184,8 +210,7 @@ defmodule Malachi.Storage.ElixirStore do
          :ok <- File.mkdir_p(directory),
          :ok <- absent(path),
          :ok <- File.touch(path),
-         {:ok, file_descriptor} <- :file.open(path, [:read, :write, :raw, :binary]),
-         {:ok, preallocated_to} <- preallocate_or_close(file_descriptor, prealloc_bytes) do
+         {:ok, file_descriptor} <- :file.open(path, [:read, :write, :raw, :binary]) do
       {:ok,
        %__MODULE__{
          segment: segment,
@@ -200,10 +225,14 @@ defmodule Malachi.Storage.ElixirStore do
          flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes),
          flush_count: Keyword.get(opts, :flush_count, @default_flush_count),
          prealloc_bytes: prealloc_bytes,
-         preallocated_to: preallocated_to
+         prealloc_step_bytes: step_bytes(opts),
+         # Room is made by the flushes, in steps; with preallocation off, by nobody.
+         preallocated_to: if(prealloc_bytes > 0, do: :deferred)
        }}
     end
   end
+
+  defp step_bytes(opts), do: Keyword.get(opts, :prealloc_step_bytes, @default_prealloc_step_bytes)
 
   defp absent(path), do: if(File.exists?(path), do: {:error, :already_exists}, else: :ok)
 
@@ -244,19 +273,6 @@ defmodule Malachi.Storage.ElixirStore do
       {:ok, bytes} -> {:ok, bytes}
       :eof -> {:ok, <<>>}
       {:error, _reason} = error -> error
-    end
-  end
-
-  # A handle whose preallocation could not be undone is not handed out, so nothing else would ever close its
-  # descriptor.
-  defp preallocate_or_close(file_descriptor, prealloc_bytes) do
-    case preallocate(file_descriptor, prealloc_bytes) do
-      {:ok, _preallocated_to} = preallocated ->
-        preallocated
-
-      {:error, _reason} = error ->
-        _ = :file.close(file_descriptor)
-        error
     end
   end
 
@@ -324,7 +340,7 @@ defmodule Malachi.Storage.ElixirStore do
          classification = classify_tail(halt, shape),
          action = action_for(classification, sealed?),
          :ok <- apply_tail_action(action, file_descriptor, valid_bytes, shape, prealloc_bytes),
-         {:ok, preallocated_to} <- recovered_preallocation(action, sealed?, file_descriptor, prealloc_bytes) do
+         {:ok, preallocated_to} <- recovered_preallocation(action, sealed?, prealloc_bytes) do
       integrity = integrity_verdict(verdict_key(classification, halt), valid_bytes, shape, sealed?, prealloc_bytes > 0)
 
       segment = %Segment{
@@ -352,6 +368,7 @@ defmodule Malachi.Storage.ElixirStore do
          flush_bytes: Keyword.get(opts, :flush_bytes, @default_flush_bytes),
          flush_count: Keyword.get(opts, :flush_count, @default_flush_count),
          prealloc_bytes: prealloc_bytes,
+         prealloc_step_bytes: step_bytes(opts),
          preallocated_to: preallocated_to,
          integrity: integrity,
          append_refusal: append_refusal(action, sealed?)
@@ -381,11 +398,15 @@ defmodule Malachi.Storage.ElixirStore do
   # and `write_position` is `valid_bytes`: the byte the damage STARTS at. Setting it here would have closing
   # the handle delete the damaged frame and every valid frame behind it, which is the same loss the
   # extension itself was just fixed for, one door further along.
-  defp recovered_preallocation(:preserve, _sealed?, _file_descriptor, _prealloc_bytes), do: {:ok, nil}
-  defp recovered_preallocation(_action, true, _file_descriptor, _prealloc_bytes), do: {:ok, nil}
-
-  defp recovered_preallocation(_action, false, file_descriptor, prealloc_bytes),
-    do: preallocate(file_descriptor, prealloc_bytes)
+  #
+  # An active segment is not extended here at all, only marked `:deferred`: its first flush makes the room
+  # (`make_room/2`). Recovery is how a segment's end is learned, after a restart or by a probe that never
+  # writes, and writing the whole region of every active segment to answer that is what held a restarted
+  # broker for a quarter of a second per range (#283).
+  defp recovered_preallocation(:preserve, _sealed?, _prealloc_bytes), do: {:ok, nil}
+  defp recovered_preallocation(_action, true, _prealloc_bytes), do: {:ok, nil}
+  defp recovered_preallocation(_action, false, 0), do: {:ok, nil}
+  defp recovered_preallocation(_action, false, _prealloc_bytes), do: {:ok, :deferred}
 
   defp apply_tail_action(:discard_tail, file_descriptor, valid_bytes, shape, prealloc_bytes),
     do: discard_tail(file_descriptor, valid_bytes, shape, prealloc_bytes)
@@ -588,50 +609,59 @@ defmodule Malachi.Storage.ElixirStore do
     Preallocation.extend(file_descriptor, valid_bytes, valid_bytes + shape.written_bytes, :zeros)
   end
 
-  # Sizes a segment at creation, or re-sizes a recovered one, and answers how far it reached so the
-  # handle knows whether it may trim the tail later. `nil` for a segment that was not preallocated.
+  # Makes room for a flush that will end at `end_position`, a step at a time (see the moduledoc): when that
+  # end is past the room made so far, the room grows to one step past it, never past `prealloc_bytes`. A
+  # flush that ends inside the room changes no size, which is the saving preallocation exists for, so it is
+  # only the flush that crosses the room's edge that pays for the next step. A segment that already has its
+  # whole room, or does not preallocate, is left as it is.
   #
-  # The sync is not optional, and it was measured. Preallocating leaves the whole region dirty in
-  # the page cache, and without a sync here the first commits inherit that writeback: in the batch
-  # 1024 x 1KB case, where the preallocated region is large relative to the number of flushes that
-  # follow it, the per-flush p99 went from 23.7ms growing to 72.0ms preallocated, three times worse,
-  # while the p50 in the small-batch regimes was already 55% better. Paying it once, here, is what
-  # keeps the cost a property of creating a segment rather than of committing to one.
-  defp preallocate(_file_descriptor, 0), do: {:ok, nil}
+  # The sync is not optional, and it was measured. Preallocating leaves the region dirty in the page
+  # cache, and without a sync the commits that follow inherit that writeback: in the batch 1024 x 1KB
+  # case the per-flush p99 went from 23.7ms growing to 72.0ms preallocated, three times worse. Paying it
+  # with the extension is what keeps it a property of making room rather than of committing records.
+  # `Preallocation.extend_or_restore/4` syncs before it answers.
+  #
+  # Preallocation is an optimization, and a segment works without it, so an extension that fails degrades
+  # to the behavior this store had before it existed rather than failing the flush. ENOSPC is the
+  # realistic trigger, and it is not hidden: the append that follows still reports a full volume. The file
+  # is put back to the size it had first, and the handle stops asking (`prealloc_bytes` goes to 0), so a
+  # device that refused room once is not asked again on every flush. The room made before the failure
+  # still authorizes trimming: everything past `write_position` is zeros this handle or a crash put there.
+  #
+  # Putting the file back can fail too, and that one does NOT degrade: the file may keep zeros past its
+  # last record that nothing is authorized to trim, and a sealed segment is measured off its file size, so
+  # those zeros would enter the sealed `byte_size` and make every intact copy on the other replicas look
+  # short. The flush fails instead, which the replication server treats as the storage failure it is.
+  defp make_room(%__MODULE__{prealloc_bytes: 0} = store, _end_position), do: {:ok, store}
+  defp make_room(%__MODULE__{preallocated_to: nil} = store, _end_position), do: {:ok, store}
 
-  defp preallocate(file_descriptor, prealloc_bytes) do
-    # From the file's CURRENT size, never from `valid_bytes`. The bytes between the two belong to
-    # whatever recovery just decided about them, and for a `:rot` tail that decision was `:preserve`:
-    # extending from `valid_bytes` would zero the damaged frame AND every valid frame after it, so
-    # the next recovery would read unwritten space, report `:ok`, and the node would call itself
-    # healthy having silently lost the records a peer was supposed to repair.
-    #
-    # A size that cannot even be read degrades the same way an extension that fails does, and with
-    # nothing to put back: no byte has been written yet.
-    #
-    # Preallocation is an optimization, and a segment works without it, so an extension that fails degrades
-    # to the behavior this store had before it existed rather than failing the open. ENOSPC is the realistic
-    # trigger, and it is not hidden: claiming the space up front only moves WHEN a full volume is noticed,
-    # and the append that follows still reports it. The file is put back to the size it had first, so a
-    # partial extension cannot leave a tail behind that `seal/1` would then not trim (`preallocated_to`
-    # stays nil, which is what authorizes trimming). A sync that fails after a whole extension is the same
-    # device failing, and it degrades the same way.
-    #
-    # Putting the file back can fail too, and that one does NOT degrade: the file may keep zeros past its
-    # last record that nothing is authorized to trim, and a sealed segment is measured off its file size,
-    # so those zeros would enter the sealed `byte_size` and make every intact copy on the other replicas
-    # look short. The handle is refused instead, which the replication server treats as the storage failure
-    # it is.
-    case Preallocation.file_size(file_descriptor) do
-      {:ok, size} -> preallocated_or_error(file_descriptor, size, prealloc_bytes)
-      {:error, _reason} -> {:ok, nil}
+  defp make_room(%__MODULE__{} = store, end_position) do
+    case file_size(store) do
+      {:ok, size} ->
+        target = min(store.prealloc_bytes, end_position + store.prealloc_step_bytes)
+
+        if size >= store.prealloc_bytes or end_position <= size,
+          do: {:ok, %{store | preallocated_to: size}},
+          else: extend_room(store, size, target)
+
+      # A size that cannot be read degrades like an extension that fails, with nothing to put back.
+      {:error, _reason} ->
+        {:ok, %{store | prealloc_bytes: 0}}
     end
   end
 
-  defp preallocated_or_error(file_descriptor, size, prealloc_bytes) do
-    case Preallocation.extend_or_restore(file_descriptor, size, prealloc_bytes, :zeros) do
-      :extended -> {:ok, prealloc_bytes}
-      :restored -> {:ok, nil}
+  # The file's size, from what the handle knows when it can: the room it made, or the records it wrote
+  # past it. A `:deferred` handle has made none, so it asks the file, which may still hold the blank tail
+  # of a process that died writing it. The extension always starts here, never at `write_position`: the
+  # bytes between the two are room already made, and for a recovered segment they are what recovery
+  # decided about its tail.
+  defp file_size(%__MODULE__{preallocated_to: :deferred} = store), do: Preallocation.file_size(store.file_descriptor)
+  defp file_size(%__MODULE__{} = store), do: {:ok, max(store.preallocated_to, store.write_position)}
+
+  defp extend_room(store, size, target) do
+    case Preallocation.extend_or_restore(store.file_descriptor, size, target, :zeros) do
+      :extended -> {:ok, %{store | preallocated_to: target}}
+      :restored -> {:ok, %{store | preallocated_to: size, prealloc_bytes: 0}}
       {:error, _reason} = error -> error
     end
   end
@@ -1176,7 +1206,10 @@ defmodule Malachi.Storage.ElixirStore do
     # a storage failure by the caller that takes the copy out of service.
     started_us = System.monotonic_time(:microsecond)
 
-    with :ok <- :file.pwrite(store.file_descriptor, store.write_position, Enum.reverse(frames_iodata)),
+    # Room first, so the frames land in allocated space. Inside the timed unit: a flush that makes room
+    # is a flush a producer waits on, and leaving the step out would report a latency no caller sees.
+    with {:ok, store} <- make_room(store, end_position),
+         :ok <- :file.pwrite(store.file_descriptor, store.write_position, Enum.reverse(frames_iodata)),
          :ok <- :file.sync(store.file_descriptor) do
       %Segment{} = current_segment = store.segment
 

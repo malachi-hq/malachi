@@ -48,7 +48,8 @@ Two planes, replicated by different mechanisms, which is the design's central de
 
 - **Metadata** (topics, ranges, segment placement) rides on `ra`, one Raft group per vnode.
 - **Records** are replicated by a purpose-built quorum: the primary ships a batch to its followers and
-  acknowledges once a quorum has **fsynced** it, tolerating ⌊(N-1)/2⌋ slow or unreachable replicas.
+  acknowledges once a majority of the segment's replicas has **fsynced** it, tolerating ⌊(N-1)/2⌋ slow
+  or unreachable replicas ([what an acknowledgement covers](../ARCHITECTURE.md#what-an-acknowledgement-covers)).
 
 Metadata is small, changes rarely and needs linearizability, which is what Raft is good at. Records are
 high-volume and sequential, where routing every batch through a consensus log would pay for a second
@@ -61,8 +62,8 @@ durable write to no benefit: the segment already *is* the log.
 ## Durability and group commit
 
 The baseline is simple and strict: **every produce is fsynced before its ack**. On a single node (rf=1)
-that is one fsync on one disk; replicated (rf>1) it is a quorum of replicas each fsyncing before the
-ack. You never get an ack for data that only lives in memory.
+that is one fsync on one disk; replicated (rf>1) it is a majority of the segment's replicas each fsyncing
+before the ack. You never get an ack for data that only lives in memory.
 
 The cost of that strictness is one fsync per produce, and at high concurrency the disk serializes on
 them. **Group commit** is the classic fix: park the concurrent produces briefly, fsync once, then ack
@@ -91,8 +92,8 @@ workload is latency-critical single-digit-milliseconds.
 With `MALACHI_REPLICATION_GROUP_COMMIT=true` on rf>1, the same coalescing happens on **every replica**:
 the primary buffers and pushes immediately, each follower buffers too, and on each flush tick every
 replica does one fsync covering all batches since the last tick, then acks cumulatively; the produce
-ack still waits for a durable quorum. This is exactly the NorthGuard model, and whether it helps
-**depends on the shape of your load**, which is why it defaults to off:
+ack still waits for a durable majority. These are the coalescing triggers NorthGuard uses, and whether it
+helps **depends on the shape of your load**, which is why it defaults to off:
 
 - **Turn it ON when many producers hammer the same ranges on fsync-bound disks.** Example: hundreds of
   producers writing to a handful of hot topics, storage where fsync costs milliseconds (HDDs, network
@@ -215,8 +216,13 @@ only the first boot of a brand-new cluster seeds from `MALACHI_LOG_VNODES`.
 
 ## Rebalancing
 
-Placement is rendezvous (HRW) hashing, so adding or removing a node changes the desired placement for some
-segments. Moving them is **manual by default**:
+On a sharded control plane (`MALACHI_LOG_VNODES` above 1), placement is rendezvous (HRW) hashing, so
+adding or removing a node changes the desired placement of some vnodes' Raft members. Two things happen without anyone asking: a node that joins can be chosen for new
+segments from their next roll on, and the leader of each vnode replaces a lost **segment** replica on
+another live broker. What does not happen by itself is moving a vnode's **members**, including replacing
+one that a dead node held: that is planned and committed by the lease holder, and it is **manual by
+default** (the reasons and the cost are in the
+[architecture notes](../ARCHITECTURE.md#known-divergence-who-replenishes-the-replicas-of-a-vnode)):
 
 ```bash
 MALACHI_AUTO_REBALANCE=true
@@ -225,9 +231,9 @@ MALACHI_AUTO_REBALANCE_STABILIZATION=3
 ```
 
 With auto-rebalancing on, the lease holder computes a plan each tick and commits it only after the plan is
-**non-empty and identical for `STABILIZATION` consecutive ticks** (default 3, so about 90 seconds). A node
-that flaps, briefly suspected then alive again, therefore never moves data: the plan changes, the counter
-resets, nothing commits.
+**non-empty and identical for `STABILIZATION` consecutive ticks** (default 3: the third tick that sees it,
+so 60 seconds after the plan first appears). A node that flaps, briefly suspected then alive again,
+therefore never moves data: the plan changes, the counter resets, nothing commits.
 
 > **Analogy.** Placement is a seating rule everyone computes the same way, so when a guest arrives or leaves
 > only a few seats change, not the whole room. And before moving anyone's belongings, the host waits to be

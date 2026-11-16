@@ -468,7 +468,7 @@ A paired A/B of the sealed-copy integrity probe (`SelfHealing.heal_sealed/4`, is
 against a baseline tree, with an A-A control and arms interleaved by run, at 1,000 and 10,000 sealed segments
 on three replication servers in one VM. A sample reports the wall clock of a heal pass and the calls one pass
 makes, counted by tracing what the replication servers receive. On the branch tree alone, a sweep then times
-one batched `stored_bytes_of/3` call for each chunk size, which is how long a replication server serves nothing
+one batched `stored_bytes_of/4` call for each chunk size, which is how long a replication server serves nothing
 else, and is what the default `:probe_chunk` of `Malachi.Cluster.SelfHealing` was chosen from. `AB_MODE=cold`
 measures batch copies whose logical size is not cached yet (a follower's copy right after a backfill), with and
 without the replication server's per-call budget, and how long a call queued behind them waits. Writing the
@@ -478,4 +478,35 @@ what this measures. Only a Linux run counts.
 
 ```bash
 AB_REPS=5 benchmark/integrity_probe_ab.sh /path/to/main-checkout . /tmp/integrity-probe-ab
+```
+
+### `restart_recovery_ab.sh` / `restart_recovery_ab.exs`
+
+A paired A/B of what learning where the active ranges end costs a node (issue #283), the branch tree
+against a baseline tree, with an A-A control and arms interleaved by run in a shuffled order, over a
+grid of cells (`AB_CELLS`, each `CASE:RANGES:PREALLOC_BYTES:volume|overlay:REPS`). Three cases:
+`restart` times a broker restart until its first answer, `first_produce` times the first produce to
+each range after one, and `burst` times a steady producer's appends while new segments open on the same
+replication server, the shape #275's drills caught. The verdict rule is the one in
+`support/paired_stats.exs`, through `support/ab_lib.sh` and `support/ab_run.exs`, judged per cell.
+Linux only: `restart_recovery_ab_docker.sh` runs it in a container pinned to `SRV_CPUSET`, with its
+scratch on a Docker named volume (`volume`) and on the container's overlay (`overlay`). Its work
+directory must be one the Docker VM shares (under /Users with Colima), never /tmp.
+
+```bash
+AB_CELLS="restart:100:67108864:volume:10 burst:12:67108864:volume:10" \
+  benchmark/restart_recovery_ab_docker.sh origin/main /Users/me/ab-283
+```
+
+### `loop_stall_ab.sh` / `loop_stall_ab.exs`
+
+A paired A/B of how long a node's broker loop keeps a client waiting while one peer is frozen (issue
+#283, Part 2). One sample is a fresh three-node cluster (`loop_stall_cluster.sh`, through
+`scripts/chaos_lib.sh`): single-range topics are seeded, node 1's `GET /ready` is sampled every 20ms
+(`support/ready_probe.exs`), and node 3 is frozen with `docker pause` for 40s, under the distribution
+tick. The frozen window's latencies are judged by `support/paired_stats.exs`. It brings a cluster up,
+so it is serial with every chaos drill: check `docker ps` first.
+
+```bash
+STALL_REPS=5 benchmark/loop_stall_ab.sh /Users/me/main-tree /Users/me/branch-tree /Users/me/stall-out
 ```

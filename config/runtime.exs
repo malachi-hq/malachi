@@ -203,7 +203,8 @@ config :malachi,
   # replication unit and is what the storage-chaos harness uses to exercise sealed-segment recovery
   # within its window; production setups normally leave this at the default.
   segment_max_bytes: parse_int.("MALACHI_SEGMENT_MAX_BYTES", nil),
-  # How far a new segment file is sized at creation so appends stop extending it. 64MB by default,
+  # How far an active segment file is sized ahead of its writes, in 4MB steps on the flushes that need
+  # the room, so appends stop extending it. 64MB by default,
   # matching the size a segment reaches before the broker rolls it. 0 turns it off, which is what a
   # copy-on-write filesystem wants and what a deployment whose flushes exceed ~170KB wants, since
   # above that the trade reverses. See Malachi.Application.segment_prealloc_bytes/0 and the measured

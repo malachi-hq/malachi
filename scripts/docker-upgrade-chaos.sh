@@ -116,9 +116,9 @@ apply_to() {
 
 # --- the two images ---
 
-# OLD is the release an operator would be upgrading from. Every merge to main is tagged as a release, so on
-# main the newest tag usually holds the very code being certified, and rolling from it would certify a release
-# against itself. So: when the working tree's code (lib, config, mix.lock) is the newest release's, OLD is the
+# OLD is the release an operator would be upgrading from. A merge that changes no code (docs, tests, CI) publishes
+# no release, but one right after a release leaves main's code equal to the newest tag's, and rolling from it would
+# certify a release against itself. So: when the working tree's code (lib, config, mix.lock) is the newest release's, OLD is the
 # newest release whose code differs; when it differs from the newest, as on a branch ahead of the last
 # release, OLD is the newest release.
 # Whether this tree's code is exactly release $1's: lib, config and mix.lock. A file under lib or config that
@@ -140,8 +140,9 @@ resolve_old_ref() {
     [ -n "$newest" ] ||
       usage_error "no release tag is reachable from HEAD; fetch the tags (fetch-depth: 0) or set OLD_REF"
     if same_code_as "$newest"; then
-      # Back through the releases until one whose code differs: a merge that changed only the docs is tagged
-      # too, and the release before it holds this very code.
+      # Back through the releases until one whose code differs: a release may change only the docs (every
+      # merge was released before #366, and the `release` label still can), and the one before it holds this
+      # very code.
       OLD_REF=""
       for tag in $(git tag --list 'v*' --merged "$newest" --sort=-v:refname); do
         same_code_as "$tag" || { OLD_REF=$tag; break; }

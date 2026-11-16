@@ -1227,11 +1227,12 @@ defmodule Malachi.Cluster.ReplicationServerTest do
         {:ok, _last} = ReplicationServer.append(server, @segment, [server], 0, records(~w(a b c)))
       end
 
-      assert active_segment_file_size(directory) == @prealloc
-
-      # An ACTIVE preallocated segment: its file is 256KB, and neither number may say so.
+      # An ACTIVE preallocated segment: its file is 256KB, and neither number may say so. The room is made
+      # by the first flush (#283), which `durable_stats/4` makes before it answers.
       assert ReplicationServer.durable_stats(preallocated, @segment, 0) ==
                ReplicationServer.durable_stats(plain, @segment, 0)
+
+      assert active_segment_file_size(directory) == @prealloc
 
       {:ok, _end_offset, active_bytes} = ReplicationServer.durable_stats(preallocated, @segment, 0)
 

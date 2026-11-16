@@ -10,6 +10,14 @@
 # pr-description  the first code block after `**Description**` in the `## PR` section, verbatim.
 # verification    the `## Verification` section, verbatim, without its leading blank lines.
 # plan            the `## Plan` section, the same way.
+# release-highlights  the `## Release highlights` section of a pull request description (release-notes.sh).
+# pr-highlights   the first code block after `**Release highlights**` in the `## PR` section, verbatim
+#                 (open-issue-pr copies it into the pull request).
+#
+# The two highlights modes read a text a person wrote by hand, from the pull request template: they drop
+# carriage returns and every HTML comment outside a code block before scanning (the template's own
+# instructions are one), match the heading or the marker in any case, and print nothing when a comment is
+# left open, since where the author meant it to end cannot be known.
 #
 # Every scan tracks code fences FIRST and ignores every marker inside one: an issue that shows what the
 # template looks like puts `## PR` and `**Branch**` inside a code block, and a `##` line inside a block
@@ -55,7 +63,7 @@ function closes(line) { return is_fence(line) && fc == och && fn >= olen && fres
 # The first code block after a bold marker inside the `## PR` section. `first_line` keeps only its first
 # non-empty line (the branch); otherwise the whole block is printed.
 pr_block() {
-  LC_ALL=C awk -v marker="$1" -v first_line="$2" "$FENCE_AWK"'
+  LC_ALL=C awk -v marker="$1" -v first_line="$2" -v ci="${3:-0}" "$FENCE_AWK"'
     fence && closes($0) { fence = 0; if (c) exit; next }
     !fence && is_fence($0) { fence = 1; och = fc; olen = fn; if (m && !c) c = 1; next }
     c && first_line && NF { print; exit }
@@ -64,21 +72,47 @@ pr_block() {
     !p && /^## PR[[:space:]]*$/ { p = 1; next }
     !p { next }
     /^## / { exit }
-    !m && index($0, "**" marker "**") == 1 { m = 1 }
+    !m && index(ci ? tolower($0) : $0, "**" (ci ? tolower(marker) : marker) "**") == 1 { m = 1 }
   ' "$issue"
 }
 
 # A whole `## <title>` section, code blocks included, up to the next `## ` heading outside a block.
 heading_section() {
-  LC_ALL=C awk -v title="$1" "$FENCE_AWK"'
+  LC_ALL=C awk -v title="$1" -v ci="${2:-0}" "$FENCE_AWK"'
     fence && closes($0) { fence = 0; if (v) print; next }
     !fence && is_fence($0) { fence = 1; och = fc; olen = fn; if (v) print; next }
     fence { if (v) print; next }
-    !v && $0 ~ ("^## " title "[[:space:]]*$") { v = 1; next }
+    !v && (ci ? tolower($0) : $0) ~ ("^## " (ci ? tolower(title) : title) "[[:space:]]*$") { v = 1; next }
     !v { next }
     /^## / { exit }
     { print }
   ' "$issue" | sed -e '/./,$!d'
+}
+
+# The highlights modes' input: no carriage returns, and no HTML comment outside a code block. A comment may
+# span lines and share a line with text. Fails, printing nothing, when the text ends inside a comment.
+strip_comments() {
+  LC_ALL=C awk "$FENCE_AWK"'
+    { gsub(/\r/, "") }
+    fence && closes($0) { fence = 0; buf[++nb] = $0; next }
+    !fence && !incom && is_fence($0) { fence = 1; och = fc; olen = fn; buf[++nb] = $0; next }
+    fence { buf[++nb] = $0; next }
+    {
+      line = $0; kept = ""
+      while (1) {
+        if (incom) {
+          e = index(line, "-->")
+          if (!e) { line = ""; break }
+          line = substr(line, e + 3); incom = 0
+        }
+        s = index(line, "<!--")
+        if (!s) { kept = kept line; break }
+        kept = kept substr(line, 1, s - 1); line = substr(line, s + 4); incom = 1
+      }
+      buf[++nb] = kept
+    }
+    END { if (incom) exit 1; for (i = 1; i <= nb; i++) print buf[i] }
+  ' "$issue"
 }
 
 # Written to a file rather than captured with $(...), which would drop trailing newlines: the section
@@ -95,6 +129,17 @@ case "$section" in
   pr-description) pr_block Description 0 > "$out" ;;
   verification) heading_section Verification > "$out" ;;
   plan) heading_section Plan > "$out" ;;
+  release-highlights | pr-highlights)
+    clean=$(mktemp "${TMPDIR:-/tmp}/issue-section.XXXXXX") || exit 2
+    trap 'rm -f "$out" "$clean"' EXIT
+    strip_comments > "$clean" || exit 3
+    issue=$clean
+    if [ "$section" = release-highlights ]; then
+      heading_section "Release highlights" 1 > "$out"
+    else
+      pr_block "Release highlights" 0 1 > "$out"
+    fi
+    ;;
   *) usage ;;
 esac
 

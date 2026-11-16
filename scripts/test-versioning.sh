@@ -68,7 +68,7 @@ if [ -f ".github/workflows/release.yml" ]; then
     if grep -q "bump-version.sh" .github/workflows/release.yml; then
         echo "   ${GREEN}✓${NC} Bump script configured"
     fi
-    if grep -q "create-release" .github/workflows/release.yml; then
+    if grep -q "action-gh-release" .github/workflows/release.yml; then
         echo "   ${GREEN}✓${NC} Release creation configured"
     fi
     if grep -q "docker/build-push-action" .github/workflows/release.yml; then
@@ -84,6 +84,6 @@ echo "${GREEN}✨ Tests Completed!${NC}"
 echo ""
 echo "Next steps:"
 echo "  1. Configure secrets on GitHub"
-echo "  2. Create the patch, minor and major labels on GitHub"
+echo "  2. Create the major and release labels on GitHub (the title decides everything else)"
 echo "  3. Commit and merge to main"
 echo ""

@@ -130,9 +130,13 @@ docker run --platform linux/amd64 hectorcardoso/malachi:latest
 
 The workflow in `.github/workflows/docker-build.yml` automates the process:
 
-- **Push to `main`**: Automatic build and push with `latest` tag
-- **Tag `v*`**: Build and push with specific version (e.g.: `v0.2.0` → tag `0.2.0`)
+- **Push to `main`**: Automatic build and push with the `main` and `sha-<commit>` tags
 - **Pull Request**: Build only (no push)
+
+The version tags (`X.Y.Z`, `X.Y`, `X`) and `latest` are published only by the docker job of
+`.github/workflows/release.yml`, from the release's tag. Most merges publish no release (see
+[What publishes a release](https://github.com/malachi-hq/malachi/blob/main/CONTRIBUTING.md#what-publishes-a-release)),
+so `latest` is the latest release, not the tip of `main`.
 
 ### Configure secrets on GitHub
 

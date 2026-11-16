@@ -61,8 +61,13 @@ jobs:
           done
           exit 1
 
+      # Source links point at the commit the site is built from: most merges publish no release, so the
+      # previous release's tag (mix.exs's default) may not hold a module the site documents.
       - name: 📝 Generate documentation
-        run: mix docs
+        run: |
+          MALACHI_DOCS_SOURCE_REF=$(git rev-parse HEAD)
+          export MALACHI_DOCS_SOURCE_REF
+          mix docs
 
       - name: ⚙️ Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6

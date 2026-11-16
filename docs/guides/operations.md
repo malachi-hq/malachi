@@ -123,9 +123,10 @@ Worth alerting on:
 
 ## Durability tuning (group commit)
 
-Every produce is fsynced before its ack; group commit coalesces those fsyncs. Two independent knobs,
-one per path (the [clustering guide](clustering-and-resharding.md#durability-and-group-commit) explains
-the decision rule with examples):
+Every produce is fsynced before its ack (with rf>1, on a majority of the segment's replicas); group
+commit coalesces those fsyncs. Two independent knobs, one per path (the
+[clustering guide](clustering-and-resharding.md#durability-and-group-commit) explains the decision rule
+with examples):
 
 ```bash
 # rf=1, broker-level. Recommended on for throughput workloads. It writes a segment's primary alone, so it
@@ -822,8 +823,8 @@ The checks that catch the common mistakes:
 - [ ] **Readiness probe on `/ready`**, not `/health`.
 - [ ] **You know your rollback floor.** Read [Upgrades and the rollback floor](#upgrades-and-the-rollback-floor)
       before the first upgrade, and make your service manager stop restarting on exit status 78.
-- [ ] **The upgrade you are about to make was certified.** Releases are tagged on every merge and are not
-      held back for it, so check it yourself: the
+- [ ] **The upgrade you are about to make was certified.** Releases are published on every merge users act on
+      and are not held back for it, so check it yourself: the
       [Rolling upgrade certification results](../generated/chaos-upgrade-results.md) page shows the last
       nightly run, which rolls a cluster from the newest release whose code differs from main's to main's code and back under
       load, following the procedure in [Upgrades and the rollback floor](#upgrades-and-the-rollback-floor).
