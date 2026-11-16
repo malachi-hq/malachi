@@ -257,7 +257,10 @@ defines:
   blocks, and stop when they are missing.
 
 Show the title and the body, and create the issue only on an explicit yes for that issue, with the
-labels `dependencies` and `tooling`. Then the contributor starts it with `start-issue-work`, which makes
+labels `dependencies` and `tooling`, plus `release` for a group whose packages ship in the image (Hex, ra,
+the Docker base images): the branch's title is `chore: deps ...`, which publishes no release on its own
+(`scripts/release_lib.sh`), and the label is how such an update still reaches users as a patch.
+`open-issue-pr` copies it onto the pull request. Actions and Terraform groups get no `release`. Then the contributor starts it with `start-issue-work`, which makes
 the branch from `origin/main`, the worktree and its environment. This skill never creates a branch or a
 worktree of its own.
 

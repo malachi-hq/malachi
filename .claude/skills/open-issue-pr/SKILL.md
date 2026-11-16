@@ -78,8 +78,9 @@ Then the preconditions, each one a stop with a report, never a fix the skill mak
 
 ## 2. The title: the branch, in Conventional Commits form
 
-`pr-checks.yml` fails any PR whose title is not `type(scope): summary`, and `release.yml` reads `feat:`
-in the title as a minor bump. So the branch name is the source and the title is its conventional form:
+`pr-checks.yml` fails any PR whose title is not `type(scope)!: summary`, and the merged title is what
+`release.yml` decides the release from (`scripts/release_lib.sh`). So the branch name is the source and the
+title is its conventional form:
 the prefix becomes the type and the slug becomes the summary, hyphens turned into spaces.
 
 | Branch prefix | Title |
@@ -89,23 +90,25 @@ the prefix becomes the type and the slug becomes the summary, hyphens turned int
 
 `feat/data-format-marker` becomes `feat: data format marker`. A branch with any other prefix, or with no
 `/`, is a stop: ask for the title rather than invent a type. Check the result against the workflow's own
-pattern before using it:
+check before using it, the script the workflow runs:
 
 ```
-printf '%s\n' "$title" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\(.+\))?: .+'
+PR_TITLE="$title" "$(/usr/bin/git rev-parse --show-toplevel)/scripts/release-bump.sh" --check
 ```
 
-## 3. The type of change and its version label
+## 3. The type of change and the release labels
 
-`release.yml` decides the version bump from the PR's `major`, `minor` or `patch` label, so the checkbox
-in the template and the label say the same thing:
+The title's type decides the release (`scripts/release_lib.sh`), so the checkbox in the template follows it:
 
-- **Major** when the issue carries a `major` or `breaking` label.
-- **Minor** when the branch prefix is `feat/`.
-- **Patch** for every other prefix.
+- **Major** when the issue carries a `major` or `breaking` label. The PR then also gets the `major` label,
+  the one way a branch prefix can ask for a major.
+- **Minor** for `feat/`.
+- **Patch** for `fix/`, `perf/` and `revert/`.
+- **No release** for every other prefix, unless the issue carries the `release` label, which the PR
+  inherits with the issue's other labels: then **Patch**.
 
-The matching label (`major`, `minor` or `patch`) is added to the PR on top of the issue's labels. If the
-issue already carries a version label that disagrees with this rule, stop and ask which one holds.
+No `patch` or `minor` label is added: the release does not read them. If the issue carries one of them
+anyway, say so in the report, since it has no effect.
 
 ## 4. The body: the repository's template, filled in
 
@@ -114,7 +117,10 @@ note exactly, and filling each section:
 
 - **📝 Description:** the `**Description**` block of the issue's `## PR` section, verbatim. That block
   is written to be the PR description. Missing: stop, the issue is incomplete.
-- **🔖 Type of Change:** `[x]` on the one line step 3 chose, `[ ]` on the other two.
+- **Release highlights:** the issue's `**Release highlights**` block in its `## PR` section, verbatim,
+  when there is one. None: drop the section's template comment and leave the heading with nothing under
+  it, so the release finds no highlights.
+- **🔖 Type of Change:** `[x]` on the one line step 3 chose, `[ ]` on the other three.
 - **✅ Checklist:** `[x]` on every item. Checking one is a claim about the branch, so if this session
   knows an item is false (a failing test, documentation left for later), stop and report it instead of
   checking it.
@@ -127,6 +133,7 @@ Extract the two issue blocks straight into files, never through a shell string, 
 ```
 "$section" pr-description "$S/issue.md" > "$S/description.md"
 "$section" verification "$S/issue.md" > "$S/verification.md"
+"$section" pr-highlights "$S/issue.md" > "$S/highlights.md" || : > "$S/highlights.md"   # optional
 missing=
 for f in description verification; do
   grep -q '[^[:space:]]' "$S/$f.md" || missing="$missing $f"
@@ -143,7 +150,7 @@ The description scan is bounded to the `## PR` section and takes the first fence
 `**Description**`, so a fence further down can never be taken for the PR's description. Either file
 empty is a stop: the issue is incomplete, and a PR with an empty section is not one to open.
 
-Then write `$S/body.md` with the Write tool, pasting the two files' contents into their sections. Show
+Then write `$S/body.md` with the Write tool, pasting the files' contents into their sections (the highlights only when the file is not empty). Show
 the title, the type and the body to the user before creating anything.
 
 ## 5. Read the issue's project items first
@@ -193,7 +200,7 @@ own argument, so no value is ever split or interpreted by the shell:
 ```
 gh issue view <N> --json assignees --jq '.assignees[].login' > "$S/assignees"
 gh issue view <N> --json labels --jq '.labels[].name' > "$S/labels"
-printf '%s\n' <version label from step 3> >> "$S/labels"
+printf '%s\n' <major, when step 3 says so> >> "$S/labels"
 gh issue view <N> --json milestone --jq '.milestone.title // empty' > "$S/milestone"
 
 args=(--draft --base main --head "$branch" --title "$title" --body-file "$S/body.md")
@@ -264,14 +271,14 @@ diff <(sort "$S/fields.tsv") <(sort "$S/pr_fields.tsv") && echo "project fields 
 ```
 
 Check that it is a draft, that the assignees and milestone are the issue's, that the labels include the
-issue's and the version label (the repository's labeler adds more on its own, from the files changed;
+issue's, and `major` when step 3 added it (the repository's labeler adds more on its own, from the files changed;
 those are expected), that the Related Issues section of the body holds `Closes #<N>` (the template's
 versioning note follows it, so it is not the last line), that the PR is on the same boards as the issue
 and that the fields match. The boards are compared on their own: a board where the issue has no field
 value set produces no field row, so the field comparison alone would pass while the PR sits on one board
 fewer. Report any difference instead of calling it done.
 
-Report the title, the type and the version label, and the fields copied. Then one line on the adversarial
+Report the title, the type and whether the merge will publish a release, and the fields copied. Then one line on the adversarial
 review: the rounds that ran (`"$(/usr/bin/git rev-parse --show-toplevel)/scripts/review-state.sh" status`),
 and whether the pushed tree is the one the last round reviewed. Compare `git rev-parse "origin/$branch^{tree}"`
 with `review-state.sh reviewed`. Equal means reviewed as pushed. Different, or no round at all, means the

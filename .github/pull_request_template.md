@@ -2,13 +2,25 @@
 
 <!-- Describe your changes here -->
 
+## Release highlights
+
+<!--
+Optional. For a milestone, two or three sentences on what it means for someone using Malachi: they open the
+release notes, above the grouped list of changes. Leave this section empty otherwise; comments like this one
+are dropped. Only a pull request whose author has write access to the repository contributes highlights.
+-->
+
 ## 🔖 Type of Change
 
-<!-- Mark with [x] the type of change -->
+<!--
+The title decides it, in Conventional Commits form (type(scope)!: summary); see the note at the end.
+Mark with [x] what the title says.
+-->
 
-- [ ] 🐛 **Patch** - Bug fix (increments 0.0.X)
-- [ ] ✨ **Minor** - New feature (increments 0.X.0)
-- [ ] 💥 **Major** - Breaking change (increments X.0.0)
+- [ ] 🐛 **Patch** - fix, perf, revert, or a dependency or base image update (increments 0.0.X)
+- [ ] ✨ **Minor** - feat (increments 0.X.0)
+- [ ] 💥 **Major** - breaking change, `!` in the title or the `major` label (increments X.0.0)
+- [ ] 📄 **No release** - docs, chore, ci, test, refactor, style or build (listed in the next release)
 
 ## ✅ Checklist
 
@@ -34,7 +46,7 @@
 ---
 
 **Note about versioning:**
-- Use label `patch`, `minor` or `major` on the PR
-- Or include `[major]`, `[minor]` in the title
-- By default, it will be `patch` (0.0.1)
+- The merged title decides the release: `feat` a minor, `fix`, `perf`, `revert`, `chore(deps)` and `chore(docker)` a patch, `!` after the type (`feat!:`) a major
+- docs, chore, ci, test, refactor, style and build publish no release; they appear in the next one's notes
+- The `major` label forces a major; the `release` label releases a patch for a type that would publish none
 - See the [Versioning section in the README](https://github.com/malachi-hq/malachi#-versioning) for details

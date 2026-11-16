@@ -1,11 +1,12 @@
 name: Docker Build and Push
 
+# The image of main as it is, tagged `main` and `sha-<sha>`. Never a version nor `latest`: those name a release,
+# and only release.yml's docker job publishes them, from the release's tag (issue #366). Most merges publish no
+# release, so a version tag pushed from here would carry code the release it names does not hold.
 on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
   pull_request:
     branches:
       - main
@@ -54,11 +55,7 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix={{branch}}-
+            type=sha,prefix=sha-,format=long,enable={{is_default_branch}}
 
       - name: Get version from mix.exs
         id: version
@@ -73,9 +70,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-            ${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             APP_VERSION=${{ steps.version.outputs.version }}

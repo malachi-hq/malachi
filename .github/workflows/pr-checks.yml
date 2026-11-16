@@ -24,25 +24,13 @@ jobs:
           fetch-depth: 0
       
       - name: 🔍 Check PR title follows conventional commits
-        # PR title is untrusted input: pass it through env, never interpolate it into the shell source.
+        # PR title is untrusted input: pass it through env, never interpolate it into the shell source. The
+        # script is the one the release gate reads subjects with (scripts/release_lib.sh), so a title that
+        # passes here is one the release understands.
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          echo "PR Title: $PR_TITLE"
-          
-          # Check if title follows conventional commits
-          if echo "$PR_TITLE" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\(.+\))?: .+'; then
-            echo "✅ PR title follows conventional commits"
-          else
-            echo "❌ PR title should follow conventional commits format"
-            echo "Examples:"
-            echo "  - feat: add new feature"
-            echo "  - fix: resolve bug in authentication"
-            echo "  - docs: update README"
-            echo "  - chore: update dependencies"
-            exit 1
-          fi
-      
+        run: scripts/release-bump.sh --check
+
       - name: 🔍 Check PR has description
         # PR body is untrusted input: pass it through env, never interpolate it into the shell source.
         env:
@@ -226,16 +214,9 @@ jobs:
               labels.add('dependencies');
             }
             
-            // Determine version bump label
-            const prTitle = context.payload.pull_request.title.toLowerCase();
-            if (prTitle.includes('[major]') || prTitle.includes('breaking')) {
-              labels.add('major');
-            } else if (prTitle.startsWith('feat')) {
-              labels.add('minor');
-            } else if (prTitle.startsWith('fix') || prTitle.startsWith('chore')) {
-              labels.add('patch');
-            }
-            
+            // No version label: the release reads the bump from the merged title (scripts/release_lib.sh), and
+            // only a person adds `major` or `release`.
+
             // Add all labels
             if (labels.size > 0) {
               await github.rest.issues.addLabels({
