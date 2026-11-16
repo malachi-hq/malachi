@@ -216,8 +216,13 @@ only the first boot of a brand-new cluster seeds from `MALACHI_LOG_VNODES`.
 
 ## Rebalancing
 
-Placement is rendezvous (HRW) hashing, so adding or removing a node changes the desired placement for some
-segments. Moving them is **manual by default**:
+On a sharded control plane (`MALACHI_LOG_VNODES` above 1), placement is rendezvous (HRW) hashing, so
+adding or removing a node changes the desired placement of some vnodes' Raft members. Two things happen without anyone asking: a node that joins can be chosen for new
+segments from their next roll on, and the leader of each vnode replaces a lost **segment** replica on
+another live broker. What does not happen by itself is moving a vnode's **members**, including replacing
+one that a dead node held: that is planned and committed by the lease holder, and it is **manual by
+default** (the reasons and the cost are in the
+[architecture notes](../ARCHITECTURE.md#known-divergence-who-replenishes-the-replicas-of-a-vnode)):
 
 ```bash
 MALACHI_AUTO_REBALANCE=true
@@ -226,9 +231,9 @@ MALACHI_AUTO_REBALANCE_STABILIZATION=3
 ```
 
 With auto-rebalancing on, the lease holder computes a plan each tick and commits it only after the plan is
-**non-empty and identical for `STABILIZATION` consecutive ticks** (default 3, so about 90 seconds). A node
-that flaps, briefly suspected then alive again, therefore never moves data: the plan changes, the counter
-resets, nothing commits.
+**non-empty and identical for `STABILIZATION` consecutive ticks** (default 3: the third tick that sees it,
+so 60 seconds after the plan first appears). A node that flaps, briefly suspected then alive again,
+therefore never moves data: the plan changes, the counter resets, nothing commits.
 
 > **Analogy.** Placement is a seating rule everyone computes the same way, so when a guest arrives or leaves
 > only a few seats change, not the whole room. And before moving anyone's belongings, the host waits to be
