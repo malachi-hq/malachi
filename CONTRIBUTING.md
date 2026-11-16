@@ -50,6 +50,27 @@ missing name stops the automation.
 
 A `bug` label always means Priority P0 on the board.
 
+## What publishes a release
+
+Not every merge does. The pull request's title, in Conventional Commits form (`type(scope)!: summary`),
+decides it when the pull request is merged; `pr-checks` refuses a title the release would not understand.
+
+| Title | Release |
+| --- | --- |
+| `feat` | minor |
+| `fix`, `perf`, `revert`, `chore(deps)`, `chore(docker)` | patch |
+| `!` after the type or scope (`feat!:`, `fix(api)!:`) | major |
+| `docs`, `chore`, `ci`, `test`, `refactor`, `style`, `build` | none: listed in the next release's notes |
+| `chore(dev-deps)`, `chore(ci)`, `chore(terraform)` (Dependabot's development packages, actions, providers) | none |
+
+Two labels change it: `major` forces a major, and `release` turns a title that publishes nothing into a
+patch, for a change users need now. No other label has an effect.
+
+A milestone deserves more than a line in a list. Write two or three sentences in the issue's `## PR`
+section under `**Release highlights**` (or in the pull request's `## Release highlights` section) and they
+open the release notes. Only a pull request whose author has write access to the repository contributes
+highlights, since a description can be edited after the merge.
+
 ## What "done" means
 
 Passing CI is the floor, not the bar. Before a change is ready:

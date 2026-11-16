@@ -378,7 +378,7 @@ defmodule UpgradeChaosTest do
     end
 
     test "on a tree whose code is the newest release, OLD is the release before it", ctx do
-      # What main looks like: every merge is tagged, so the newest tag holds this very code, and rolling from
+      # What main looks like right after a release: the newest tag holds this very code, and rolling from
       # it would certify a release against itself.
       git!(ctx.root, ["reset", "-q", "--hard", "v0.16.4"])
       assert {output, 0} = run_drill(ctx)

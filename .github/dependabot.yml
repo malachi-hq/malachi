@@ -13,8 +13,12 @@ updates:
     # schedule rather than from a person, which is exactly how a PR ends up with nobody looking at it.
     assignees:
       - "HectorIFC"
+    # Development and test packages (credo, ex_doc, ...) take their own scope: chore(deps) publishes a release
+    # (scripts/release_lib.sh), and nothing they change reaches the image. A group with one runtime package in
+    # it keeps chore(deps).
     commit-message:
       prefix: "chore(deps):"
+      prefix-development: "chore(dev-deps):"
     # Shaped the way the dependency-updates skill (.claude/skills/dependency-updates) processes the queue,
     # and checked against its table (scripts/deps_check.exs) by test/scripts/dependency_updates_skill_test.exs.
     # ra matches no group on purpose: every control plane store runs on it, so it always arrives alone and
@@ -78,6 +82,7 @@ updates:
     commit-message:
       prefix: "chore(docker):"
 
+  # Not chore(deps): that scope publishes a release (scripts/release_lib.sh), and these files are not in the image.
   # The OCI reference example's providers and lock files (deploy/terraform/oci-always-free). Each root has its own
   # lock file, so both directories are listed. Provider and lock changes arrive as pull requests, never by hand.
   - package-ecosystem: "terraform"
@@ -93,4 +98,4 @@ updates:
     assignees:
       - "HectorIFC"
     commit-message:
-      prefix: "chore(deps):"
+      prefix: "chore(terraform):"

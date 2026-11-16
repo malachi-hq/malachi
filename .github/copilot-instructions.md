@@ -227,10 +227,13 @@ make docker-build | docker-buildx | compose-up | compose-logs | clean
   mix deps.audit
   mix test
   ```
-- **PRs:** tests green, formatted, Credo clean, audit clean; conventional-commit title. Release bump: a
-  `feat:` title or a `[minor]`/`minor` label → minor; `[major]` in the title or a `major` label → major;
-  anything else → patch. `release.yml` reads the title and the labels, not the PR body, so `BREAKING
-  CHANGE:` in the body does not bump the version.
+- **PRs:** tests green, formatted, Credo clean, audit clean; conventional-commit title (`type(scope)!: summary`,
+  checked by `scripts/release-bump.sh --check`). The merged title decides the release (`scripts/release_lib.sh`):
+  `feat` → minor; `fix`, `perf`, `revert`, `chore(deps)`, `chore(docker)` → patch; `!` after the type or the
+  `major` label → major; `docs`, `chore`, `ci`, `test`, `refactor`, `style`, `build` → no release (listed in
+  the next one's notes), unless the `release` label asks for a patch. No other label counts, and `BREAKING
+  CHANGE:` in the body does not bump the version. A `## Release highlights` section in the PR description
+  opens the release notes when its author has write access.
 
 ## Adding features
 

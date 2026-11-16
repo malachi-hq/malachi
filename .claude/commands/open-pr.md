@@ -8,7 +8,8 @@ from the worktree directory (`~/malachi-<N>`), and ask if there is none.
 
 Follow the `open-issue-pr` skill exactly: prove the checked-out branch is the one the issue's `## PR`
 section names and that it is pushed, derive the Conventional Commits title from the branch, choose the
-type of change and its version label, fill `.github/pull_request_template.md` with the issue's PR
+type of change and whether the merge publishes a release (adding `major` only when the issue asks for one),
+copy the issue's release highlights when it has them, fill `.github/pull_request_template.md` with the issue's PR
 description, its Verification section and `Closes #<N>`, and open the PR as a draft with the issue's
 assignees, labels, milestone and project fields.
 
