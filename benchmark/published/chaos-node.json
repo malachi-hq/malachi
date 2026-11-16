@@ -1,10 +1,10 @@
 {
   "meta": {
-    "timestamp": "2026-11-16T02:17:41Z",
+    "timestamp": "2026-11-16T02:24:46Z",
     "command": "scripts/docker-chaos-test.sh",
-    "git_ref": "a48d07e",
-    "git_ref_date": "2026-11-15T23:13:14-03:00",
-    "malachi_version": "0.28.0",
+    "git_ref": "46c12b6",
+    "git_ref_date": "2026-11-15T23:19:57-03:00",
+    "malachi_version": "0.28.1",
     "hardware": {
       "cpu": "x86_64",
       "cores": 4,
@@ -21,8 +21,8 @@
     "d: rolling restart"
   ],
   "invariants": {
-    "acked_writes": 1877,
-    "post_chaos_records_per_s": 18987
+    "acked_writes": 1971,
+    "post_chaos_records_per_s": 24187
   },
   "failures": [],
   "evidence_dir": null,
