@@ -731,7 +731,7 @@ defmodule ChaosCheckerTest do
     # file between batches, and `finish` says how the copy is left, which is what decides its layout:
     #   :seal    - a fenced primary (trimmed, SEALED marker)
     #   :open    - a follower nobody sealed (synced, preallocated tail still there)
-    #   :recover - a follower that was closed and then restarted (recovery pre-allocates again)
+    #   :recover - a follower that was closed and then restarted (recovery no longer pre-allocates, #283)
     defp write_copy(root, batches, opts \\ []) do
       path = Path.join(root, @dir)
       {:ok, log} = Log.open(path, prealloc_bytes: @prealloc)
@@ -813,12 +813,15 @@ defmodule ChaosCheckerTest do
       assert entry.copies["a"].digest == entry.copies["b"].digest
     end
 
-    test "a restarted copy that recovery pre-allocated again is benign", %{tmp_dir: tmp_dir} do
+    test "a restarted copy is identical: recovery no longer pre-allocates a closed one (#283)",
+         %{tmp_dir: tmp_dir} do
+      # The closed copy was trimmed and recovery leaves it at that size, so it carries no tail to tell apart.
+      # A tail that is still there (a copy whose process died while it was open) is the `:open` case above.
       [{_, sealed}, {_, restarted}] = nodes = roots(tmp_dir, ~w(a b))
       write_copy(sealed, [@six])
       write_copy(restarted, [@six], finish: :recover)
 
-      assert only_entry(nodes).verdict == :benign
+      assert only_entry(nodes).verdict == :identical
     end
 
     test "a copy holding different valid records is a content divergence, and names that node",

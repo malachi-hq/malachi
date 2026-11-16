@@ -887,6 +887,14 @@ defmodule Malachi.I18n do
     # Malachi.BrokerServer: the control plane reconcile runs off the broker's loop, so its two ways of
     # not finishing are the only place an operator hears about them. One key each: they are different
     # failures and lead to different checks.
+    broker_end_probe_task_down: %{
+      "pt_BR" =>
+        "⚠️ A rodada de sondas do fim dos ranges caiu (%{reason}); os ranges ainda não recuperados seguem " <>
+          "recusando leituras até a rodada do próximo tick",
+      "en_US" =>
+        "⚠️ The pass of range end probes crashed (%{reason}); the ranges not recovered yet keep refusing " <>
+          "reads until the next tick's pass"
+    },
     broker_reconcile_task_down: %{
       "pt_BR" =>
         "⚠️ O reconcile do control plane caiu (%{reason}); o nó segue servindo a visão que já tem, " <>

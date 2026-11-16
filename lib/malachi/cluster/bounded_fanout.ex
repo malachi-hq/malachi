@@ -36,6 +36,13 @@ defmodule Malachi.Cluster.BoundedFanout do
   count of milliseconds: `:infinity` has no meaning here, since the whole point is that the fan-out
   ends.
 
+  `opts` takes `:max_concurrency`, how many calls may be in flight at once (every item at once by default).
+  A caller that fans out over something that grows with the data rather than with the cluster, such as
+  every active range of a node, sets it: a thousand concurrent calls into one server queue a thousand
+  messages there on every pass, and when a pass makes more work than the server finishes before the next
+  one, that queue only grows. With a cap the calls go out as earlier ones come back, each still bounded by
+  `timeout` from when it starts, so the whole fan-out takes longer instead.
+
   A `fun` that RAISES is a different case and is deliberately not contained: the tasks are linked, so
   the exception propagates to the caller, exactly as it did when these passes were written as a loop.
   That is the right shape for every caller. In the reconcile task it is caught as a crashed pass,
@@ -45,16 +52,18 @@ defmodule Malachi.Cluster.BoundedFanout do
   of them into a pass that quietly reports nothing, and for the sweep an empty answer is the one that
   deletes.
   """
-  @spec map([item], pos_integer(), (item -> result), (item -> result)) :: [result]
+  @spec map([item], pos_integer(), (item -> result), (item -> result), keyword()) :: [result]
         when item: term(), result: term()
-  def map([], _timeout, _fun, _on_failure), do: []
+  def map(items, timeout, fun, on_failure, opts \\ [])
 
-  def map(items, timeout, fun, on_failure)
+  def map([], _timeout, _fun, _on_failure, _opts), do: []
+
+  def map(items, timeout, fun, on_failure, opts)
       when is_list(items) and is_integer(timeout) and timeout > 0 and
              is_function(fun, 1) and is_function(on_failure, 1) do
     items
     |> Task.async_stream(fun,
-      max_concurrency: length(items),
+      max_concurrency: Keyword.get(opts, :max_concurrency, length(items)),
       timeout: timeout + @stream_slack_ms,
       on_timeout: :kill_task
     )

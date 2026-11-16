@@ -1324,16 +1324,26 @@ defmodule Malachi.Storage.ElixirStoreTest do
       open(directory, Keyword.merge([prealloc_bytes: @prealloc], opts))
     end
 
-    test "is sized at creation without counting as content", %{tmp_dir: directory} do
+    test "is sized by its first flush, not at creation, without counting as content", %{tmp_dir: directory} do
+      # Creation writes nothing (#283): the zeros are written by the flush that needs them, a step at a
+      # time.
       {:ok, store} = open_preallocated(directory)
       path = Segment.path(store.segment)
 
+      assert File.stat!(path).size == 0
+      assert store.preallocated_to == :deferred
+
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("v0")])
+      {:ok, store} = ElixirStore.sync(store)
+
+      # The step (4MB by default) is larger than this region, so the first flush makes all of it.
       assert File.stat!(path).size == @prealloc
+      assert store.preallocated_to == @prealloc
       # The two numbers the rest of the system reads. If either followed the file size, a brand new
       # segment would look full: `should_seal?` would roll it immediately and retention would count
       # 128KB of nothing against the range's budget.
-      assert store.segment.byte_size == 0
-      assert ElixirStore.logical_bytes(store) == 0
+      assert store.segment.byte_size == store.write_position
+      assert ElixirStore.logical_bytes(store) < @prealloc
       refute ElixirStore.should_seal?(store, System.system_time(:millisecond))
 
       :ok = ElixirStore.close(store)
@@ -1725,6 +1735,184 @@ defmodule Malachi.Storage.ElixirStoreTest do
 
       :ok = ElixirStore.close(store)
       File.rm_rf!(directory)
+    end
+  end
+
+  describe "room made in steps (#283)" do
+    @step 64 * 1024
+    @region 256 * 1024
+
+    defp open_stepped(directory, opts \\ []),
+      do: open(directory, Keyword.merge([prealloc_bytes: @region, prealloc_step_bytes: @step], opts))
+
+    defp append_synced(store, values) do
+      {:ok, store, _first, _last} = ElixirStore.append(store, Enum.map(values, &rec/1))
+      {:ok, store} = ElixirStore.sync(store)
+      store
+    end
+
+    test "a flush past the room makes one step past its end, and flushes inside it make none",
+         %{tmp_dir: directory} do
+      {:ok, store} = open_stepped(directory)
+      path = Segment.path(store.segment)
+
+      store = append_synced(store, ["v0"])
+      first_room = store.write_position + @step
+      assert File.stat!(path).size == first_room
+      assert store.preallocated_to == first_room
+
+      # Well inside the room: nothing grows, so this flush changed no size for its sync to journal.
+      store = append_synced(store, ["v1"])
+      assert File.stat!(path).size == first_room
+
+      :ok = ElixirStore.close(store)
+    end
+
+    test "the room grows a step at a time up to the region and never past it", %{tmp_dir: directory} do
+      {:ok, store} = open_stepped(directory)
+      path = Segment.path(store.segment)
+      value = :binary.copy("x", 16 * 1024)
+
+      {store, sizes} =
+        Enum.map_reduce(1..30, store, fn _i, acc -> {File.stat!(path).size, append_synced(acc, [value])} end)
+        |> then(fn {sizes, store} -> {store, sizes ++ [File.stat!(path).size]} end)
+
+      grown = sizes |> Enum.dedup() |> Enum.reject(&(&1 == 0))
+      assert length(grown) > 1, "the room was made in one write: #{inspect(grown)}"
+      assert Enum.all?(Enum.zip(grown, tl(grown)), fn {a, b} -> b - a <= @step + 16 * 1024 + 64 end)
+      assert Enum.max(sizes) >= @region
+
+      # Past the region the file only grows by what is written, exactly as an unpreallocated one does.
+      assert File.stat!(path).size == max(@region, store.write_position)
+      :ok = ElixirStore.close(store)
+      assert File.stat!(path).size == store.write_position
+    end
+
+    test "with preallocation off, nothing is ever made or trimmed", %{tmp_dir: directory} do
+      {:ok, store} = open(directory, prealloc_bytes: 0)
+      assert store.preallocated_to == nil
+
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("v0")])
+      {:ok, store} = ElixirStore.sync(store)
+
+      assert store.preallocated_to == nil
+      assert File.stat!(Segment.path(store.segment)).size == store.write_position
+      :ok = ElixirStore.close(store)
+    end
+
+    test "a flush on a failing device answers the error, whether or not it had room to make", %{tmp_dir: directory} do
+      # The descriptor fails every operation, so the room this flush would make is given up (the size cannot
+      # be read) and the write itself fails. An extension refused while the write would work, and a file
+      # that cannot be put back after one, are `Malachi.Storage.Preallocation.extend_or_restore/4`'s and
+      # covered there: no fault this suite can inject reaches them through a store.
+      {:ok, store} = open_stepped(directory)
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("v0")])
+      StorageFaults.close_descriptor!(store)
+
+      assert {:error, :einval} = ElixirStore.sync(store)
+    end
+  end
+
+  describe "recovering an active segment does not extend it (#283)" do
+    @region 256 * 1024
+
+    test "a cleanly closed segment is recovered at its size, and its first flush makes the room",
+         %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2, prealloc_bytes: @region)
+      path = Segment.path(store.segment)
+      :ok = ElixirStore.close(store)
+      closed_size = File.stat!(path).size
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @region)
+
+      # What a restart's probe of a segment's end costs now: a scan, and no write.
+      assert File.stat!(path).size == closed_size
+      assert recovered.preallocated_to == :deferred
+
+      {:ok, recovered, _first, _last} = ElixirStore.append(recovered, [rec("v3")])
+      {:ok, recovered} = ElixirStore.sync(recovered)
+      assert File.stat!(path).size == @region
+      assert recovered.preallocated_to == @region
+
+      :ok = ElixirStore.close(recovered)
+      assert File.stat!(path).size == recovered.write_position
+    end
+
+    test "a crash's blank tail is kept as room by the first flush, and given back by a seal with no write",
+         %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2, prealloc_bytes: @region)
+      path = Segment.path(store.segment)
+      logical = store.write_position
+      # A process that died writing leaves its room behind: no close, so no trim.
+      :ok = :file.close(store.file_descriptor)
+      assert File.stat!(path).size == @region
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @region)
+      assert recovered.preallocated_to == :deferred
+
+      # Sealed without a single write: the zeros past the records must not become the sealed size, which
+      # every replica comparison reads off disk.
+      {:ok, sealed} = ElixirStore.seal(recovered)
+      assert File.stat!(path).size == logical
+      assert sealed.preallocated_to == nil
+      :ok = ElixirStore.close(sealed)
+    end
+
+    test "a crash's blank tail already covers the first flush, which then writes no zeros",
+         %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2, prealloc_bytes: @region)
+      path = Segment.path(store.segment)
+      :ok = :file.close(store.file_descriptor)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @region)
+      {:ok, recovered, _first, _last} = ElixirStore.append(recovered, [rec("v3")])
+      {:ok, recovered} = ElixirStore.sync(recovered)
+
+      assert recovered.preallocated_to == @region
+      assert File.stat!(path).size == @region
+      :ok = ElixirStore.close(recovered)
+    end
+
+    test "a torn run zeroed by recovery is given back on close", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..1, prealloc_bytes: @region)
+      valid_bytes = store.write_position
+      path = Segment.path(store.segment)
+      torn = binary_part(Record.encode(%Record{rec("v2") | offset: 2}), 0, 12)
+      :ok = :file.pwrite(store.file_descriptor, valid_bytes, torn)
+      :ok = :file.close(store.file_descriptor)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @region)
+      assert %{reason: :incomplete} = ElixirStore.integrity(recovered)
+      assert recovered.preallocated_to == :deferred
+
+      :ok = ElixirStore.close(recovered)
+      assert File.stat!(path).size == valid_bytes
+    end
+
+    test "a segment truncated back gives up its room for good, and its flushes make none again",
+         %{tmp_dir: directory} do
+      # `truncate_to/2` gives every byte past the cut back at once, which ends the handle's claim to the
+      # region: its later flushes only grow the file by what they write, as an unpreallocated one does.
+      {:ok, store} = seed_frames(directory, 0..4, prealloc_bytes: @region)
+      {:ok, store} = ElixirStore.truncate_to(store, 2)
+      assert store.preallocated_to == nil
+
+      {:ok, store, _first, _last} = ElixirStore.append(store, [rec("again")])
+      {:ok, store} = ElixirStore.sync(store)
+
+      assert store.preallocated_to == nil
+      assert File.stat!(Segment.path(store.segment)).size == store.write_position
+      :ok = ElixirStore.close(store)
+    end
+
+    test "a sealed segment is recovered without any claim to trim", %{tmp_dir: directory} do
+      {:ok, store} = seed_frames(directory, 0..2, prealloc_bytes: @region)
+      {:ok, sealed} = ElixirStore.seal(store)
+      :ok = ElixirStore.close(sealed)
+
+      {:ok, recovered} = ElixirStore.recover(directory, "segment-0", prealloc_bytes: @region)
+      assert recovered.preallocated_to == nil
+      :ok = ElixirStore.close(recovered)
     end
   end
 
