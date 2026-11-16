@@ -441,6 +441,346 @@ defmodule Malachi.BrokerServerRaTest do
     end
   end
 
+  # Puts a proxy under `name`, in front of the server registered there, that HOLDS every end probe
+  # (`durable_end`) unanswered until it is sent `:answer`, then hands the held ones to the server and forwards
+  # everything until it is sent `:hold` again. Everything else is forwarded at once, so the horizon probes
+  # reach the server.
+  # Unlike `refuse_end_probes/1`, a held probe costs its caller the whole bound, as an unreachable primary
+  # does (a peer that drops packets rather than refusing them).
+  defp hold_end_probes(name) do
+    server = Process.whereis(name)
+    Process.unregister(name)
+
+    proxy =
+      spawn(fn ->
+        Process.register(self(), name)
+        holding_proxy(server, [])
+      end)
+
+    on_exit(fn -> Process.exit(proxy, :kill) end)
+    wait_until!(fn -> Process.whereis(name) == proxy end)
+    proxy
+  end
+
+  defp holding_proxy(server, held) when is_list(held) do
+    receive do
+      :answer ->
+        for message <- Enum.reverse(held), do: send(server, message)
+        forwarding_proxy(server)
+
+      {:"$gen_call", _from, {:durable_end, _segment_id, _base}} = message ->
+        holding_proxy(server, [message | held])
+
+      :hold ->
+        holding_proxy(server, held)
+
+      message ->
+        send(server, message)
+        holding_proxy(server, held)
+    end
+  end
+
+  defp forwarding_proxy(server) do
+    receive do
+      :hold ->
+        holding_proxy(server, [])
+
+      :answer ->
+        forwarding_proxy(server)
+
+      message ->
+        send(server, message)
+        forwarding_proxy(server)
+    end
+  end
+
+  # `count` topics produced to through a broker that is then stopped, over three registered replicas whose
+  # end probes are all held: what a restart sees when no primary answers within the bound.
+  defp restart_with_held_primaries(prefix, count, opts \\ []) do
+    {gate, opts} = Keyword.pop(opts, :gate, &hold_end_probes/1)
+    cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+    brokers = for {name, _directory} <- named_replicas(prefix), do: {name, node()}
+    broker_opts = [brokers: brokers, replication_factor: 3, metadata_cluster: cluster] ++ opts
+
+    {:ok, first} = BrokerServer.start_link("unused", broker_opts)
+
+    for i <- 1..count do
+      {:ok, _root} = BrokerServer.create_topic(first, "held_#{i}", 4)
+      {:ok, _} = BrokerServer.produce(first, "held_#{i}", [Record.new("v#{i}", key: "k")])
+    end
+
+    :ok = BrokerServer.stop(first)
+    gates = for {name, _node} <- brokers, do: gate.(name)
+    {broker_opts, gates}
+  end
+
+  test "a restart with no primary answering costs one probe bound, not one per range" do
+    # The defect (#283, Part 2 at boot): `init` and the boot reconcile each asked every range's primary in
+    # turn, 250ms apiece, so eight silent primaries held the node for four seconds before its first answer.
+    {broker_opts, gates} = restart_with_held_primaries("malachi_held_boot", 8)
+
+    {elapsed_us, broker} =
+      :timer.tc(fn ->
+        {:ok, broker} = BrokerServer.start_link("unused", broker_opts)
+        _ = BrokerServer.metadata(broker)
+        broker
+      end)
+
+    on_exit(fn -> stop_quietly(broker) end)
+    assert elapsed_us < 1_500_000, "the restart took #{div(elapsed_us, 1000)}ms with 8 silent primaries"
+
+    # Nothing was learned, so nothing is served as if it had been.
+    assert ReadBack.values(broker, "held_1") == {:error, :metadata_unavailable}
+
+    {elapsed_us, :ok} = :timer.tc(fn -> BrokerServer.reconcile_now(broker) end)
+    assert elapsed_us < 1_000_000, "one pass took #{div(elapsed_us, 1000)}ms with 8 silent primaries"
+
+    # The primaries answer again: the next pass learns every end, and every record is served.
+    for gate <- gates, do: send(gate, :answer)
+    :ok = BrokerServer.reconcile_now(broker)
+
+    for i <- 1..8, do: assert(ReadBack.values(broker, "held_#{i}") == ["v#{i}"])
+  end
+
+  test "the loop answers its clients while every tick's end probes wait on silent primaries" do
+    # The defect (#283, Part 2 on every tick): the probes ran on this loop each time a reconcile applied, so
+    # a tick with M silent primaries held every client of the node for M x 250ms, longer than the tick.
+    {broker_opts, _gates} = restart_with_held_primaries("malachi_held_tick", 6, brokers_refresh_interval: 50)
+    {:ok, broker} = BrokerServer.start_link("unused", broker_opts)
+    on_exit(fn -> stop_quietly(broker) end)
+    # The boot reconcile runs on this loop by design, bounded by one probe (the test above): what is
+    # measured here is every tick after it.
+    _ = BrokerServer.metadata(broker)
+
+    latencies =
+      for _i <- 1..40 do
+        {elapsed_us, _metadata} = :timer.tc(fn -> BrokerServer.metadata(broker) end)
+        Process.sleep(25)
+        elapsed_us
+      end
+
+    assert Enum.max(latencies) < 150_000,
+           "a call waited #{div(Enum.max(latencies), 1000)}ms behind the end probes of a tick"
+  end
+
+  test "a restarted broker serves the ranges it recovered while another range's primary is still silent" do
+    cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+    brokers = for {name, _directory} <- named_replicas("malachi_held_partial"), do: {name, node()}
+    broker_opts = [brokers: brokers, replication_factor: 3, metadata_cluster: cluster]
+    {:ok, first} = BrokerServer.start_link("unused", broker_opts)
+
+    topics = for i <- 1..9, do: "partial_#{i}"
+
+    for topic <- topics do
+      {:ok, _root} = BrokerServer.create_topic(first, topic, 4)
+      {:ok, _} = BrokerServer.produce(first, topic, [Record.new(topic, key: "k")])
+    end
+
+    metadata = BrokerServer.metadata(first)
+    :ok = BrokerServer.stop(first)
+
+    # Only the first replica's end probes are held: the topics it is primary for wait, the rest do not.
+    [{silent, _node} | _] = brokers
+    gate = hold_end_probes(silent)
+
+    primary_of = fn topic ->
+      [%{replica_set: [primary | _]}] =
+        Enum.flat_map(Metadata.active_ranges_of_topic(metadata, topic), &Metadata.segments_of_range(metadata, &1.id))
+
+      primary
+    end
+
+    {waiting, served} = Enum.split_with(topics, &(primary_of.(&1) == {silent, node()}))
+    assert waiting != [] and served != [], "the topics must have primaries on both sides"
+
+    {:ok, broker} = BrokerServer.start_link("unused", broker_opts)
+    on_exit(fn -> stop_quietly(broker) end)
+
+    for topic <- served, do: assert(ReadBack.values(broker, topic) == [topic])
+    for topic <- waiting, do: assert(ReadBack.values(broker, topic) == {:error, :metadata_unavailable})
+
+    send(gate, :answer)
+    :ok = BrokerServer.reconcile_now(broker)
+    for topic <- waiting, do: assert(ReadBack.values(broker, topic) == [topic])
+  end
+
+  test "an end probe that times out never takes back an end the loop already learned" do
+    # A primary that does not answer within the bound is `:unreachable`, and a range whose end this loop
+    # already knows (here from its boot and a produce since) keeps it: it is not marked unrecovered again,
+    # and the seeds are monotone, so nothing it served is taken back (`Malachi.Broker.seed_unrecovered_range/3`).
+    {broker_opts, gates} = restart_with_held_primaries("malachi_held_known", 1)
+    for gate <- gates, do: send(gate, :answer)
+    {:ok, broker} = BrokerServer.start_link("unused", broker_opts)
+    on_exit(fn -> stop_quietly(broker) end)
+    assert ReadBack.values(broker, "held_1") == ["v1"]
+
+    {:ok, _} = BrokerServer.produce(broker, "held_1", [Record.new("v2", key: "k")])
+
+    for gate <- gates, do: send(gate, :hold)
+    :ok = BrokerServer.reconcile_now(broker)
+    assert broker |> ReadBack.values("held_1") |> Enum.sort() == ["v1", "v2"]
+    refute Broker.unrecovered?(:sys.get_state(broker).broker, root_of(broker, "held_1"))
+  end
+
+  test "a range created while a pass of end probes waits is still served when the pass lands without it" do
+    # The pass took its plan before this loop registered the new range's segment, so it asked nothing about
+    # it. Taking that silence for an unreachable primary marked the brand new range unrecovered, and its
+    # reads were refused until the next pass, which the suite caught as a producer stream's empty topic
+    # answering `metadata_unavailable` (#283). The held primaries make every pass wait one probe bound,
+    # which is the window the stream is opened in.
+    {broker_opts, _gates} = restart_with_held_primaries("malachi_held_midpass", 1, brokers_refresh_interval: 50)
+    {:ok, broker} = BrokerServer.start_link("unused", broker_opts)
+    on_exit(fn -> stop_quietly(broker) end)
+    _ = BrokerServer.metadata(broker)
+
+    ref = range_probe_ref!(broker)
+    {:ok, root} = BrokerServer.create_topic(broker, "opened_mid_pass", 4)
+    {:ok, _token, _segment, _primary} = BrokerServer.open_stream(broker, root)
+    assert %{range_probe: %{ref: ^ref}} = :sys.get_state(broker), "the stream must open while the pass waits"
+    await_range_probe!(broker, ref)
+
+    refute Broker.unrecovered?(:sys.get_state(broker).broker, root)
+    assert ReadBack.values(broker, "opened_mid_pass") == []
+  end
+
+  test "a range whose metadata vnode went silent is still recovered once its primary answers" do
+    # The end probes ask about the cache this loop serves from, which keeps a silent vnode's topics from
+    # its last read. Asked about the fresh read alone, where that vnode is empty, they never asked about
+    # those ranges again, and a range a restart left unrecovered refused its reads for as long as the
+    # vnode stayed silent, its primary answering or not.
+    suffix = System.unique_integer([:positive])
+    vnode = :"bs_kept_#{suffix}"
+    on_exit(fn -> MetadataServer.delete(vnode) end)
+    {:ok, _server_id} = MetadataServer.start(vnode, [node()])
+    brokers = for {name, _directory} <- named_replicas("malachi_kept_vnode"), do: {name, node()}
+
+    broker_opts = [
+      brokers: brokers,
+      replication_factor: 3,
+      metadata_vnodes: [{vnode, 0, [node()]}],
+      bootstrap_orchestrator: fn -> false end,
+      brokers_refresh_interval: 50
+    ]
+
+    {:ok, first} = BrokerServer.start_link("unused", broker_opts)
+    {:ok, _root} = BrokerServer.create_topic(first, "kept", 4)
+    {:ok, _} = BrokerServer.produce(first, "kept", [Record.new("v1", key: "k")])
+    :ok = BrokerServer.stop(first)
+
+    gates = for {name, _node} <- brokers, do: hold_end_probes(name)
+    {:ok, broker} = BrokerServer.start_link("unused", broker_opts)
+    on_exit(fn -> stop_quietly(broker) end)
+    assert ReadBack.values(broker, "kept") == {:error, :metadata_unavailable}
+
+    # Several reconciles read after the vnode went silent (one every 50ms, each failing at once), so the
+    # cache keeps its topics from the boot read, as in the readiness test above.
+    MetadataServer.delete(vnode)
+    Process.sleep(300)
+    for gate <- gates, do: send(gate, :answer)
+
+    wait_until!(fn -> ReadBack.values(broker, "kept") == ["v1"] end, timeout: 5_000)
+    assert BrokerServer.active_range_ids(broker, "kept") != [], "served from the cache the silent vnode left"
+  end
+
+  test "a pass of end probes keeps at most 32 of them in flight, and the boot does not wait it out" do
+    # All of a node's end probes at once queued a call per range in each primary's replication server on
+    # every pass, more than it finished in a tick, so every probe missed its bound for good (#283). With the
+    # cap, 70 silent primaries take three bounds, longer than the boot waits for them.
+    test_pid = self()
+    gate = fn name -> count_end_probes(name, test_pid) end
+    {broker_opts, _gates} = restart_with_held_primaries("malachi_probe_cap", 70, gate: gate)
+
+    {elapsed_us, broker} =
+      :timer.tc(fn ->
+        {:ok, broker} = BrokerServer.start_link("unused", broker_opts)
+        _ = BrokerServer.metadata(broker)
+        broker
+      end)
+
+    on_exit(fn -> stop_quietly(broker) end)
+    assert elapsed_us < 1_000_000, "the boot waited #{div(elapsed_us, 1000)}ms on a pass of three bounds"
+    assert %{range_probe: %{ref: _}} = :sys.get_state(broker), "the pass is still in flight after the boot"
+
+    assert_receive {:end_probe_arrived, first_at}, 5_000
+    in_first_bound = collect_end_probes(first_at + 200, 1)
+    assert in_first_bound == 32, "#{in_first_bound} end probes were in flight at once"
+  end
+
+  test "a pass of end probes that crashes is logged and the next tick starts another" do
+    {broker_opts, _gates} = restart_with_held_primaries("malachi_probe_down", 1, brokers_refresh_interval: 50)
+    {:ok, broker} = BrokerServer.start_link("unused", broker_opts)
+    on_exit(fn -> stop_quietly(broker) end)
+    _ = BrokerServer.metadata(broker)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        _ = range_probe_ref!(broker)
+        %{range_probe: %{ref: ref, pid: pid}} = :sys.get_state(broker)
+        Process.exit(pid, :kill)
+        await_range_probe!(broker, ref)
+        _ = BrokerServer.metadata(broker)
+      end)
+
+    assert log =~ "killed"
+    range_probe_ref!(broker)
+  end
+
+  # Counts the end probes that arrive within `until` (monotonic ms), one already counted.
+  defp collect_end_probes(until, count) do
+    receive do
+      {:end_probe_arrived, at} when at <= until -> collect_end_probes(until, count + 1)
+    after
+      max(until - System.monotonic_time(:millisecond), 0) -> count
+    end
+  end
+
+  # Puts a proxy under `name` that never answers an end probe and reports each one to `test_pid` as it
+  # arrives, so a test sees how many are in flight at once. Everything else is forwarded.
+  defp count_end_probes(name, test_pid) do
+    server = Process.whereis(name)
+    Process.unregister(name)
+
+    proxy =
+      spawn(fn ->
+        Process.register(self(), name)
+        counting_proxy(server, test_pid)
+      end)
+
+    on_exit(fn -> Process.exit(proxy, :kill) end)
+    wait_until!(fn -> Process.whereis(name) == proxy end)
+    proxy
+  end
+
+  defp counting_proxy(server, test_pid) do
+    receive do
+      {:"$gen_call", _from, {:durable_end, _segment_id, _base}} ->
+        send(test_pid, {:end_probe_arrived, System.monotonic_time(:millisecond)})
+
+      message ->
+        send(server, message)
+    end
+
+    counting_proxy(server, test_pid)
+  end
+
+  # The ref of the pass of data-plane probes in flight, once there is one.
+  defp range_probe_ref!(broker) do
+    wait_until!(fn -> :sys.get_state(broker).range_probe != nil end)
+    :sys.get_state(broker).range_probe.ref
+  end
+
+  # Returns once the pass identified by `ref` is no longer the one in flight: its result was applied.
+  defp await_range_probe!(broker, ref) do
+    wait_until!(fn -> not match?(%{range_probe: %{ref: ^ref}}, :sys.get_state(broker)) end, timeout: 5_000)
+  end
+
+  defp root_of(broker, topic) do
+    [%{id: root}] = broker |> BrokerServer.metadata() |> Metadata.active_ranges_of_topic(topic)
+    root
+  end
+
   test "replicas that never answer the horizon probes do not hold the broker's loop" do
     # Each probe may wait its whole bound, and a range short of a quorum is asked on every pass. Asked
     # one replica at a time, eight ranges with two silent replicas cost the boot seconds, and on the loop
@@ -480,10 +820,10 @@ defmodule Malachi.BrokerServerRaTest do
 
     # every later pass asks again (no quorum answers), off the loop: while a pass waits on its probes, the
     # node answers, and the same pass is still the one in flight once it has
-    wait_until!(fn -> match?(%{reconcile_task: %{ref: _}}, :sys.get_state(second)) end)
-    %{reconcile_task: %{ref: probing}} = :sys.get_state(second)
+    wait_until!(fn -> match?(%{range_probe: %{ref: _}}, :sys.get_state(second)) end)
+    %{range_probe: %{ref: probing}} = :sys.get_state(second)
     _metadata = BrokerServer.metadata(second)
-    assert %{reconcile_task: %{ref: ^probing}} = :sys.get_state(second)
+    assert %{range_probe: %{ref: ^probing}} = :sys.get_state(second)
 
     :ok = BrokerServer.stop(second)
   end

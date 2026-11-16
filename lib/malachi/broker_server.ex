@@ -71,9 +71,22 @@ defmodule Malachi.BrokerServer do
   # numbers.
   @roll_fence_retry_ms 1_000
 
-  # The bound on each replica's answer when a restarted node learns the read horizon of the ranges it leads
-  # (`probe_horizons/2`): every call runs at once, so it is also what one pass of them costs.
-  @horizon_probe_timeout 250
+  # The bound on each answer this broker asks the data plane for: where an active range ends, from its
+  # primary (`probe_ends/1`), and the read horizon of the ranges this node leads, from their replicas
+  # (`probe_horizons/2`).
+  @probe_timeout 250
+  # How many end probes one pass keeps in flight (`probe_ends/1`). Their number grows with the node's active
+  # ranges, and all of them at once queued a call per range in each primary's replication server on every
+  # pass: past what that server finishes in a tick, its queue only grew, every probe missed its bound, and
+  # the ranges a restart left unrecovered stayed that way (the suite's single-node restart test caught it
+  # with the thousands of ranges the suite leaves behind). The cap makes a pass over many silent primaries
+  # take ceil(n / 32) bounds, which is why the end probes run in a task of their own and not in the
+  # reconcile's: a long pass of them delays only the next pass of them, never a metadata refresh.
+  @probe_concurrency 32
+  # How long the boot waits for the first pass of end probes before it serves its first call. Every range
+  # answered by then is served at once; the rest refuse their reads until the pass lands
+  # (`Malachi.Broker.seed_unrecovered_range/3`), however many silent primaries it is waiting on.
+  @boot_probe_wait_ms 2 * @probe_timeout
 
   # A binding waits for its commit for at most 2 s inside this loop (`Malachi.Cluster.ReplicatedMetadata`),
   # so the caller waits a little longer than that plus a busy mailbox, and never less: a caller that gave
@@ -546,12 +559,14 @@ defmodule Malachi.BrokerServer do
     # With authoritative (ra-backed) metadata, the topics/ranges/segments survive a restart, but the
     # in-memory offsets and segment_seq maps do not: without recovery, every read of pre-restart data
     # clamps to :eof at offset 0 (durable data unreadable, the failure the chaos harness caught).
-    # An unreachable primary leaves its range unrecovered, refusing reads until a later pass or a
-    # produce learns the end (`Malachi.Broker.seed_unrecovered_range/3`). In-memory metadata (nil
-    # refresh) has nothing to recover from because it does not survive the restart at all, which is why
-    # only the data-plane sharding measurement mode still runs that way: a single node runs a
-    # one-member cluster (`Malachi.Config.log_cluster/2`).
-    broker = if metadata_refresh, do: recover_range_state(broker), else: broker
+    # No range's end is asked for here: every active range starts unrecovered, refusing reads until a pass
+    # of end probes learns its end (`Malachi.Broker.seed_unrecovered_range/3`). `handle_continue/2` starts
+    # the first pass, in a task of its own (`start_range_probes/1`), and waits for it at most
+    # `@boot_probe_wait_ms` before the first client call is served, never one range at a time in here (#283).
+    # In-memory metadata (nil refresh) has nothing to recover from because it does not survive the restart
+    # at all, which is why only the data-plane sharding measurement mode still runs that way: a single node
+    # runs a one-member cluster (`Malachi.Config.log_cluster/2`).
+    broker = if metadata_refresh, do: recover_range_state(broker, %{}, :unrecovered), else: broker
 
     state = %{
       broker: broker,
@@ -576,6 +591,12 @@ defmodule Malachi.BrokerServer do
       # may already have been in the mailbox, and a reply with no clause is a counted drop rather than
       # a crash (`Malachi.UnexpectedMessage`). One slot suffices: only one task is ever in flight.
       abandoned_ref: nil,
+      # The pass of data-plane probes in flight (`%{ref, pid}`), or nil: where active ranges end, then the
+      # read horizons of the ranges this node leads. Separate from the reconcile task, which reads the
+      # control plane: its length grows with the silent primaries (see `@probe_concurrency`), and a
+      # reconcile that carried it would outlive its deadline and lose its metadata refresh with it. At most
+      # one runs at a time, and it needs no deadline of its own: every call it makes is bounded.
+      range_probe: nil,
       # Re-seeds the local metadata cache from the authoritative ra clusters (fills vnodes not yet ready
       # at boot; picks up writes made through other nodes). `nil` for in-memory metadata. Run by
       # `run_reconcile/3` and applied by `apply_reconcile/2`.
@@ -910,8 +931,14 @@ defmodule Malachi.BrokerServer do
     {:reply, reply, %{state | broker: broker}}
   end
 
+  # Waited on whole, data-plane probes included, so a caller (a test, an operator) sees every end and
+  # horizon a pass can learn. Unlike the tick's passes, this one costs the loop the whole pass:
+  # ceil(n / 32) probe bounds when n primaries are silent.
+  def handle_call(:reconcile_now, _from, %{metadata_refresh: nil} = state), do: {:reply, :ok, state}
+
   def handle_call(:reconcile_now, _from, state) do
-    {:reply, :ok, reconcile_synchronously(state)}
+    state = reconcile_synchronously(state)
+    {:reply, :ok, apply_probes(state, probe_ranges(probe_plan(state)))}
   end
 
   def handle_call(message, _from, state) do
@@ -1083,6 +1110,17 @@ defmodule Malachi.BrokerServer do
   # A deadline whose task already finished: the timer was cancelled, but it may have fired first.
   def handle_info({:reconcile_deadline, _ref}, state), do: {:noreply, state}
 
+  def handle_info({ref, {:ranges_probed, probed}}, %{range_probe: %{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, apply_probes(%{state | range_probe: nil}, probed)}
+  end
+
+  # The pass crashed. Nothing it learned is lost that the next tick's pass will not ask again.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{range_probe: %{ref: ref}} = state) do
+    Logger.warning(I18n.t(:broker_end_probe_task_down, reason: inspect(reason)))
+    {:noreply, %{state | range_probe: nil}}
+  end
+
   # --- end of the reconcile task's replies ---
 
   # A producer or consume stream's connection went away: drop the stream.
@@ -1123,7 +1161,7 @@ defmodule Malachi.BrokerServer do
   # otherwise keep its roll owed, and its segment unsealed, for as long as nothing wrote to it.
   def handle_info(:reconcile, state) do
     schedule_reconcile(state)
-    {:noreply, state |> start_reconcile_task() |> send_roll_fences()}
+    {:noreply, state |> start_reconcile_task() |> start_range_probes() |> send_roll_fences()}
   end
 
   # Group-commit flush: one fsync per pipeline covers every parked producer. Fsync first (durable), then
@@ -1195,7 +1233,7 @@ defmodule Malachi.BrokerServer do
   # bounded: unbounded, a node restarting next to one silent vnode sat here for ra's five seconds.
   def handle_continue(:reconcile, state) do
     schedule_reconcile(state)
-    {:noreply, reconcile_synchronously(state)}
+    {:noreply, state |> reconcile_synchronously() |> start_range_probes() |> await_boot_probes()}
   end
 
   @impl true
@@ -1219,13 +1257,29 @@ defmodule Malachi.BrokerServer do
   # bootstrap any vnode whose ra cluster is not up yet; then re-seed the local cache from the clusters.
   # Reschedules itself. Idempotent: bootstrapping an already-formed vnode is a no-op, and the cache
   # re-seed only moves forward (the ra log is the source of truth).
-  # Recovers each range's end offset and segment sequence floor from the authoritative metadata plus
-  # the primaries' logs, so a restarted broker can serve reads of pre-restart data. Active segments
-  # ask their primary's replication server for the true end; a range whose primary does not answer is
-  # left unrecovered, refusing consumes until a later pass or a produce learns the end
-  # (`Malachi.Broker.seed_unrecovered_range/3`). Sealed-only ranges compute the end from the sealed
-  # metadata (start_offset + length).
-  defp recover_range_state(broker), do: broker.dsrsm |> topic_ranges() |> Enum.reduce(broker, &recover_one_range/2)
+  # Recovers each range's end offset and segment sequence floor from the authoritative metadata plus what
+  # the primaries answered (`ends`, from `probe_ends/1`), so a restarted broker can serve reads of
+  # pre-restart data. Pure: it asks nobody anything, because it runs on this loop, which serves every
+  # client of the node. Asking here, one range after another, is what held a restarted broker for a quarter
+  # of a second per range and every reconcile tick for as long per unreachable primary (#283).
+  #
+  # An active range takes the end its primary answered for the segment that is STILL its active one in the
+  # metadata this loop holds. A primary that did not answer about that segment leaves the range as it is
+  # when this loop already knows an end, and unrecovered when it does not
+  # (`Malachi.Broker.seed_unrecovered_range/3`), refusing consumes until a later pass or a produce learns
+  # the end. Every seed is monotone, so an answer older than what this loop did while the pass ran never
+  # rewinds it. Sealed-only ranges compute the end from the sealed metadata (start_offset + length).
+  #
+  # A range the pass has nothing to say about is `unanswered`: one it never saw (this loop registered its
+  # segment after the pass read the metadata, for a topic created or a stream opened meanwhile), or one whose
+  # answer is about a segment that rolled, sealed or was split away while the pass ran. After a pass
+  # (`:keep`) such a range is left exactly as it is, since the pass asked nothing about the segment the
+  # range is on now, and the next pass will: marking it unrecovered would refuse the reads of a range this
+  # loop just created and holds whole, which a probe that was never made has no grounds to do. At boot
+  # (`:unrecovered`) nothing has been asked yet and this loop knows no end at all, so every active range
+  # waits for the first pass of end probes, which the boot waits for, boundedly, before its first call.
+  defp recover_range_state(broker, ends, unanswered),
+    do: broker.dsrsm |> topic_ranges() |> Enum.reduce(broker, &recover_one_range(&1, &2, ends, unanswered))
 
   defp topic_ranges(dsrsm) do
     DSRSM.merged_metadata(dsrsm).topics
@@ -1233,7 +1287,7 @@ defmodule Malachi.BrokerServer do
     |> Enum.flat_map(fn topic -> Enum.map(DSRSM.ranges_of_topic(dsrsm, topic), &{topic, &1.id}) end)
   end
 
-  defp recover_one_range({topic, range_id}, broker) do
+  defp recover_one_range({topic, range_id}, broker, ends, unanswered) do
     case DSRSM.segments_of_range(broker.dsrsm, topic, range_id) do
       [] ->
         broker
@@ -1241,16 +1295,22 @@ defmodule Malachi.BrokerServer do
       segments ->
         min_seq = segments |> Enum.map(fn %{id: {_range, seq}} -> seq end) |> Enum.max() |> Kernel.+(1)
 
-        case recovered_next_offset(segments) do
+        case recovered_next_offset(segments, Map.get(ends, range_id)) do
           next when is_integer(next) ->
             broker |> Broker.seed_range_state(range_id, next, min_seq) |> await_local_horizon(topic, range_id, next)
 
-          # The primary did not answer, so the end is unknown. Any horizon guessed here is wrong in one
-          # direction: the segment's start would serve the range's earlier segments and hide the active
-          # one, zero would hide everything, and either page comes back empty and successful. So the
-          # range refuses its reads until a later pass (every reconcile runs this again) learns the end.
+          # The primary did not answer, so the end is unknown. Any horizon guessed here is wrong in one direction: the
+          # segment's start would serve the range's earlier segments and hide the active one, zero would
+          # hide everything, and either page comes back empty and successful. So the range refuses its
+          # reads until a later pass (every reconcile runs this again) learns the end.
           :unreachable ->
             Broker.seed_unrecovered_range(broker, range_id, min_seq)
+
+          :unanswered when unanswered == :unrecovered ->
+            Broker.seed_unrecovered_range(broker, range_id, min_seq)
+
+          :unanswered ->
+            broker
         end
     end
   end
@@ -1265,8 +1325,8 @@ defmodule Malachi.BrokerServer do
   # the seal, so a buffered record is never counted. A range with fewer answers than a quorum is left out
   # and asked again on the next pass; one that is known is never asked again.
   #
-  # It runs in the reconcile's remote half, every call at once under one bound, so it never holds the loop
-  # for longer than the bound (and only at boot or on `reconcile_now/2`, which run that half on the loop).
+  # It runs in the pass of data-plane probes, after the ends (`probe_ranges/1`), every call at once under
+  # one bound. That pass runs off the loop, except on `reconcile_now/2`.
   defp probe_horizons(dsrsm, known) do
     calls =
       for {topic, range_id} <- topic_ranges(dsrsm),
@@ -1278,9 +1338,9 @@ defmodule Malachi.BrokerServer do
 
     calls
     |> BoundedFanout.map(
-      @horizon_probe_timeout,
+      @probe_timeout,
       fn {_range_id, segment, replica} ->
-        ReplicationServer.durable_stats(replica, segment.id, segment.start_offset, @horizon_probe_timeout)
+        ReplicationServer.durable_stats(replica, segment.id, segment.start_offset, @probe_timeout)
       end,
       fn _call -> {:error, :timeout} end
     )
@@ -1314,16 +1374,62 @@ defmodule Malachi.BrokerServer do
     end
   end
 
-  defp recovered_next_offset(segments) do
+  defp recovered_next_offset(segments, answer) do
     case Enum.find(segments, &(&1.state == :active)) do
-      %{id: segment_id, start_offset: start_offset, replica_set: [primary | _]} ->
-        safe_durable_end(primary, segment_id, start_offset)
+      %{id: segment_id} ->
+        answered_end(segment_id, answer)
 
       nil ->
         # Sealed-only range: the seal command recorded each segment's length deterministically.
         %{start_offset: start_offset, length: length} = Enum.max_by(segments, & &1.start_offset)
         start_offset + (length || 0)
     end
+  end
+
+  # What the pass learned about `segment_id`, the range's active segment now: its end, `:unreachable` when
+  # its primary did not answer, or `:unanswered` when the pass asked nothing about this segment.
+  defp answered_end(segment_id, {segment_id, end_offset}) when is_integer(end_offset), do: end_offset
+  defp answered_end(segment_id, {segment_id, :unreachable}), do: :unreachable
+  defp answered_end(_segment_id, _missing_or_about_another_segment), do: :unanswered
+
+  # What a pass of data-plane probes asks, taken from the cache THIS LOOP holds, which includes the vnodes a
+  # reconcile kept from an earlier read because they did not answer it (`Malachi.Broker.put_cache/3`):
+  # their ranges are served from that cache, so their ends are asked too. The ranges whose horizon this
+  # loop already holds are not asked for it again.
+  defp probe_plan(state) do
+    dsrsm = state.broker.dsrsm
+
+    asks =
+      for {topic, range_id} <- topic_ranges(dsrsm),
+          %{replica_set: [_primary | _]} = segment <- [active_segment(dsrsm, topic, range_id)],
+          do: {range_id, segment}
+
+    {asks, dsrsm, Broker.durable_ranges(state.broker)}
+  end
+
+  # The remote half of a pass, run off the loop except in `reconcile_now/2`: the ends, then the horizons.
+  defp probe_ranges({asks, dsrsm, known_horizons}), do: {probe_ends(asks), probe_horizons(dsrsm, known_horizons)}
+
+  # Asks the primary of each segment in `asks` where it ends: the remote half of `recover_range_state/3`.
+  # Answers `%{range_id => {segment_id, end_offset | :unreachable}}`, keyed by the segment asked about so the
+  # loop can tell an answer about a segment that moved on while the pass ran.
+  #
+  # At most `@probe_concurrency` calls are in flight, each bounded by `@probe_timeout` from when it starts,
+  # so a primary that does not answer costs one bound per range it leads, spread over the pass. A range not
+  # answered within the bound is recovered by a pass that follows, each of which asks again, and a server
+  # that opened a segment for an earlier call answers the next from memory.
+  defp probe_ends(asks) do
+    asks
+    |> BoundedFanout.map(
+      @probe_timeout,
+      fn {_range_id, %{id: segment_id, start_offset: start_offset, replica_set: [primary | _]}} ->
+        safe_durable_end(primary, segment_id, start_offset)
+      end,
+      fn _ask -> :unreachable end,
+      max_concurrency: @probe_concurrency
+    )
+    |> Enum.zip(asks)
+    |> Map.new(fn {answer, {range_id, segment}} -> {range_id, {segment.id, answer}} end)
   end
 
   # `durable_end` rather than `end_offset`, which is the whole of the cold-segment fix. `end_offset` is
@@ -1334,15 +1440,14 @@ defmodule Malachi.BrokerServer do
   # produce broke the loop. `durable_end` recovers the log from disk and answers the true resume point,
   # which is exactly what this caller means.
   #
-  # Short timeout: this runs inside the broker loop (init and the periodic reconcile), and an
-  # unreachable primary must cost milliseconds, not the default five seconds per range. A legitimate
-  # open that overruns it is retried on the next tick, by which point the server has finished opening
-  # and answers from memory.
+  # Short timeout: an unreachable primary must cost milliseconds, not the default five seconds, and
+  # `reconcile_now/2` runs this pass on the loop. A legitimate open that overruns it is
+  # retried on the next tick, by which point the server has finished opening and answers from memory.
   #
   # A primary whose copy failed answers `{:error, _}`, and it is treated like one that does not answer:
   # it has no trustworthy end to seat a horizon at, and the heal pass is what seals that segment.
   defp safe_durable_end(primary, segment_id, base_offset) do
-    case ReplicationServer.durable_end(primary, segment_id, base_offset, 250) do
+    case ReplicationServer.durable_end(primary, segment_id, base_offset, @probe_timeout) do
       {:error, _reason} -> :unreachable
       end_offset -> end_offset
     end
@@ -1776,13 +1881,9 @@ defmodule Malachi.BrokerServer do
   # The remote half of a reconcile, and the ONLY half that may run off this server's loop. It takes and
   # returns plain data: handing it `state.broker` and applying what it gave back would discard every
   # produce, seal and fence the loop handled while it ran.
-  defp run_reconcile(bootstrap, metadata_refresh, read_timeout, known_horizons) do
+  defp run_reconcile(bootstrap, metadata_refresh, read_timeout) do
     bootstrap_missing_vnodes(bootstrap, read_timeout)
-
-    case metadata_refresh.() do
-      {dsrsm, unreachable} -> {dsrsm, unreachable, probe_horizons(dsrsm, known_horizons)}
-      nil -> nil
-    end
+    metadata_refresh.()
   end
 
   # Starts the tick's reconcile off the loop. At most one at a time: a control plane slow enough that a
@@ -1798,11 +1899,10 @@ defmodule Malachi.BrokerServer do
   defp start_reconcile_task(state) do
     generation = state.reconcile_generation
     {bootstrap, refresh, read_timeout} = {state.bootstrap, state.metadata_refresh, state.reconcile_read_timeout}
-    known = Broker.durable_ranges(state.broker)
 
     task =
       Task.Supervisor.async_nolink(Malachi.TaskSupervisor, fn ->
-        {:reconciled, generation, run_reconcile(bootstrap, refresh, read_timeout, known)}
+        {:reconciled, generation, run_reconcile(bootstrap, refresh, read_timeout)}
       end)
 
     timer = Process.send_after(self(), {:reconcile_deadline, task.ref}, state.reconcile_deadline)
@@ -1815,13 +1915,44 @@ defmodule Malachi.BrokerServer do
     %{state | reconcile_task: nil}
   end
 
+  # Starts a pass of end probes off the loop, unless one is still running: a pass waiting on many silent
+  # primaries outlives the tick, and passes piling up would each ask them all again.
+  defp start_range_probes(%{metadata_refresh: nil} = state), do: state
+  defp start_range_probes(%{range_probe: running} = state) when not is_nil(running), do: state
+
+  defp start_range_probes(state) do
+    plan = probe_plan(state)
+    task = Task.Supervisor.async_nolink(Malachi.TaskSupervisor, fn -> {:ranges_probed, probe_ranges(plan)} end)
+    %{state | range_probe: %{ref: task.ref, pid: task.pid}}
+  end
+
+  # Boot only, which runs only with a control plane to read, so a pass was just started: waits a bounded
+  # time for it, so a node whose primaries answer serves every range from its first call. Whatever the pass
+  # has not answered by then lands through `handle_info/2`.
+  defp await_boot_probes(%{range_probe: %{ref: ref}} = state) do
+    receive do
+      {^ref, {:ranges_probed, probed}} ->
+        Process.demonitor(ref, [:flush])
+        apply_probes(%{state | range_probe: nil}, probed)
+    after
+      @boot_probe_wait_ms -> state
+    end
+  end
+
+  # What a pass learned, applied to the CURRENT broker: the ends first, monotone and only for the segment each
+  # range is on now (`recover_range_state/3`), then the horizons, which a range still unrecovered would not
+  # take. Readers are woken, since a range recovered here serves records it refused a moment ago.
+  defp apply_probes(state, {ends, horizons}) do
+    broker = state.broker |> recover_range_state(ends, :keep) |> seed_horizons(horizons)
+    wake_all_ranges(%{state | broker: broker})
+  end
+
   # Boot and `reconcile_now/2`: the same pass, run on the loop and waited on. In-memory metadata has no
   # control plane to read, so there is nothing to do and nothing to wait for.
   defp reconcile_synchronously(%{metadata_refresh: nil} = state), do: state
 
   defp reconcile_synchronously(state) do
-    known = Broker.durable_ranges(state.broker)
-    result = run_reconcile(state.bootstrap, state.metadata_refresh, state.reconcile_read_timeout, known)
+    result = run_reconcile(state.bootstrap, state.metadata_refresh, state.reconcile_read_timeout)
 
     # A task already in flight read the control plane BEFORE this pass did, so its result would install
     # that older read over the one this pass is about to install. The journal cannot repair it either:
@@ -1842,7 +1973,7 @@ defmodule Malachi.BrokerServer do
         # sharded refresh reports its silent vnodes by id and never answers nil.
         state
 
-      {dsrsm, unreachable, horizons} ->
+      {dsrsm, unreachable} ->
         # Refresh the range end offsets along with the metadata: a frontend's read horizon is its
         # local offsets map, which only advances for produces IT handles, so writes flowing through
         # OTHER frontends (or landed while this node was down) would otherwise stay invisible to its
@@ -1867,7 +1998,7 @@ defmodule Malachi.BrokerServer do
 
         sweep_streams(%{
           state
-          | broker: broker |> recover_range_state() |> seed_horizons(horizons),
+          | broker: broker,
             seen_vnodes: seen_vnodes(state, dsrsm, unreachable)
         })
         |> wake_all_ranges()

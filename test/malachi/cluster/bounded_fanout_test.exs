@@ -30,6 +30,36 @@ defmodule Malachi.Cluster.BoundedFanoutTest do
     assert elapsed_us < 1_500_000, "ten 200ms calls took #{div(elapsed_us, 1000)}ms; they ran in sequence"
   end
 
+  test "a cap keeps at most that many calls in flight, and still answers every item in order" do
+    # The end probes of a node's active ranges (#283): their number grows with the data, so all at once is
+    # a queue in the server they all call, which grows on every pass.
+    counter = :counters.new(2, [])
+
+    call = fn i ->
+      :counters.add(counter, 1, 1)
+      in_flight = :counters.get(counter, 1)
+      if in_flight > :counters.get(counter, 2), do: :counters.put(counter, 2, in_flight)
+      Process.sleep(20)
+      :counters.sub(counter, 1, 1)
+      i
+    end
+
+    items = Enum.to_list(1..12)
+    assert BoundedFanout.map(items, 1_000, call, fn i -> {:failed, i} end, max_concurrency: 3) == items
+    assert :counters.get(counter, 2) <= 3
+  end
+
+  test "under a cap, each call's bound starts when the call does, not when the fan-out does" do
+    # Six calls of 100ms, two at a time, take about 300ms in all: past a 150ms bound counted from the
+    # start of the fan-out, but each call is well inside its own.
+    items = Enum.to_list(1..6)
+
+    results =
+      BoundedFanout.map(items, 150, fn i -> Process.sleep(100) && i end, fn i -> {:failed, i} end, max_concurrency: 2)
+
+    assert results == items
+  end
+
   test "an item whose call overruns the bound takes its failure value, and the rest still answer" do
     # A call that outlives its own timeout is what a redirect chase looks like from here: the item has
     # to be named in the result, which is why the answers are zipped back against the input.
