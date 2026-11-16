@@ -7,8 +7,10 @@
 An open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-storage architecture, a CP
 (consistent, partition-tolerant), horizontally-scalable **log broker**. Clients speak topics, keys, and positions in a range's history,
 never a fixed partition count, so the broker can split, merge, and restripe its storage underneath
-without breaking clients. Replicated by quorum (Raft via `ra`), with SWIM membership,
-self-healing, and rack-aware placement.
+without breaking clients. Metadata is replicated by Raft (`ra`), and a produce is acknowledged once a
+majority of its segment's replicas has fsynced it
+([what an acknowledgement covers](docs/ARCHITECTURE.md#what-an-acknowledgement-covers)). It uses SWIM
+membership, self-healing, and rack-aware placement.
 
 > [!WARNING]
 > **Active development, not production-ready.** Malachi is a work in progress: interfaces and on-disk
@@ -1116,7 +1118,7 @@ Malachi.Auth.change_password("myuser", "newpass")
 Malachi ports LinkedIn's NorthGuard log-storage design to Elixir/OTP:
 
 - **Control plane**: topic/range/segment metadata as a deterministic state machine, replicated per vnode by Raft (`ra`) and sharded across vnodes by topic.
-- **Data plane**: a `Log` of `segments` per range, replicated by quorum across nodes; placement is HRW/rendezvous and rack-aware.
+- **Data plane**: a `Log` of `segments` per range, replicated across nodes and acknowledged once a majority of a segment's replicas has fsynced the batch ([what an acknowledgement covers](docs/ARCHITECTURE.md#what-an-acknowledgement-covers)); placement is HRW/rendezvous and rack-aware.
 - **Membership**: SWIM (gossip with suspicion) for failure detection; self-healing re-replicates segments and promotes primaries on node loss.
 - **Client**: a compact binary protocol over TCP; a routing client reads the cluster state and the topic's routes, then writes and reads each range at the broker that leads it.
 
