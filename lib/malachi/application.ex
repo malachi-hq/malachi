@@ -1442,15 +1442,16 @@ defmodule Malachi.Application do
     |> Keyword.put(:format_marker_dir, log_data_dir())
   end
 
-  # How far to size a new segment file at creation, so appends overwrite an already-allocated region
-  # instead of extending the file. On by default HERE rather than in the store, because the store is
-  # a library and an `open/3` that writes tens of megabytes by default would be hostile to anything
-  # that opens a segment without meaning to, the test suite first among them.
+  # How far to size an active segment file ahead of its writes, so appends overwrite an already-allocated
+  # region instead of extending the file. The room is made in 4MB steps by the flushes that need it, never
+  # by opening or recovering a segment (#283). On by default HERE rather than in the store, because the
+  # store is a library and a default that writes tens of megabytes would be hostile to anything that
+  # writes a segment without meaning to, the test suite first among them.
   #
   # Measured on an ubuntu-latest runner, in the regime the pinned ceiling harness runs: per-flush p50
   # 316us growing against 96us preallocated, a 70% cut, against a measured noise floor of 1us. It
-  # costs one 64MB write per segment creation, about 36ms on that runner, which the saving pays back
-  # in roughly 164 flushes out of the ~26k a 64MB segment sees.
+  # costs 64MB of zeros per segment, about 36ms on that runner in all, paid a step at a time, which the
+  # saving pays back in roughly 164 flushes out of the ~26k a 64MB segment sees.
   #
   # 64MB and not `:log_roll_max_bytes` (1GB by default): the broker asks for a roll at
   # `:segment_max_bytes`, 64MB, so that is the size the file actually reaches. Preallocating the roll
@@ -1469,8 +1470,8 @@ defmodule Malachi.Application do
     configured = Application.get_env(:malachi, :segment_prealloc_bytes, @default_segment_prealloc_bytes)
 
     # Never more than the segment will be allowed to reach. An operator who rolls at 1MB would
-    # otherwise get a 64MB file created and written for every 1MB segment, which is 64x the disk and
-    # 64x the creation cost for room that can never be used. Both thresholds bound the active file:
+    # otherwise get room written up to 64MB for every 1MB segment, which is 64x the disk and 64x the
+    # cost of the zeros for room that can never be used. Both thresholds bound the active file:
     # `:segment_max_bytes` is where the broker asks for a roll, `:log_roll_max_bytes` where the log
     # rolls internally, so the smaller of whichever are set is the real ceiling.
     [:segment_max_bytes, :log_roll_max_bytes]
