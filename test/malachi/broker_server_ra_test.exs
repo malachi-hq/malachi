@@ -271,6 +271,37 @@ defmodule Malachi.BrokerServerRaTest do
     :ok = BrokerServer.stop(third)
   end
 
+  test "records a produce through one frontend answered are readable through another once it restarts" do
+    # The guarantee recovery exists for, pinned before anything moves the recovery off the loop (#46, #283):
+    # frontend B never answered these produces, so it learns where the range ends, and how far a quorum
+    # holds it, only from the primaries and the replicas, at boot.
+    cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+    brokers = for {name, _directory} <- named_replicas("malachi_cross_frontend"), do: {name, node()}
+    opts = [brokers: brokers, replication_factor: 3, metadata_cluster: cluster]
+
+    {:ok, frontend_a} = BrokerServer.start_link("unused", opts)
+    on_exit(fn -> stop_quietly(frontend_a) end)
+
+    for topic <- ["events", "audit"] do
+      {:ok, _root} = BrokerServer.create_topic(frontend_a, topic, 4)
+    end
+
+    {:ok, _} = BrokerServer.produce(frontend_a, "events", for(i <- 1..5, do: Record.new("e#{i}", key: "k#{i}")))
+    {:ok, _} = BrokerServer.produce(frontend_a, "audit", for(i <- 1..3, do: Record.new("a#{i}", key: "k#{i}")))
+
+    {:ok, frontend_b} = BrokerServer.start_link("unused", opts)
+    assert frontend_b |> ReadBack.values("events") |> Enum.sort() == Enum.sort(for(i <- 1..5, do: "e#{i}"))
+    assert frontend_b |> ReadBack.values("audit") |> Enum.sort() == Enum.sort(for(i <- 1..3, do: "a#{i}"))
+    :ok = BrokerServer.stop(frontend_b)
+
+    # more records through A while B is down, then B again: it reads every one of them
+    {:ok, _} = BrokerServer.produce(frontend_a, "events", for(i <- 6..8, do: Record.new("e#{i}", key: "k#{i}")))
+    {:ok, frontend_b} = BrokerServer.start_link("unused", opts)
+    assert frontend_b |> ReadBack.values("events") |> Enum.sort() == Enum.sort(for(i <- 1..8, do: "e#{i}"))
+    :ok = BrokerServer.stop(frontend_b)
+  end
+
   # Three registered replication servers (refs survive a broker restart), each `{name, directory}`.
   defp named_replicas(prefix, opts \\ []) do
     for i <- 1..3 do
