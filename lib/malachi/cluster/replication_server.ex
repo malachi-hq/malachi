@@ -88,6 +88,11 @@ defmodule Malachi.Cluster.ReplicationServer do
   (see `Malachi.UnexpectedMessage`). Dropping a push does not ack it, so the batch it carried waits for
   the replication timeout on the primary; keeping a new shape from being sent before every replica
   understands it is not this server's job.
+
+  A caller that asks a newer question of an older server can fall back on that answer instead. The sealed-copy
+  integrity probe does: an older replica answers `stored_bytes_of/4` with `{:error, :unknown_call}`, and
+  `Malachi.Cluster.SelfHealing` asks it one segment at a time with `stored_bytes/3`, as every release before
+  the batched call did.
   """
 
   use GenServer
@@ -391,15 +396,48 @@ defmodule Malachi.Cluster.ReplicationServer do
   @doc """
   The on-disk byte size this server stores for `segment_id`: the sum of its segment files' sizes,
   read without opening the log (no descriptors, no state change), so it is cheap enough to poll.
-  0 when nothing is stored. A segment that failed in storage answers the storage error instead. The first stage of the
-  sealed-copy integrity probe
-  (`Malachi.Cluster.SelfHealing`): a **sealed** segment whose stored bytes fall short of the
-  metadata's sealed `byte_size` has lost data on this replica. Only meaningful for sealed segments;
-  an active segment's file legitimately trails its in-memory log by the unflushed buffer.
+  0 when nothing is stored. A segment that failed in storage answers the storage error instead. A **sealed**
+  segment whose stored bytes fall short of the metadata's sealed `byte_size` has lost data on this replica.
+  Only meaningful for sealed segments; an active segment's file legitimately trails its in-memory log by the
+  unflushed buffer.
+
+  This is the question for ONE segment. The sealed-copy integrity probe (`Malachi.Cluster.SelfHealing`) asks
+  `stored_bytes_of/4` instead, and comes back here only for a replica too old to know that call.
   """
   @spec stored_bytes(term(), term(), timeout()) :: non_neg_integer() | {:error, term()}
   def stored_bytes(ref, segment_id, timeout \\ 5_000) do
     GenServer.call(ref, {:stored_bytes, segment_id}, timeout)
+  end
+
+  @doc """
+  `stored_bytes/3` for the segments in `segment_ids`, in one call, measured in order until `budget_ms` is spent.
+  Answers `{:ok, measured, unmeasured}`: `measured` maps each id it reached to the answer `stored_bytes/3` would
+  give, so a segment this server does not hold answers 0 and one that failed in storage answers its storage
+  error, and an error on one segment does not fail the others. `unmeasured` lists, in order, the ids the
+  budget left for another call. At least one id is measured on every call, so asking again for `unmeasured`
+  always makes progress.
+
+  The first stage of the sealed-copy integrity probe (`Malachi.Cluster.SelfHealing`), which asks each replica
+  about every healthy sealed segment it holds on every pass. Batched for the same reason as
+  `failed_segments/3`: one call per replica per chunk of segments rather than one per segment per replica, so a
+  replica that does not answer costs the pass one timeout rather than one per segment it holds.
+
+  Each segment is measured inside this server, which serves nothing else meanwhile, and the budget is what keeps
+  one call from holding it. Measuring a copy is a stat once its logical size is cached, and a scan of the whole
+  file until then: a batch copy just backfilled to a follower, whose store never sealed it, costs about 200 to
+  300 ms per 64 MiB on Linux. Without the budget a call over many such copies would hold the server for all of
+  them in a row; with it, a call holds the server for the budget plus at most one measurement, which is the most
+  a per-segment `stored_bytes/3` held it for.
+
+  A dead or unreachable server answers `{:error, :unreachable}` rather than exiting the caller. A server too
+  old to know this call answers `{:error, :unknown_call}` (see "Messages from another version").
+  """
+  @spec stored_bytes_of(term(), [term()], timeout(), non_neg_integer()) ::
+          {:ok, %{optional(term()) => non_neg_integer() | {:error, term()}}, [term()]} | {:error, term()}
+  def stored_bytes_of(ref, segment_ids, timeout \\ 5_000, budget_ms \\ 100) do
+    GenServer.call(ref, {:stored_bytes_of, segment_ids, budget_ms}, timeout)
+  catch
+    :exit, _reason -> {:error, :unreachable}
   end
 
   @doc """
@@ -869,25 +907,14 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   def handle_call({:stored_bytes, segment_id}, _from, state) do
-    cond do
-      Map.has_key?(state.failed, segment_id) ->
-        {:reply, storage_error(state, segment_id), state}
+    {:reply, logical_bytes_answer(state, segment_id), state}
+  end
 
-      Map.has_key?(state.logs, segment_id) ->
-        case Log.listed_logical_bytes(Map.fetch!(state.logs, segment_id)) do
-          {:ok, bytes} -> {:reply, bytes, state}
-          {:error, reason} -> {:reply, {:error, {:storage, reason}}, state}
-        end
-
-      true ->
-        # A directory that cannot be listed, or a file that cannot be measured, is refused, not counted as 0
-        # bytes. A sealed file answers from its manifest only while the manifest still matches the file's
-        # size, so a copy cut short after it sealed is measured as what it holds now and seen as short.
-        case Log.directory_logical_bytes(segment_directory(state.directory, segment_id), state.log_opts) do
-          {:ok, bytes} -> {:reply, bytes, state}
-          {:error, reason} -> {:reply, {:error, {:storage, reason}}, state}
-        end
-    end
+  # Every id asked is either measured or handed back as unmeasured, so the caller never has to read an absent key
+  # as 0 bytes.
+  def handle_call({:stored_bytes_of, segment_ids, budget_ms}, _from, state) do
+    deadline = System.monotonic_time(:millisecond) + budget_ms
+    {:reply, measure_until(state, segment_ids, deadline, %{}), state}
   end
 
   def handle_call({:durable_end, segment_id, base_offset}, _from, state) do
@@ -1901,6 +1928,38 @@ defmodule Malachi.Cluster.ReplicationServer do
   defp unreadable?(_reason), do: false
 
   defp storage_error(state, segment_id), do: {:error, {:storage, Map.fetch!(state.failed, segment_id)}}
+
+  # The answer of `stored_bytes/3` and of each entry of `stored_bytes_of/4`: one function, so the batched probe
+  # and its per-segment fallback cannot measure a copy differently.
+  defp logical_bytes_answer(state, segment_id) do
+    cond do
+      Map.has_key?(state.failed, segment_id) ->
+        storage_error(state, segment_id)
+
+      Map.has_key?(state.logs, segment_id) ->
+        storage_answer(Log.listed_logical_bytes(Map.fetch!(state.logs, segment_id)))
+
+      true ->
+        # A directory that cannot be listed, or a file that cannot be measured, is refused, not counted as 0
+        # bytes. A sealed file answers from its manifest only while the manifest still matches the file's
+        # size, so a copy cut short after it sealed is measured as what it holds now and seen as short.
+        storage_answer(Log.directory_logical_bytes(segment_directory(state.directory, segment_id), state.log_opts))
+    end
+  end
+
+  # Measures `segment_ids` in order until `deadline`, always at least the first one, and answers the rest unmeasured.
+  defp measure_until(_state, [], _deadline, measured), do: {:ok, measured, []}
+
+  defp measure_until(state, [segment_id | rest] = segment_ids, deadline, measured) do
+    if map_size(measured) > 0 and System.monotonic_time(:millisecond) >= deadline do
+      {:ok, measured, segment_ids}
+    else
+      measure_until(state, rest, deadline, Map.put(measured, segment_id, logical_bytes_answer(state, segment_id)))
+    end
+  end
+
+  defp storage_answer({:ok, bytes}), do: bytes
+  defp storage_answer({:error, reason}), do: {:error, {:storage, reason}}
 
   # Appends `records` to `segment_id`'s open `log`, either `:durable` (appended and fsynced) or `:buffered`
   # (appended only, for group commit to make durable later), and records the result in the state.

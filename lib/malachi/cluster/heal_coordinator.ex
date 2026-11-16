@@ -105,7 +105,7 @@ defmodule Malachi.Cluster.HealCoordinator do
   more than the seal says, and why the recorded length is the one that wins). The copies to settle come
   from the integrity probe `Malachi.Cluster.SelfHealing` already runs over sealed segments whose replicas are
   all live, not under-replicated, and whose latch state was readable this tick, as its `:unsettled` list, so
-  this pass asks the probe for the bytes and, for each copy above the recorded size, whether its marker is on disk:
+  this pass asks the probe for the bytes (batched per replica, one `ReplicationServer.stored_bytes_of/4` call per chunk of segments) and, for each copy above the recorded size, whether its marker is on disk:
   `SealedOverrun.plan/4` turns that list into `seal_at` calls, starting
   just past the copy the last pass reached, the
   `:settle_copy` seam makes them, and the `:confirm_settled` seam then records, for each copy that holds

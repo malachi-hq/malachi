@@ -650,4 +650,411 @@ defmodule Malachi.Cluster.SelfHealingTest do
 
     assert SelfHealing.heal_sealed(metadata, [a, b, d], 3) == %{applied: [], failed: [], repaired: [], unsettled: []}
   end
+
+  describe "the batched integrity probe" do
+    # A replica on an older build, which does not know `stored_bytes_of/4`: it answers that call as the
+    # catch-all of `Malachi.UnexpectedMessage` does and forwards everything else to a real replication server.
+    defmodule OldReplica do
+      @moduledoc false
+      use GenServer
+
+      def start_link(real), do: GenServer.start_link(__MODULE__, real)
+
+      @impl true
+      def init(real), do: {:ok, real}
+
+      @impl true
+      def handle_call({:stored_bytes_of, _segment_ids, _budget_ms}, _from, real),
+        do: {:reply, {:error, :unknown_call}, real}
+
+      def handle_call(message, _from, real), do: {:reply, GenServer.call(real, message, :infinity), real}
+
+      @impl true
+      def handle_cast(message, real) do
+        GenServer.cast(real, message)
+        {:noreply, real}
+      end
+
+      @impl true
+      def handle_info(message, real) do
+        send(real, message)
+        {:noreply, real}
+      end
+    end
+
+    # `count` sealed segments over `replica_set`, each written to `holders` only: a replica outside `holders`
+    # holds nothing of it, which the probe measures as 0 bytes, a lost copy.
+    defp sealed_segments(replica_set, holders, count) do
+      {segment_ids, metadata} =
+        Enum.map_reduce(1..count, Metadata.new(), fn i, metadata ->
+          {metadata, {:ok, root}} = Metadata.apply(metadata, {:create_topic, "probe-#{i}", 1})
+          segment_id = {root, 0}
+          {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, replica_set, 0})
+          for replica <- holders, do: {:ok, 1} = ReplicationServer.follow(replica, segment_id, 0, records(["x", "y"]))
+          bytes = ReplicationServer.stored_bytes(hd(holders), segment_id)
+          {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, bytes, 0})
+          {segment_id, metadata}
+        end)
+
+      {metadata, segment_ids}
+    end
+
+    # Runs `fun` with every call `pids` receive traced, and answers its result and the `{pid, tag}` of each call.
+    defp traced_calls(pids, fun) do
+      for pid <- pids, do: 1 = :erlang.trace(pid, true, [:receive])
+      result = fun.()
+
+      for pid <- pids do
+        :erlang.trace(pid, false, [:receive])
+        ref = :erlang.trace_delivered(pid)
+        assert_receive {:trace_delivered, ^pid, ^ref}
+      end
+
+      {result, collect_calls([])}
+    end
+
+    defp collect_calls(acc) do
+      receive do
+        {:trace, pid, :receive, {:"$gen_call", _from, message}} -> collect_calls([{pid, call_tag(message)} | acc])
+        {:trace, _pid, :receive, _other} -> collect_calls(acc)
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    defp call_tag(message) when is_tuple(message), do: elem(message, 0)
+    defp call_tag(message), do: message
+
+    defp count(calls, pid, tag), do: Enum.count(calls, &(&1 == {pid, tag}))
+
+    # Answers the real batched call, reporting each one to the test process.
+    defp recording_probe(test) do
+      fn replica, segment_ids ->
+        send(test, {:asked, replica, segment_ids})
+        ReplicationServer.stored_bytes_of(replica, segment_ids)
+      end
+    end
+
+    defp asked do
+      receive do
+        {:asked, replica, segment_ids} -> [{replica, segment_ids} | asked()]
+      after
+        0 -> []
+      end
+    end
+
+    test "asks each replica once per chunk, never once per segment" do
+      replicas = [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, _segment_ids} = sealed_segments(replicas, replicas, 5)
+
+      {result, calls} = traced_calls(replicas, fn -> SelfHealing.heal_sealed(metadata, replicas, 3, probe_chunk: 2) end)
+
+      assert result == %{applied: [], failed: [], repaired: [], unsettled: []}
+      # 5 segments in chunks of 2 is 3 calls per replica, where the per-segment probe made 5.
+      for replica <- [a, b, c] do
+        assert count(calls, replica, :stored_bytes_of) == 3
+        assert count(calls, replica, :stored_bytes) == 0
+      end
+
+      # With the default chunk, one call per replica for the whole pass.
+      {_result, calls} = traced_calls(replicas, fn -> SelfHealing.heal_sealed(metadata, replicas, 3) end)
+      for replica <- [a, b, c], do: assert(count(calls, replica, :stored_bytes_of) == 1)
+    end
+
+    test "a replica too old for the batched call is asked one segment at a time, and its lost copies are repaired" do
+      [a, b, real] = [start_broker(), start_broker(), start_broker()]
+      {:ok, old} = OldReplica.start_link(real)
+      on_exit(fn -> if Process.alive?(old), do: Process.exit(old, :kill) end)
+      replicas = [a, b, old]
+      {metadata, segment_ids} = sealed_segments(replicas, [a, b], 2)
+
+      {result, calls} = traced_calls([a, b, old], fn -> SelfHealing.heal_sealed(metadata, replicas, 3) end)
+
+      assert result.failed == []
+      assert Enum.sort(result.repaired) == Enum.sort(for(id <- segment_ids, do: {id, old}))
+      for segment_id <- segment_ids, do: assert(read_values(real, segment_id) == ["x", "y"])
+
+      assert count(calls, old, :stored_bytes_of) == 1
+      assert count(calls, old, :stored_bytes) == 2
+      for replica <- [a, b], do: assert(count(calls, replica, :stored_bytes) == 0)
+    end
+
+    test "a replica that does not answer costs the pass one timeout, not one per segment" do
+      [a, b] = [start_broker(), start_broker()]
+      silent = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(silent, :kill) end)
+      replicas = [a, b, silent]
+      {metadata, _segment_ids} = sealed_segments(replicas, [a, b], 6)
+
+      started = System.monotonic_time(:millisecond)
+
+      {result, calls} =
+        traced_calls([silent], fn -> SelfHealing.heal_sealed(metadata, replicas, 3, probe_chunk: 2) end)
+
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      # The silent replica is skipped, never repaired, and its two other chunks are never sent.
+      assert result == %{applied: [], failed: [], repaired: [], unsettled: []}
+      assert count(calls, silent, :stored_bytes_of) == 1
+      assert elapsed < 4_000, "the pass took #{elapsed} ms: more than one probe timeout for the silent replica"
+    end
+
+    # An older replica answers the batched call `{:error, :unknown_call}` and then `reply` to each per-segment
+    # call, or exits after the first one when `reply` is `:exit`.
+    defp old_replica(reply) do
+      spawn(fn -> old_replica_loop(reply) end)
+    end
+
+    defp old_replica_loop(reply) do
+      receive do
+        {:"$gen_call", from, {:stored_bytes_of, _segment_ids, _budget_ms}} ->
+          GenServer.reply(from, {:error, :unknown_call})
+          old_replica_loop(reply)
+
+        {:"$gen_call", _from, {:stored_bytes, _segment_id}} when reply == :exit ->
+          exit(:shutdown)
+
+        {:"$gen_call", from, {:stored_bytes, _segment_id}} ->
+          GenServer.reply(from, reply)
+          old_replica_loop(reply)
+      end
+    end
+
+    test "an older replica whose per-segment answer is an error, or that exits, is unreachable and never repaired" do
+      for reply <- [{:error, {:storage, :eio}}, :exit] do
+        [a, b] = [start_broker(), start_broker()]
+        old = old_replica(reply)
+        on_exit(fn -> Process.exit(old, :kill) end)
+        replicas = [a, b, old]
+        {metadata, _segment_ids} = sealed_segments(replicas, [a, b], 2)
+
+        assert SelfHealing.heal_sealed(metadata, replicas, 3) ==
+                 %{applied: [], failed: [], repaired: [], unsettled: []}
+      end
+    end
+
+    test "a chunk that fails leaves the rest of that replica unasked and unreachable" do
+      replicas = [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_ids} = sealed_segments(replicas, [a, b], 3)
+      test = self()
+
+      probe = fn
+        ^c, segment_ids ->
+          send(test, {:asked, c, segment_ids})
+          {:error, :timeout}
+
+        replica, segment_ids ->
+          ReplicationServer.stored_bytes_of(replica, segment_ids)
+      end
+
+      result = SelfHealing.heal_sealed(metadata, replicas, 3, probe_chunk: 1, stored_bytes_of: probe)
+
+      # c holds nothing, so a measurement would repair it; an unknown answer never does.
+      assert result == %{applied: [], failed: [], repaired: [], unsettled: []}
+      assert [{^c, [_one]}] = asked()
+      for segment_id <- segment_ids, do: assert(read_values(c, segment_id) == [])
+    end
+
+    # A chunk that fails takes the later chunks of its replica with it, so the order is shuffled on every pass:
+    # one copy that is always too slow to measure must not hide the same segments from every pass.
+    test "a copy that always times out does not hide the same segments on every pass" do
+      replicas = [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, [stuck | others]} = sealed_segments(replicas, replicas, 4)
+      test = self()
+
+      probe = fn
+        ^c, segment_ids ->
+          if stuck in segment_ids do
+            {:error, :unreachable}
+          else
+            send(test, {:measured, segment_ids})
+            ReplicationServer.stored_bytes_of(c, segment_ids)
+          end
+
+        replica, segment_ids ->
+          ReplicationServer.stored_bytes_of(replica, segment_ids)
+      end
+
+      # With a fixed order, a segment queued behind the stuck one would never be measured. Shuffled, each is
+      # behind it on half the passes, so 40 passes all miss one with probability 3 x 2^-40.
+      for _pass <- 1..40, do: SelfHealing.heal_sealed(metadata, replicas, 3, probe_chunk: 1, stored_bytes_of: probe)
+
+      measured = for {:measured, ids} <- drain_messages(), id <- ids, uniq: true, do: id
+      assert Enum.sort(measured) == Enum.sort(others)
+    end
+
+    # The answers of the chunks a replica did answer survive a later chunk that fails.
+    test "a chunk that fails keeps what the earlier chunks of its replica measured" do
+      replicas = [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_ids} = sealed_segments(replicas, [a, b], 2)
+      {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+      probe = fn
+        ^c, ids ->
+          case Agent.get_and_update(calls, &{&1, &1 + 1}) do
+            0 -> ReplicationServer.stored_bytes_of(c, ids)
+            _later -> {:error, :unreachable}
+          end
+
+        replica, ids ->
+          ReplicationServer.stored_bytes_of(replica, ids)
+      end
+
+      result = SelfHealing.heal_sealed(metadata, replicas, 3, probe_chunk: 1, stored_bytes_of: probe)
+
+      # c holds neither copy. The first chunk measured one of them as empty, and it is repaired; the second
+      # chunk failed, so the other one is unknown this pass and left alone.
+      assert [{repaired, ^c}] = result.repaired
+      assert repaired in segment_ids
+      assert result.failed == []
+      assert read_values(c, repaired) == ["x", "y"]
+      assert read_values(c, hd(segment_ids -- [repaired])) == []
+    end
+
+    test "a replica too old for the batched call is asked about every chunk one segment at a time" do
+      [a, b, real] = [start_broker(), start_broker(), start_broker()]
+      {:ok, old} = OldReplica.start_link(real)
+      on_exit(fn -> if Process.alive?(old), do: Process.exit(old, :kill) end)
+      replicas = [a, b, old]
+      {metadata, segment_ids} = sealed_segments(replicas, [a, b], 2)
+
+      {result, calls} =
+        traced_calls([old], fn -> SelfHealing.heal_sealed(metadata, replicas, 3, probe_chunk: 1) end)
+
+      # Two chunks: the first answers unknown_call, and BOTH segments are then asked one at a time.
+      assert Enum.sort(result.repaired) == Enum.sort(for(id <- segment_ids, do: {id, old}))
+      assert count(calls, old, :stored_bytes_of) == 1
+      assert count(calls, old, :stored_bytes) == 2
+    end
+
+    defp drain_messages do
+      receive do
+        message -> [message | drain_messages()]
+      after
+        0 -> []
+      end
+    end
+
+    test "a segment the answer leaves out, or could not measure, is unreachable and never repaired" do
+      for answer_for_c <- [
+            fn _segment_ids -> {:ok, %{}, []} end,
+            fn segment_ids -> {:ok, Map.new(segment_ids, &{&1, {:error, {:storage, :eio}}}), []} end,
+            fn segment_ids -> {:ok, Map.new(segment_ids, &{&1, -1}), []} end,
+            # Hands every id back unmeasured: asked again it would never end, so it is given up for this pass.
+            fn segment_ids -> {:ok, %{}, segment_ids} end,
+            fn _segment_ids -> :garbage end
+          ] do
+        replicas = [a, b, c] = [start_broker(), start_broker(), start_broker()]
+        {metadata, [segment_id]} = sealed_segments(replicas, [a, b], 1)
+
+        probe = fn
+          ^c, segment_ids -> answer_for_c.(segment_ids)
+          replica, segment_ids -> ReplicationServer.stored_bytes_of(replica, segment_ids)
+        end
+
+        assert SelfHealing.heal_sealed(metadata, replicas, 3, stored_bytes_of: probe) ==
+                 %{applied: [], failed: [], repaired: [], unsettled: []}
+
+        assert read_values(c, segment_id) == []
+      end
+    end
+
+    # A replica whose budget runs out before the end of a chunk hands the rest back, and the pass asks again for it
+    # at once: every copy is still measured on the pass, and the short ones repaired.
+    test "the ids a spent budget hands back are asked again on the same pass" do
+      replicas = [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_ids} = sealed_segments(replicas, [a, b], 3)
+      test = self()
+
+      # c measures one id per call, as a server with no budget left would.
+      probe = fn
+        ^c, [first | rest] ->
+          send(test, {:asked, c, [first | rest]})
+          {:ok, %{first => ReplicationServer.stored_bytes(c, first)}, rest}
+
+        replica, ids ->
+          ReplicationServer.stored_bytes_of(replica, ids)
+      end
+
+      result = SelfHealing.heal_sealed(metadata, replicas, 3, stored_bytes_of: probe)
+
+      assert Enum.sort(result.repaired) == Enum.sort(for(id <- segment_ids, do: {id, c}))
+      assert result.failed == []
+      assert length(asked()) == 3
+    end
+
+    test "a latched copy is left out of the batch" do
+      replicas = [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, [latched, healthy]} = sealed_segments(replicas, replicas, 2)
+
+      SelfHealing.heal_sealed(metadata, replicas, 3,
+        failed: MapSet.new([{latched, c}]),
+        stored_bytes_of: recording_probe(self())
+      )
+
+      asked = asked()
+      assert [{^c, [^healthy]}] = Enum.filter(asked, &(elem(&1, 0) == c))
+      for replica <- [a, b], do: assert([{^replica, _ids}] = Enum.filter(asked, &(elem(&1, 0) == replica)))
+      for {replica, ids} <- asked, replica != c, do: assert(Enum.sort(ids) == Enum.sort([latched, healthy]))
+    end
+
+    test "a pass with no healthy sealed segment asks nobody" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "active-only", 1})
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, {root, 0}, [a, b, c], 0})
+
+      SelfHealing.heal_sealed(metadata, [a, b, c], 3, stored_bytes_of: recording_probe(self()))
+
+      assert asked() == []
+    end
+
+    # The batched probe changes how many calls are made, never what is measured or decided: the same cluster,
+    # asked in batches or one segment at a time, comes out of the pass the same way.
+    test "the batched probe and the per-segment fallback reach the same result" do
+      batched = equivalence_fixture() |> run_pass([]) |> by_position()
+
+      per_segment =
+        equivalence_fixture()
+        |> run_pass(stored_bytes_of: fn _replica, _segment_ids -> {:error, :unknown_call} end)
+        |> by_position()
+
+      assert batched.repaired != []
+      assert batched == per_segment
+    end
+
+    # Four segments over three replicas, each lost on a different replica, or on none for the last.
+    defp equivalence_fixture do
+      replicas = [start_broker(), start_broker(), start_broker()]
+
+      {segment_ids, metadata} =
+        Enum.map_reduce(0..3, Metadata.new(), fn i, metadata ->
+          holders = List.delete_at(replicas, i)
+          {metadata, [segment_id]} = sealed_segments_into(metadata, replicas, holders, "eq-#{i}")
+          {segment_id, metadata}
+        end)
+
+      {metadata, replicas, segment_ids}
+    end
+
+    defp sealed_segments_into(metadata, replica_set, holders, topic) do
+      {metadata, {:ok, root}} = Metadata.apply(metadata, {:create_topic, topic, 1})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, replica_set, 0})
+      for replica <- holders, do: {:ok, 1} = ReplicationServer.follow(replica, segment_id, 0, records(["x", "y"]))
+      bytes = ReplicationServer.stored_bytes(hd(holders), segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, bytes, 0})
+      {metadata, [segment_id]}
+    end
+
+    defp run_pass({metadata, replicas, _segment_ids}, opts) do
+      {SelfHealing.heal_sealed(metadata, replicas, 3, opts), replicas}
+    end
+
+    # Each fixture has its own servers, so the results are compared with each replica named by its position.
+    defp by_position({result, replicas}) do
+      position = replicas |> Enum.with_index() |> Map.new()
+      rename = fn {segment_id, replica} -> {segment_id, Map.get(position, replica, replica)} end
+      %{result | repaired: Enum.sort(Enum.map(result.repaired, rename)), unsettled: Enum.map(result.unsettled, rename)}
+    end
+  end
 end
