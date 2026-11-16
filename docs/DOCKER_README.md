@@ -72,11 +72,13 @@ Open [http://localhost:4041](http://localhost:4041) in your browser.
 
 | Tag | Description |
 |-----|-------------|
-| `latest` | Latest stable release |
+| `latest` | Latest release |
 | `X.Y.Z` | Specific version (e.g., `0.2.0`) |
 | `X.Y` | Latest patch of minor version (e.g., `0.2`) |
 | `X` | Latest minor of major version (e.g., `0`) |
 | `alpine` | Alpine Linux base |
+| `main` | The tip of the main branch, released or not |
+| `sha-<commit>` | The main branch at that commit |
 
 ---
 

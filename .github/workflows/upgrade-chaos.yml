@@ -8,7 +8,7 @@ name: Rolling upgrade certification
 # longer than the pull request jobs, and the canary patch it depends on is already applied and compiled on every
 # pull request by test/scripts/upgrade_canary_patch_test.exs, so a change that breaks it fails there first.
 #
-# It does not gate a release: release.yml tags every merge on its own. What it gives is a published record,
+# It does not gate a release: release.yml publishes releases on its own. What it gives is a published record,
 # every night, of rolling the release before main's code to main's code and back, which the operations guide
 # tells an operator to check before deploying. `old_ref` takes the drill to another release by hand; such a run
 # certifies a different pair, so it is not published.

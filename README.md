@@ -1080,7 +1080,7 @@ The project uses GitHub Actions for continuous integration:
 - ✅ **Elixir/OTP Version** - Tested on Elixir 1.19 / OTP 28
 - ✅ **Code Quality** - Credo, formatting, security checks
 - ✅ **Docker Build** - Verified on every PR
-- ✅ **Automatic Releases** - On merge to main
+- ✅ **Automatic Releases** - On a merge users act on (feat, fix, perf, dependencies), with grouped notes
 - ✅ **Security Scanning** - Gitleaks, Trivy, Sobelow on every PR
 - ✅ **Performance Benchmarks** - Automated regression detection on PRs
 - ✅ **Daily Security Scans** - Scheduled vulnerability scanning (2 AM UTC)
@@ -1178,15 +1178,16 @@ Examples:
 ```
 
 **Types:**
-- `feat:` - New feature (→ minor version)
-- `fix:` - Bug fix (→ patch version)
-- `docs:` - Documentation
-- `test:` - Tests
-- `refactor:` - Code refactoring
-- `chore:` - Maintenance
+- `feat:` - New feature (→ minor release)
+- `fix:` - Bug fix (→ patch release)
+- `perf:` - Performance (→ patch release)
+- `docs:` - Documentation (no release)
+- `test:` - Tests (no release)
+- `refactor:` - Code refactoring (no release)
+- `chore:` - Maintenance (no release; `chore(deps):` and `chore(docker):`, what the image ships, → patch release)
 
 **Breaking Changes:**
-- Add `[major]` to title or `BREAKING CHANGE:` in body
+- Add `!` after the type (`feat!: ...`) or the `major` label
 
 ## 📋 Input validation
 
@@ -1216,8 +1217,14 @@ lockout, audit logging, is covered above and in [SECURITY.md](SECURITY.md).
 
 This project uses [SEMVER](https://semver.org/) with automated releases.
 
-- **Patch**: Bug fixes → Add `patch` label or default
-- **Minor**: New features → Add `minor` label or use `feat:` prefix
-- **Major**: Breaking changes → Add `major` label or use `[major]` in title
+A release is published only for a merge users act on, decided by the pull request's title
+(see [What publishes a release](https://github.com/malachi-hq/malachi/blob/main/CONTRIBUTING.md#what-publishes-a-release)):
+
+- **Patch**: `fix:`, `perf:`, `revert:`, `chore(deps):`, `chore(docker):`, or the `release` label
+- **Minor**: `feat:`
+- **Major**: `!` after the type (`feat!:`) or the `major` label
+
+Documentation, CI, test and refactoring merges publish nothing on their own and are listed in the next
+release's notes, grouped by type. The `main` and `sha-<commit>` image tags follow every merge.
 
 See the [GitHub Releases](https://github.com/malachi-hq/malachi/releases) for the per-version change history.
