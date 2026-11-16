@@ -441,6 +441,32 @@ defmodule Malachi.BrokerServerRaTest do
     end
   end
 
+  # Creates `prefix_1`, `prefix_2`, ... (one record each, the topic's own name) until two of them have
+  # different primaries, and returns them. Fails after `limit` topics rather than looping forever.
+  defp create_until_two_primaries(broker, prefix, limit) do
+    Enum.reduce_while(1..limit, [], fn i, topics ->
+      topic = "#{prefix}_#{i}"
+      {:ok, _root} = BrokerServer.create_topic(broker, topic, 4)
+      {:ok, _} = BrokerServer.produce(broker, topic, [Record.new(topic, key: "k")])
+      topics = topics ++ [topic]
+      metadata = BrokerServer.metadata(broker)
+      primaries = topics |> Enum.map(&primary_of(metadata, &1)) |> Enum.uniq()
+
+      cond do
+        length(primaries) > 1 -> {:halt, topics}
+        i == limit -> flunk("#{limit} topics all landed on one primary")
+        true -> {:cont, topics}
+      end
+    end)
+  end
+
+  defp primary_of(metadata, topic) do
+    [%{replica_set: [primary | _]}] =
+      Enum.flat_map(Metadata.active_ranges_of_topic(metadata, topic), &Metadata.segments_of_range(metadata, &1.id))
+
+    primary
+  end
+
   # Puts a proxy under `name`, in front of the server registered there, that HOLDS every end probe
   # (`durable_end`) unanswered until it is sent `:answer`, then hands the held ones to the server and forwards
   # everything until it is sent `:hold` again. Everything else is forwarded at once, so the horizon probes
@@ -571,28 +597,18 @@ defmodule Malachi.BrokerServerRaTest do
     broker_opts = [brokers: brokers, replication_factor: 3, metadata_cluster: cluster]
     {:ok, first} = BrokerServer.start_link("unused", broker_opts)
 
-    topics = for i <- 1..9, do: "partial_#{i}"
-
-    for topic <- topics do
-      {:ok, _root} = BrokerServer.create_topic(first, topic, 4)
-      {:ok, _} = BrokerServer.produce(first, topic, [Record.new(topic, key: "k")])
-    end
-
+    # Placement picks each topic's primary, so topics are created until two of them landed on different
+    # primaries. A fixed count of topics could land every primary on one replica, and the test would then
+    # have no side to compare against (it did, on CI, with nine).
+    topics = create_until_two_primaries(first, "partial", 30)
     metadata = BrokerServer.metadata(first)
     :ok = BrokerServer.stop(first)
 
-    # Only the first replica's end probes are held: the topics it is primary for wait, the rest do not.
-    [{silent, _node} | _] = brokers
+    # Only the first topic's primary has its end probes held: its topics wait, the rest do not.
+    [{silent, _node} | _] = Enum.map(topics, &primary_of(metadata, &1))
     gate = hold_end_probes(silent)
 
-    primary_of = fn topic ->
-      [%{replica_set: [primary | _]}] =
-        Enum.flat_map(Metadata.active_ranges_of_topic(metadata, topic), &Metadata.segments_of_range(metadata, &1.id))
-
-      primary
-    end
-
-    {waiting, served} = Enum.split_with(topics, &(primary_of.(&1) == {silent, node()}))
+    {waiting, served} = Enum.split_with(topics, &(primary_of(metadata, &1) == {silent, node()}))
     assert waiting != [] and served != [], "the topics must have primaries on both sides"
 
     {:ok, broker} = BrokerServer.start_link("unused", broker_opts)
