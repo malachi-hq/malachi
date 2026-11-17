@@ -213,6 +213,7 @@ defmodule ReleaseWorkflowTest do
             "Bump version",
             "Get new version",
             "Write the release notes",
+            "Prepend the release to the changelog",
             "Commit version bump",
             "Create Git tag",
             "Create GitHub Release",
@@ -236,6 +237,24 @@ defmodule ReleaseWorkflowTest do
       assert job =~ "body_path: ${{ runner.temp }}/release-notes.md"
       refute job =~ ~r/^          body: /m
       refute job =~ "git log"
+    end
+
+    test "the changelog takes the same notes, before the push, and goes into the bump commit (#373)",
+         %{jobs: jobs} do
+      job = jobs["release"]
+      changelog = step(job, "Prepend the release to the changelog")
+
+      assert changelog =~ "PREV: ${{ steps.prev.outputs.TAG }}"
+      assert changelog =~ "NEW_VERSION: ${{ steps.version.outputs.NEW_VERSION }}"
+
+      assert changelog =~
+               ~s[run: scripts/changelog-prepend.sh "$PREV" HEAD "$NEW_VERSION" "$RUNNER_TEMP/release-prs" CHANGELOG.md\n]
+
+      position = fn text -> job |> :binary.match(text) |> elem(0) end
+      assert position.("scripts/release-notes.sh") < position.("scripts/changelog-prepend.sh")
+      assert position.("scripts/changelog-prepend.sh") < position.("git push origin HEAD:main")
+
+      assert step(job, "Commit version bump") =~ "git add mix.exs CHANGELOG.md\n"
     end
   end
 

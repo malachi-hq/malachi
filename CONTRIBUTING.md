@@ -71,6 +71,10 @@ section under `**Release highlights**` (or in the pull request's `## Release hig
 open the release notes. Only a pull request whose author has write access to the repository contributes
 highlights, since a description can be edited after the merge.
 
+A change an operator has to act on when upgrading (a setting to add, a step before a rolling restart, a
+behaviour that changes) goes in the pull request's `## Upgrading` section. It is printed under Upgrading
+in the release notes and in `CHANGELOG.md`, under the same write access rule as the highlights.
+
 ## What "done" means
 
 Passing CI is the floor, not the bar. Before a change is ready:

@@ -10,6 +10,15 @@ release notes, above the grouped list of changes. Leave this section empty other
 are dropped. Only a pull request whose author has write access to the repository contributes highlights.
 -->
 
+## Upgrading
+
+<!--
+Optional. What an operator must do when moving to the release that carries this change: a setting to add,
+a step before a rolling restart, a behaviour that changes. It is printed under Upgrading in the release notes
+and the CHANGELOG. Leave this section empty when there is nothing to do; comments like this one are dropped.
+Only a pull request whose author has write access to the repository contributes upgrade notes.
+-->
+
 ## 🔖 Type of Change
 
 <!--

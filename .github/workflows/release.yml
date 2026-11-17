@@ -231,10 +231,20 @@ jobs:
           NEW_VERSION: ${{ steps.version.outputs.NEW_VERSION }}
         run: scripts/release-notes.sh "$PREV" HEAD "$NEW_VERSION" "$RUNNER_TEMP/release-prs" > "$RUNNER_TEMP/release-notes.md"
 
+      # The same notes without the image and checkout lines, at the top of CHANGELOG.md, in the bump commit
+      # (#373): the release post generator reads a version's changes from there. Written before anything is
+      # pushed, like the notes.
+      - name: Prepend the release to the changelog
+        if: steps.released.outputs.SKIP == 'false' && steps.bump_type.outputs.BUMP_TYPE != 'none'
+        env:
+          PREV: ${{ steps.prev.outputs.TAG }}
+          NEW_VERSION: ${{ steps.version.outputs.NEW_VERSION }}
+        run: scripts/changelog-prepend.sh "$PREV" HEAD "$NEW_VERSION" "$RUNNER_TEMP/release-prs" CHANGELOG.md
+
       - name: Commit version bump
         if: steps.released.outputs.SKIP == 'false' && steps.bump_type.outputs.BUMP_TYPE != 'none'
         run: |
-          git add mix.exs
+          git add mix.exs CHANGELOG.md
           git commit -m "chore: bump version to ${{ steps.version.outputs.NEW_VERSION }}"
           # The checkout holds the App's token, the one actor allowed to push to main without a pull request.
           git push origin HEAD:main

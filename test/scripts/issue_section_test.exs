@@ -255,6 +255,56 @@ defmodule IssueSectionTest do
     end
   end
 
+  describe "the upgrade notes (#373)" do
+    test "upgrading reads the PR description's section, without the template's comment", ctx do
+      body = """
+      ## Release highlights
+
+      Something new.
+
+      ## Upgrading
+
+      <!--
+      Optional. What an operator must do when moving to this release.
+      ## with a heading inside the comment.
+      -->
+      Set `MALACHI_X` before the restart. <!-- an aside --> Nothing else changes.
+
+      ```
+      <!-- kept: a code block is shown as written -->
+      ## kept too
+      ```
+
+      ## 🔖 Type of Change
+      """
+
+      issue = write(ctx.dir, "up.md", body)
+
+      assert run(["upgrading", issue]) ==
+               {"Set `MALACHI_X` before the restart.  Nothing else changes.\n\n```\n" <>
+                  "<!-- kept: a code block is shown as written -->\n## kept too\n```\n\n", 0}
+
+      # The two sections stay apart: neither reads into the other.
+      assert run(["release-highlights", issue]) == {"Something new.\n\n", 0}
+    end
+
+    test "upgrading matches the heading in any case and drops carriage returns", ctx do
+      issue = write(ctx.dir, "up-crlf.md", "## UPGRADING\r\nRun the migration.\r\n## Next\r\n")
+      assert run(["upgrading", issue]) == {"Run the migration.\n", 0}
+    end
+
+    test "only the template's comment, a comment left open, or no section exits 3", ctx do
+      for body <- [
+            "## Upgrading\n<!-- only the template -->\n\n## Next\n",
+            "## Upgrading\nText <!-- never closed\nmore\n",
+            "## Description\nNothing.\n",
+            "## Upgrading notes\nNot this heading.\n"
+          ] do
+        assert run(["upgrading", write(ctx.dir, "u.md", body)]) == {"", 3}, body
+      end
+    end
+  end
+
   test "a missing section exits 3 and prints nothing", ctx do
     bare = write(ctx.dir, "bare.md", "## Context\n\nNothing else.\n")
 

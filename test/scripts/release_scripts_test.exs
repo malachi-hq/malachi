@@ -617,5 +617,215 @@ defmodule ReleaseScriptsTest do
     end
   end
 
+  describe "release-notes.sh, the upgrade notes (#373)" do
+    @upgrade_body """
+    ## Release highlights
+
+    Range reads are here.
+
+    ## Upgrading
+
+    <!--
+    The template's instructions.
+    -->
+    Set `MALACHI_RANGE_READS=true` before the rolling restart.
+
+    ## 🔖 Type of Change
+    """
+
+    defp upgraded(ctx, body, permission \\ "admin") do
+      commit!(ctx.repo, "feat: x (#2)")
+      pr!(ctx, 2, body: body, permission: permission)
+      prs!(ctx)
+      notes(ctx)
+    end
+
+    test "follow the highlights, with the pull request they came from", ctx do
+      assert upgraded(ctx, @upgrade_body) =~
+               "### Highlights\n\nRange reads are here.\n\n(#2)\n\n" <>
+                 "### Upgrading\n\nSet `MALACHI_RANGE_READS=true` before the rolling restart.\n\n(#2)\n\n### Features\n"
+    end
+
+    test "come from several pull requests in merge order, and stand without highlights", ctx do
+      commit!(ctx.repo, "fix: a (#2)")
+      commit!(ctx.repo, "feat: b (#3)")
+      pr!(ctx, 2, body: "## Upgrading\nFirst step.\n")
+      pr!(ctx, 3, body: "## Upgrading\nSecond step.\n")
+      prs!(ctx)
+      out = notes(ctx)
+
+      assert out =~
+               "## 🚀 Malachi v1.2.3\n\n### Upgrading\n\nFirst step.\n\n(#2)\n\nSecond step.\n\n(#3)\n\n### Features"
+
+      refute out =~ "### Highlights"
+    end
+
+    for permission <- ["admin", "maintain", "write"] do
+      test "are taken from an author with write access (#{permission})", ctx do
+        assert upgraded(ctx, @upgrade_body, unquote(permission)) =~ "### Upgrading"
+      end
+    end
+
+    for permission <- ["triage", "read", "none", nil] do
+      test "are ignored from an author without write access (#{inspect(permission)})", ctx do
+        out = upgraded(ctx, @upgrade_body, unquote(permission))
+        refute out =~ "Upgrading"
+        refute out =~ "MALACHI_RANGE_READS"
+        assert out =~ "### Features\n\n- x (#2)\n"
+      end
+    end
+
+    test "are absent when the section holds only the template's comment or a comment left open", ctx do
+      refute upgraded(ctx, "## Upgrading\n<!-- only -->\n\n## Next\n") =~ "Upgrading"
+      File.rm_rf!(ctx.prs)
+      pr!(ctx, 2, body: "## Upgrading\nText <!-- open\nmore\n")
+      prs!(ctx)
+      refute notes(ctx) =~ "Upgrading"
+    end
+  end
+
+  describe "release-notes.sh --changes-only, the CHANGELOG section (#373)" do
+    defp changes(ctx, prev \\ "v0.1.0") do
+      # A zone that is not UTC, so a CI runner (already UTC) still proves the script dates in UTC itself.
+      {out, 0, _} =
+        run(ctx, "release-notes.sh", ["--changes-only", prev, "HEAD", "1.2.3", ctx.prs], [{"TZ", "Asia/Tokyo"}])
+
+      out
+    end
+
+    # A commit dated in a time zone ahead of UTC, so the section's date shows which day it takes.
+    defp commit_at!(repo, subject, date) do
+      {_, 0} =
+        System.cmd(
+          "git",
+          ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", subject],
+          cd: repo,
+          env: [{"GIT_COMMITTER_DATE", date}, {"GIT_AUTHOR_DATE", date}]
+        )
+    end
+
+    test "dates the section by the head commit in UTC and leaves out the image and the checkout", ctx do
+      commit_at!(ctx.repo, "fix: close the segment (#2)", "2026-11-17T01:30:00+03:00")
+      pr!(ctx, 2, body: "## Release highlights\nShort.\n\n## Upgrading\nNothing to do.\n")
+      prs!(ctx)
+
+      assert changes(ctx) == """
+             ## v1.2.3 (2026-11-16)
+
+             ### Highlights
+
+             Short.
+
+             (#2)
+
+             ### Upgrading
+
+             Nothing to do.
+
+             (#2)
+
+             ### Fixes
+
+             - close the segment (#2)
+             """
+    end
+
+    test "says so when nothing is listed, still without the image", ctx do
+      commit_at!(ctx.repo, "chore: bump version to 0.1.1", "2026-11-16T12:00:00Z")
+      prs!(ctx)
+
+      assert changes(ctx) ==
+               "## v1.2.3 (2026-11-16)\n\nNo user-facing changes since the previous release.\n"
+    end
+
+    test "lists the whole history with no previous release, as the backfill's first section needs", ctx do
+      commit_at!(ctx.repo, "fix: x (#2)", "2026-01-02T00:00:00Z")
+      prs!(ctx, "")
+      out = changes(ctx, "")
+      assert out =~ "## v1.2.3 (2026-01-02)\n"
+      assert out =~ "### Fixes\n\n- x (#2)\n"
+      assert out =~ "### Other\n\n- initial import\n"
+    end
+
+    test "the flag goes first, and the arguments are checked as without it", ctx do
+      File.mkdir_p!(ctx.prs)
+      assert {_, 2, err} = run(ctx, "release-notes.sh", ["v0.1.0", "HEAD", "1.2.3", ctx.prs, "--changes-only"])
+      assert err =~ "[--changes-only]"
+      assert {_, 2, _} = run(ctx, "release-notes.sh", ["--changes-only", "v0.1.0", "HEAD", "1.2", ctx.prs])
+      assert {_, 2, _} = run(ctx, "release-notes.sh", ["--changes-only", "v9.9.9", "HEAD", "1.2.3", ctx.prs])
+      assert {_, 2, _} = run(ctx, "release-notes.sh", ["--changes-only"])
+    end
+  end
+
+  describe "changelog-prepend.sh (#373)" do
+    setup ctx do
+      commit!(ctx.repo, "fix: close the segment (#2)")
+      pr!(ctx, 2, [])
+      prs!(ctx)
+      %{changelog: Path.join(ctx.root, "CHANGELOG.md")}
+    end
+
+    defp prepend(ctx, version) do
+      run(ctx, "changelog-prepend.sh", ["v0.1.0", "HEAD", version, ctx.prs, ctx.changelog])
+    end
+
+    defp section(ctx, version) do
+      {out, 0, _} = run(ctx, "release-notes.sh", ["--changes-only", "v0.1.0", "HEAD", version, ctx.prs])
+      out
+    end
+
+    test "creates the changelog with its heading and the release's section", ctx do
+      assert {"", 0, ""} = prepend(ctx, "1.2.3")
+      text = File.read!(ctx.changelog)
+      assert text =~ ~r/\A# Changelog\n\nEvery release of Malachi, newest first\./
+      assert String.ends_with?(text, "\n\n" <> section(ctx, "1.2.3"))
+    end
+
+    test "puts a newer release above the older ones, below the heading", ctx do
+      assert {_, 0, _} = prepend(ctx, "1.2.3")
+      assert {_, 0, _} = prepend(ctx, "1.2.4")
+      text = File.read!(ctx.changelog)
+      {newer, _} = :binary.match(text, "## v1.2.4 (")
+      {older, _} = :binary.match(text, "## v1.2.3 (")
+      {heading, _} = :binary.match(text, "# Changelog")
+      assert heading < newer and newer < older
+      assert text =~ section(ctx, "1.2.4") <> "\n## v1.2.3 ("
+    end
+
+    test "keeps a hand-written heading and whatever precedes the first section", ctx do
+      File.write!(ctx.changelog, "# Changes\n\nIntro.\n\n## v1.0.0 (2026-01-01)\n\n- old\n")
+      assert {_, 0, _} = prepend(ctx, "1.2.3")
+
+      assert File.read!(ctx.changelog) ==
+               "# Changes\n\nIntro.\n\n" <> section(ctx, "1.2.3") <> "\n## v1.0.0 (2026-01-01)\n\n- old\n"
+    end
+
+    test "refuses a version already in the changelog, and leaves the file as it was", ctx do
+      assert {_, 0, _} = prepend(ctx, "1.2.3")
+      before = File.read!(ctx.changelog)
+      assert {"", 1, err} = prepend(ctx, "1.2.3")
+      assert err =~ "already has v1.2.3"
+      assert File.read!(ctx.changelog) == before
+    end
+
+    test "a version that only starts like one already there is not refused", ctx do
+      File.write!(ctx.changelog, "# Changelog\n\n## v1.2.30 (2026-01-01)\n\n- other\n")
+      assert {_, 0, _} = prepend(ctx, "1.2.3")
+      assert File.read!(ctx.changelog) =~ "## v1.2.3 ("
+    end
+
+    test "leaves the changelog untouched when the notes cannot be written, or on a usage error", ctx do
+      File.write!(ctx.changelog, "# Changelog\n")
+
+      assert {_, 2, _} =
+               run(ctx, "changelog-prepend.sh", ["v9.9.9", "HEAD", "1.2.3", ctx.prs, ctx.changelog])
+
+      assert {_, 2, _} = prepend(ctx, "1.2")
+      assert {_, 2, _} = run(ctx, "changelog-prepend.sh", ["v0.1.0", "HEAD", "1.2.3", ctx.prs])
+      assert File.read!(ctx.changelog) == "# Changelog\n"
+      refute File.exists?(ctx.changelog <> ".tmp")
+    end
+  end
+
   defp jq_filter, do: ~s|{labels: [.labels[]?.name], author: (.user.login // ""), body: .body}|
 end

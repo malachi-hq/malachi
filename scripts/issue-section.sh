@@ -11,10 +11,11 @@
 # verification    the `## Verification` section, verbatim, without its leading blank lines.
 # plan            the `## Plan` section, the same way.
 # release-highlights  the `## Release highlights` section of a pull request description (release-notes.sh).
+# upgrading       the `## Upgrading` section of a pull request description, read the same way (release-notes.sh).
 # pr-highlights   the first code block after `**Release highlights**` in the `## PR` section, verbatim
 #                 (open-issue-pr copies it into the pull request).
 #
-# The two highlights modes read a text a person wrote by hand, from the pull request template: they drop
+# The two highlights modes and upgrading read a text a person wrote by hand, from the pull request template: they drop
 # carriage returns and every HTML comment outside a code block before scanning (the template's own
 # instructions are one), match the heading or the marker in any case, and print nothing when a comment is
 # left open, since where the author meant it to end cannot be known.
@@ -89,7 +90,7 @@ heading_section() {
   ' "$issue" | sed -e '/./,$!d'
 }
 
-# The highlights modes' input: no carriage returns, and no HTML comment outside a code block. A comment may
+# The input of the highlights and upgrading modes: no carriage returns, and no HTML comment outside a code block. A comment may
 # span lines and share a line with text. Fails, printing nothing, when the text ends inside a comment.
 strip_comments() {
   LC_ALL=C awk "$FENCE_AWK"'
@@ -129,16 +130,16 @@ case "$section" in
   pr-description) pr_block Description 0 > "$out" ;;
   verification) heading_section Verification > "$out" ;;
   plan) heading_section Plan > "$out" ;;
-  release-highlights | pr-highlights)
+  release-highlights | pr-highlights | upgrading)
     clean=$(mktemp "${TMPDIR:-/tmp}/issue-section.XXXXXX") || exit 2
     trap 'rm -f "$out" "$clean"' EXIT
     strip_comments > "$clean" || exit 3
     issue=$clean
-    if [ "$section" = release-highlights ]; then
-      heading_section "Release highlights" 1 > "$out"
-    else
-      pr_block "Release highlights" 0 1 > "$out"
-    fi
+    case "$section" in
+      release-highlights) heading_section "Release highlights" 1 > "$out" ;;
+      upgrading) heading_section Upgrading 1 > "$out" ;;
+      *) pr_block "Release highlights" 0 1 > "$out" ;;
+    esac
     ;;
   *) usage ;;
 esac
