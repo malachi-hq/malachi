@@ -168,6 +168,7 @@ defmodule Malachi.SiteTest do
                "https://example.test/malachi/",
                "https://example.test/malachi/api.html",
                "https://example.test/malachi/benchmarks/",
+               "https://example.test/malachi/blog/",
                "https://example.test/malachi/introduction.html"
              ]
     end
@@ -273,10 +274,12 @@ defmodule Malachi.SiteTest do
       stage!(root)
       File.rm!(Path.join(root, "doc/index.html"))
 
-      # The sitemap still lists the root URL, so it is reported too: a removed landing page is a dead entry.
+      # The sitemap still lists the root URL, and the blog links home to it, so both are reported too: a removed
+      # landing page is a dead entry and a dead link.
       assert Site.verify(root, @config) == [
                "doc/index.html is missing",
-               "doc/sitemap.xml links to https://example.test/malachi/, which is not in doc/"
+               "doc/sitemap.xml links to https://example.test/malachi/, which is not in doc/",
+               "doc/blog/index.html (../index.html) links to https://example.test/malachi/index.html, which is not in doc/"
              ]
     end
 

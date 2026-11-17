@@ -360,6 +360,15 @@ defmodule ReleaseWorkflowTest do
       assert results =~ ~r/^  push:\n    branches: \[main\]$/m
     end
 
+    test "a merge that touches the blog rebuilds the site at once, from main only (#373)" do
+      text = File.read!(WorkflowText.path("pages.yml"))
+      assert text =~ ~r/^  push:\n    branches: \[main\]\n    paths: \['site\/blog\/\*\*'\]\n/m
+      refute text =~ ~r/^\s+pull_request(_target)?:/m
+      # The build checks out the pushed ref, which on this trigger is main.
+      assert text =~ "ref: ${{ github.event_name == 'workflow_run' && 'main' || github.ref }}"
+      assert text =~ ~r/^concurrency:\n  group: pages\n  cancel-in-progress: false$/m
+    end
+
     test "the site links its sources to the commit it was built from" do
       text = File.read!(WorkflowText.path("pages.yml"))
       assert text =~ "MALACHI_DOCS_SOURCE_REF=$(git rev-parse HEAD)"

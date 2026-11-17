@@ -23,11 +23,12 @@ defmodule Malachi.MixProject do
       aliases: aliases(),
       test_coverage: [tool: ExCoveralls, threshold: 85],
       elixirc_paths: elixirc_paths(Mix.env()),
-      # Both are apps dialyzer does not put in the default PLT, and both are referenced by code it
-      # analyses: `:mix` by the `Mix.Tasks.*` admin tasks (Mix.Task/Mix.shell/Mix.raise), and `:ex_unit`
-      # by the helpers under `test/support`, which are compiled in the test environment and analysed
-      # there. Without them every such call is reported as an unknown function.
-      dialyzer: [plt_add_apps: [:mix, :ex_unit]]
+      # Apps dialyzer does not put in the default PLT, each referenced by code it analyses: `:mix` by the
+      # `Mix.Tasks.*` admin tasks (Mix.Task/Mix.shell/Mix.raise), `:ex_unit` by the helpers under
+      # `test/support`, which are compiled in the test environment and analysed there, and `:earmark_parser`
+      # (a dev and test dependency, `runtime: false`) by the blog's Malachi.Site.Markdown (#373). Without them
+      # every such call is reported as an unknown function.
+      dialyzer: [plt_add_apps: [:mix, :ex_unit, :earmark_parser]]
     ]
   end
 
@@ -363,6 +364,10 @@ defmodule Malachi.MixProject do
       {:credo, "~> 1.7.19", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4.7", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.40.3", only: :dev, runtime: false},
+      # The blog's Markdown (Malachi.Site.Markdown, #373). ExDoc already brings this exact package, but only in
+      # dev; the blog is staged by `mix docs` (dev) and tested in test, so both get it. Not in prod: nothing
+      # there renders Markdown.
+      {:earmark_parser, "~> 1.4.46", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18.5", only: :test},
       {:mix_audit, "~> 2.1.5", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.18.1", only: [:dev, :test], runtime: false},

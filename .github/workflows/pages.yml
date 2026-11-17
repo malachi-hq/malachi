@@ -4,6 +4,11 @@ on:
   workflow_run:
     workflows: [Publish results]
     types: [completed]
+  # A merged blog post goes live in minutes rather than after the load tests of Publish results (#373). That
+  # run still rebuilds the site afterwards; the concurrency group below queues the two.
+  push:
+    branches: [main]
+    paths: ['site/blog/**']
   workflow_dispatch:
 concurrency:
   group: pages

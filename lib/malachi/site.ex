@@ -1,4 +1,6 @@
 defmodule Malachi.Site do
+  alias Malachi.Site.Blog
+
   @moduledoc """
   Stages the landing page at the root of the published documentation site, and the files that go with it.
 
@@ -23,6 +25,10 @@ defmodule Malachi.Site do
   code examples, HTML links in `llms.txt`, and links to other sites, including other paths on this host, which belong to
   other sites. Fonts
   under `/fonts/` on this host are checked, and so is every font this site serves, whichever folder holds it.
+
+  The blog (#373) is staged with the rest, and `verify/3` adds its checks, which `Malachi.Site.Blog` lists: every
+  post finished and readable, its images in place and within budget, the index and the Atom feed staged, and the
+  links of its pages resolving on this site.
   """
 
   @source "site"
@@ -37,6 +43,8 @@ defmodule Malachi.Site do
     "ui_kits/website/site.js",
     "ui_kits/website/scenes.js",
     "ui_kits/website/model.js",
+    # The blog's own styles (#373); its pages also load site.css for the header and footer.
+    "ui_kits/website/blog.css",
     "styles.css",
     "tokens/base.css",
     "tokens/colors.css",
@@ -167,6 +175,9 @@ defmodule Malachi.Site do
     llms = merge_llms(summary_block(fill(read!(root, @llms_source), meta)), Path.join(doc, "llms.txt"))
     pages = for rel <- @page_sources, do: {dest_of(rel), stage_asset(dest_of(rel), read!(root, rel))}
     fonts = font_files!(root)
+    # Before the sitemap, which lists every page in doc/, the blog's among them. The blog refuses a post it
+    # cannot read before it writes anything.
+    :ok = Blog.stage(root, doc, meta, &write!(doc, &1, &2))
     sitemap_xml = sitemap(doc, meta)
 
     File.mkdir_p!(Path.join(doc, "fonts"))
@@ -215,9 +226,10 @@ defmodule Malachi.Site do
   @doc """
   Returns every problem in a staged `root/doc`, or `[]` when it is correct. See the moduledoc for what is checked.
   A fonts folder that cannot be listed raises instead: a list that left that folder out would not be complete.
+  `opts` go to `Malachi.Site.Blog.errors/4` (`lfs_pointers: true` on a fork's pull request).
   """
-  @spec verify(Path.t(), map()) :: [String.t()]
-  def verify(root, config) do
+  @spec verify(Path.t(), map(), keyword()) :: [String.t()]
+  def verify(root, config, opts \\ []) do
     meta = metadata(config)
     doc = Path.join(root, "doc")
 
@@ -227,8 +239,15 @@ defmodule Malachi.Site do
       ensure_file(doc, "robots.txt") ++
       staged_font_errors(root, doc) ++
       sitemap_errors(doc, meta) ++
-      llms_errors(doc, meta)
+      llms_errors(doc, meta) ++
+      Blog.errors(root, doc, meta, opts)
   end
+
+  @doc false
+  # For Malachi.Site.Blog: the problem with one absolute URL a staged page links to, or none when it resolves
+  # in doc/ or names another site. The same reading of a URL as the sitemap and llms.txt checks.
+  @spec link_errors(Path.t(), map(), String.t(), String.t()) :: [String.t()]
+  def link_errors(doc, meta, url, where), do: unresolved(doc, meta, url, where)
 
   @css_url ~r/url\(\s*["']?([^"')\s]+)["']?\s*\)/
 

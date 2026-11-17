@@ -48,7 +48,7 @@ defmodule Mix.Tasks.Malachi.Docs.SiteTest do
     assert Site.run(["--root", root, "--check"]) == :ok
 
     assert messages() == [
-             "landing page: staged and filled; every sitemap URL and every link to this site in llms.txt resolves"
+             "landing page: staged and filled; every sitemap URL and every link to this site in llms.txt resolves; the blog is staged and every post is finished"
            ]
   end
 

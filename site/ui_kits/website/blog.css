@@ -1,0 +1,22 @@
+/* The blog (#373): a post's text and its charts. The header, footer and layout come from site.css. */
+.post{max-width:72ch;margin-inline:auto;padding-block:clamp(32px,6vw,72px)}
+.post h1{font-family:var(--font-display);font-size:clamp(2rem,4vw,var(--text-section));line-height:var(--leading-tight);letter-spacing:var(--tracking-title);margin:0 0 var(--space-4)}
+.post h2{font-size:var(--text-2xl);line-height:var(--leading-tight);margin:var(--space-10) 0 var(--space-3)}
+.post h3,.post h4{font-size:var(--text-xl);margin:var(--space-8) 0 var(--space-2)}
+.post p,.post li{line-height:var(--leading-normal)}
+.post .lede{font-size:var(--text-lg);color:var(--muted-foreground);margin:0}
+.post-head{margin-bottom:var(--space-8)}
+.post-meta{color:var(--muted-foreground);font-size:var(--text-sm);margin:0 0 var(--space-2)}
+.post pre{background:var(--muted);border-radius:var(--radius-md);padding:var(--space-4);overflow-x:auto}
+.post pre.seed{outline:2px dashed var(--severity-warning)}
+.post code{font-size:.92em}
+.post blockquote{margin:var(--space-6) 0;padding:var(--space-3) var(--space-4);background:var(--muted);border-radius:var(--radius-md);color:var(--muted-foreground)}
+.post table{border-collapse:collapse;width:100%;margin:var(--space-6) 0;font-variant-numeric:tabular-nums}
+.post th,.post td{border-bottom:1px solid var(--border);padding:var(--space-2) var(--space-3);text-align:left}
+.post img{max-width:100%;height:auto}
+.post .chart{margin:var(--space-8) 0}
+.post .chart svg{display:block;width:100%;height:auto;border:1px solid var(--border);border-radius:var(--radius-lg)}
+.post .chart figcaption{color:var(--muted-foreground);font-size:var(--text-sm);margin-top:var(--space-2)}
+.post-list{list-style:none;padding:0;margin:var(--space-8) 0 0}
+.post-list li{padding-block:var(--space-6);border-top:1px solid var(--border)}
+.post-list li>a{font-size:var(--text-xl);font-weight:var(--weight-semibold)}

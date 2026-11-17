@@ -272,7 +272,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # The Pages site is built by pages.yml, which runs after Publish results or on a dispatch, never on a push.
+      # The Pages site is built by pages.yml, which runs after Publish results, on a dispatch, or on a push that
+      # touches site/blog/, never on this version bump's push.
       # Dispatch it here so it checks out main (now bumped) and republishes the site with the new version.
       - name: Rebuild the documentation site for the new version
         if: steps.released.outputs.SKIP == 'false' && steps.bump_type.outputs.BUMP_TYPE != 'none'
