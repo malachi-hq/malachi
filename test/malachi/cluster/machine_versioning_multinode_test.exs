@@ -22,7 +22,9 @@ defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
   alias Malachi.Cluster.LeaseMachine
   alias Malachi.Cluster.MachineVersion
   alias Malachi.Cluster.MetadataMachine
+  alias Malachi.Cluster.Policy
   alias Malachi.Cluster.PolicyMachine
+  alias Malachi.Cluster.PolicyRegistry
   alias Malachi.Cluster.RaCluster
   alias Malachi.Cluster.RingMachine
   alias Malachi.Cluster.RingTopology
@@ -70,6 +72,85 @@ defmodule Malachi.Cluster.MachineVersioningMultinodeTest do
                  nodes |> Enum.map(&RaPeers.local_state(&1, cluster)) |> Enum.uniq() |> length() == 1
              end)
            end)
+  end
+
+  # A policy that sets `field` to a value its type accepts.
+  defp setting(%{path: path, type: :bound} = field),
+    do: put_in(%{}, Enum.map(path, &Access.key(&1, %{})), Map.get(field, :min, 1))
+
+  defp setting(%{path: path, type: :attribute}), do: put_in(%{}, Enum.map(path, &Access.key(&1, %{})), "rack")
+
+  # Every policy field this release introduces (#199 onwards), against a group caught mid rolling upgrade:
+  # one member pinned a version below plays the member still on older code. A pinned member runs this
+  # code, so this proves what every member decides from the replicated version, which is all an older
+  # binary decides from too (`Malachi.Cluster.MachineVersion`).
+  test "a policy field this release introduces is refused alike by every member until the pin is lifted" do
+    current = MachineVersion.code_version()
+    fields = for %{since: ^current} = field <- Policy.fields(), do: field
+    assert fields != [], "this release introduces no policy field: retarget the test at the next one that does"
+
+    pinned = RaPeers.start(current - 1)
+    peers = [pinned | for(_ <- 1..2, do: RaPeers.start(nil))]
+    {:ok, handles} = Agent.start(fn -> peers |> Enum.with_index() |> Map.new(fn {peer, index} -> {index, peer} end) end)
+
+    on_exit(fn ->
+      handles |> Agent.get(&Map.values/1) |> Enum.each(&RaPeers.stop/1)
+      Agent.stop(handles)
+    end)
+
+    nodes = Enum.map(peers, & &1.node)
+    cluster = :"mv_policy_field_#{System.unique_integer([:positive])}"
+    {:ok, _member} = RaCluster.start(PolicyMachine, cluster, nodes)
+    await_converged([cluster], nodes, current - 1)
+
+    for %{name: name, since: since} = field <- fields do
+      define = {:define_policy, "new-#{name}", setting(field)}
+
+      assert {:ok, {:error, {:unsupported_policy_field, ^name, ^since, effective}}} = command(cluster, nodes, define)
+      assert effective == current - 1
+    end
+
+    # Nothing stored, on any member: the refusal left every replica where it was.
+    await_converged([cluster], nodes, current - 1)
+    assert RaPeers.local_state(hd(nodes), cluster) == PolicyMachine.init(%{})
+
+    # Lifting the pin is the end of the upgrade: the group moves up and the field is stored. Under a name of
+    # its own, so the replay below can tell an entry refused before the upgrade from one stored after it.
+    unpinned = RaPeers.restart(pinned, nil, [cluster])
+    Agent.update(handles, &Map.put(&1, 0, unpinned))
+    nodes = [unpinned.node | tl(nodes)]
+    await_converged([cluster], nodes, current)
+
+    for field <- fields do
+      assert accepted?(command(cluster, nodes, {:define_policy, "after-#{field.name}", setting(field)}))
+    end
+
+    await_converged([cluster], nodes, current)
+    stored = RaPeers.local_state(hd(nodes), cluster)
+
+    # A replay applies every entry at the version it was applied at the first time: the refused ones are
+    # refused again and the stored ones stored again, on every member.
+    running = Agent.get(handles, fn by_index -> Enum.map(0..2, &Map.fetch!(by_index, &1)) end)
+    Enum.each(running, &RaPeers.stop/1)
+
+    nodes =
+      for {peer, index} <- Enum.with_index(running) do
+        back = RaPeers.restart(peer, nil, [cluster])
+        Agent.update(handles, &Map.put(&1, index, back))
+        back.node
+      end
+
+    await_converged([cluster], nodes, current)
+
+    for node <- nodes do
+      replayed = RaPeers.local_state(node, cluster)
+      assert replayed == stored
+
+      for %{name: name} <- fields do
+        assert PolicyRegistry.get(replayed, "new-#{name}") == nil, "#{node} stored a define refused before the upgrade"
+        assert PolicyRegistry.get(replayed, "after-#{name}") != nil
+      end
+    end
   end
 
   test "every control-plane machine reaches the current version, refuses unknown commands and survives a restart" do
