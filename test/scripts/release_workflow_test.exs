@@ -31,8 +31,8 @@ defmodule ReleaseWorkflowTest do
     refute jobs["release"] =~ "github-actions[bot]"
   end
 
-  test "the three jobs are the ones the checks below read, and no other job dispatches Pages", %{jobs: jobs} do
-    assert jobs |> Map.keys() |> Enum.sort() == ["docker", "release", "verify-ci"]
+  test "the four jobs are the ones the checks below read, and no other job dispatches Pages", %{jobs: jobs} do
+    assert jobs |> Map.keys() |> Enum.sort() == ["announce", "docker", "release", "verify-ci"]
 
     dispatching =
       for {name, job} <- jobs, s <- steps(job), s =~ "gh workflow run pages.yml", do: {name, s}
@@ -265,6 +265,44 @@ defmodule ReleaseWorkflowTest do
       assert position.("scripts/changelog-prepend.sh") < position.("git push origin HEAD:main")
 
       assert step(job, "Commit version bump") =~ "git add mix.exs CHANGELOG.md\n"
+    end
+  end
+
+  describe "the communication checklist issue (#373)" do
+    test "comes from its own job, after a release that published a version", %{jobs: jobs} do
+      job = jobs["announce"]
+      assert job =~ ~r/^    needs: release$/m
+      assert job =~ "if: needs.release.outputs.new_version != ''"
+    end
+
+    test "the job holds issues write and contents read, nothing else, and neither the environment nor the App",
+         %{jobs: jobs} do
+      job = jobs["announce"]
+      assert job =~ ~r/^    permissions:\n      contents: read\n      issues: write\n\n/m
+      refute job =~ "environment:"
+      refute job =~ "create-github-app-token"
+      refute job =~ "RELEASE_APP"
+    end
+
+    test "checks out without keeping a credential, behind the hardened runner", %{jobs: jobs} do
+      job = jobs["announce"]
+      assert job =~ ~r/uses: step-security\/harden-runner@[0-9a-f]{40} # v\d+\.\d+\.\d+\n/
+      assert job =~ ~r/uses: actions\/checkout@[0-9a-f]{40} # v\d+\.\d+\.\d+\n\s+with:\n\s+persist-credentials: false\n/
+    end
+
+    test "opens the issue from the template through the script, the version passed by env", %{jobs: jobs} do
+      open = step(jobs["announce"], "Open the communication checklist issue")
+      assert open =~ "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}"
+      assert open =~ "VERSION: ${{ needs.release.outputs.new_version }}"
+
+      assert open =~
+               ~s[run: scripts/release-checklist-issue.sh "$VERSION" .github/ISSUE_TEMPLATE/release-communication.md\n]
+
+      assert File.exists?(Path.expand("../../.github/ISSUE_TEMPLATE/release-communication.md", __DIR__))
+    end
+
+    test "the GITHUB_TOKEN is given only to the step that needs it", %{jobs: jobs} do
+      assert length(Regex.scan(~r/secrets\.GITHUB_TOKEN/, jobs["announce"])) == 1
     end
   end
 
