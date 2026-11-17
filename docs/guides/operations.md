@@ -337,6 +337,10 @@ that, stops the node at boot.
 Only **sealed** segments are eligible, so the active segment is never deleted. The byte budget is **per
 range**, not per topic or per node. With both limits set a segment goes if either says so.
 
+There is no global record count. Keeping the last N records of a topic is a storage policy's
+`retention.max_records`, set per topic ([Per-topic retention](per-topic-retention.md#keeping-the-last-n-records)),
+so no environment variable can make every topic start deleting by count.
+
 A segment seals by size (`MALACHI_SEGMENT_MAX_BYTES`) or by age: the sweep also asks for every active
 segment older than `MALACHI_SEGMENT_MAX_AGE_MS` (7 days unless set, at least 60000) to be sealed, so a
 topic too quiet to fill a segment still expires on time. A record lives at most that plus

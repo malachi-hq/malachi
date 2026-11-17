@@ -9,7 +9,7 @@ touching the policy that will apply again once the requirement ends.
 
 While a topic is held:
 
-- **Retention expires none of its segments**, by age, by size or below a purged start. The sweep still
+- **Retention expires none of its segments**, by age, by size, by record count or below a purged start. The sweep still
   judges the topic by its policy, and counts what it would have expired as held instead
   (`malachi_retention_held_segments{topic}` and `malachi_retention_held_bytes{topic}`), so the disk a hold
   keeps is visible.
