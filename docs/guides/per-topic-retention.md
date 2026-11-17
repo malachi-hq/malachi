@@ -153,12 +153,15 @@ What it guarantees, precisely:
   count of them is any one reader's. A live range keeps at least the bound of its own records, whatever
   its ancestors keep. A retired range is never cut in part: it expires whole once every live range
   descending from it holds the bound on its own, since all of its history is then older than the last N
-  of every reader, and until then it is kept whole. So a quiet sibling never makes a busy range grow, and
-  a retired range waits only for the ranges below it.
+  of every reader of those ranges, and until then it is kept whole. So a quiet sibling never makes a busy
+  range grow, and a retired range waits only for the ranges below it. The bound holds for the ranges as
+  they stand at the sweep: a later split hands each child only its key slice of what its parent kept, so
+  a reader of a range split after the sweep can hold fewer than N until the child fills.
 - **A reader's history can have holes older than its last N.** A retired range can expire while an older
   one is kept for another reader, and a sweep deletes segments one at a time, so a delete that fails can
-  leave a hole until the next sweep. Both are older than the reader's last N records, and a consumer steps
-  over a hole as it does over any expired segment.
+  leave a hole until the next sweep. Both are older than the reader's last N records. A consumer steps
+  over such a hole as over one the size rule or a purge leaves, and after a frontend restart, reading
+  from offset 0, it can pass one without a skip being reported.
 - **Unioned with the other rules.** A segment any rule picks expires, so a policy with `max_records` and
   `max_age_ms` expires by whichever is reached first. A [legal hold](legal-hold.md) wins over all of them.
 

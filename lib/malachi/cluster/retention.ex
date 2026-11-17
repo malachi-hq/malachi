@@ -38,13 +38,16 @@ defmodule Malachi.Cluster.Retention do
       `max_records` of its own offsets, whatever its ancestors keep;
     * a range something descends from expires whole once every range descending from it with nothing
       below it holds `max_records` on its own, since all of its history is then older than the last
-      `max_records` of every reader; until then it is kept whole.
+      `max_records` of every reader of those ranges; until then it is kept whole.
 
-  Every reader therefore keeps at least its last `max_records`, and a topic with R live ranges keeps up to
-  R times the bound plus one segment each, and the history of the retired ranges not yet covered. The
-  number moves with every split and merge, as the size rule's does. A reader's history can have a hole
-  older than its last `max_records`, where a retired range expired while an older one is kept for another
-  reader, and a consumer steps over it as it does over any expired segment.
+  Every reader of the ranges as they stand at the sweep therefore keeps at least its last `max_records`. A
+  later split hands each child only its key slice of what its parent kept, so a reader of a range split
+  after the sweep can hold fewer until the child fills. A topic with R live ranges keeps up to R times the
+  bound plus one segment each, and the history of the retired ranges not yet covered; the number moves
+  with every split and merge, as the size rule's does. A reader's history can have a hole older than its
+  last `max_records`, where a retired range expired while an older one is kept for another reader. A
+  consumer steps over it as over a hole the size rule or a purge leaves, which, read from offset 0 after a
+  frontend restart, is passed without a skip being reported.
 
   The record count bound is set by a policy only. The global policy never carries one (`effective/4`
   reports it off), so a policy written before the field existed never inherits a rule that deletes.
@@ -432,7 +435,8 @@ defmodule Malachi.Cluster.Retention do
   end
 
   # A range something descends from goes whole once every range at the bottom of its lines holds
-  # `max_records` on its own: all of its history is then older than the last `max_records` of every reader.
+  # `max_records` on its own: all of its history is then older than the last `max_records` of every reader
+  # of those ranges as they stand now (a later split hands each child only its slice of what they keep).
   # Never in part, since its segments mix every child's key slice and no count of them is any one reader's.
   defp count_pick(_range, sealed, leaves, readable, max_records) do
     if Enum.all?(leaves, &(Map.fetch!(readable, &1) >= max_records)), do: Enum.map(sealed, & &1.id), else: []
