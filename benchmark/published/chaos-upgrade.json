@@ -1,18 +1,18 @@
 {
   "meta": {
-    "timestamp": "2026-11-16T12:35:04Z",
+    "timestamp": "2026-11-17T12:57:39Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "d284e95",
-    "git_ref_date": "2026-11-16T02:38:35Z",
-    "malachi_version": "0.28.2",
+    "git_ref": "f4f1840",
+    "git_ref_date": "2026-11-17T01:05:28Z",
+    "malachi_version": "0.28.4",
     "hardware": {
       "cpu": "x86_64",
       "cores": 4,
-      "os": "Linux 7.0.0-1019-azure"
+      "os": "Linux 7.0.0-1016-aws"
     }
   },
   "certification": "UPGRADE AND ROLLBACK CERTIFICATION",
-  "verdict": "passed",
+  "verdict": "failed",
   "replication_factor": 3,
   "events": [
     "p1: rolling every node from OLD to NEW (pin 11)",
@@ -25,16 +25,18 @@
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 65532,
-    "post_chaos_records_per_s": 15557
+    "acked_writes": 77104,
+    "post_chaos_records_per_s": 34537
   },
-  "failures": [],
-  "evidence_dir": null,
+  "failures": [
+    "a process crashed during the upgrade (see the logs above)"
+  ],
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261117T122323Z-f4f1840",
   "details": {
-    "old_ref": "v0.27.0",
-    "old_rule": "the newest release whose code differs from this tree, which is release v0.28.2's",
-    "old_sha": "7f6ab702d09d2f4de5722455469ec36a910be427",
-    "old_version": "0.27.0",
+    "old_ref": "v0.28.3",
+    "old_rule": "the newest release whose code differs from this tree, which is release v0.28.4's",
+    "old_sha": "7c6ab0f46091adc7ec34634806e064cb39cafb98",
+    "old_version": "0.28.3",
     "old_machine_version": 11,
     "data_ref": null,
     "data_rule": null,
@@ -45,12 +47,12 @@
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 20879,
-      "phase2": 13446,
-      "phase3": 31207
+      "phase1": 22097,
+      "phase2": 16031,
+      "phase3": 38976
     },
     "vnodes": 4,
-    "vnode_rule": "sharded: v0.27.0 resumes its vnode members after a restart",
+    "vnode_rule": "sharded: v0.28.3 resumes its vnode members after a restart",
     "vnodes_after_split": 5
   },
   "skip_reason": null
