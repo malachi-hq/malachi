@@ -26,6 +26,7 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
   use Mix.Task
 
   alias Malachi.Loadtest.Ceiling
+  alias Malachi.ResultsText
 
   @published_dir "benchmark/published"
   @output_dir "docs/generated"
@@ -253,24 +254,13 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
     repetitions = sweep["repetitions"]
 
     "Each batch size ran over its own connection ladder, #{repetitions} #{plural(repetitions, "repetition")} " <>
-      "per point, with the points interleaved across batch sizes. #{aa_sentence(sweep)} Compare batch sizes " <>
-      "within this run rather than across runs: on a shared CI runner the published ceiling has moved by more " <>
-      "than 30% between runs of unchanged code.\n\n"
+      "per point, with the points interleaved across batch sizes. #{ResultsText.aa_sentence(sweep)} Compare " <>
+      "batch sizes within this run rather than across runs: #{lowercase_first(ResultsText.cross_run_sentence())}\n\n"
   end
 
   defp noise_paragraph(_sweep), do: ""
 
-  defp aa_sentence(%{"aa_control" => %{"delta_pct" => delta} = aa}) when is_number(delta) do
-    "Repeating the headline peak moved it #{delta}% (#{number(aa["first_records_per_s"])} then " <>
-      "#{number(aa["repeat_records_per_s"])} records per second), so a difference between batch sizes smaller " <>
-      "than that is noise."
-  end
-
-  defp aa_sentence(%{"aa_control_reason" => reason}) when is_binary(reason),
-    do: "No A-A repeat of the headline peak was recorded (#{reason}), so this run carries no noise estimate."
-
-  defp aa_sentence(_sweep),
-    do: "No A-A repeat of the headline peak was recorded, so this run carries no noise estimate."
+  defp lowercase_first(<<first::utf8, rest::binary>>), do: String.downcase(<<first::utf8>>) <> rest
 
   defp sweep_rows(%{} = sweep) do
     [
@@ -526,16 +516,7 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
 
   # Grouped digits: a throughput headline is read at a glance, and 357650 is harder to place there
   # than 357,650.
-  defp number(value) when is_integer(value) do
-    value
-    |> Integer.to_string()
-    |> String.graphemes()
-    |> Enum.reverse()
-    |> Enum.chunk_every(3)
-    |> Enum.map_join(",", &Enum.join/1)
-    |> String.reverse()
-  end
-
+  defp number(value) when is_integer(value), do: ResultsText.group_digits(value)
   defp number(value), do: value
 
   defp suffix(nil, _unit), do: nil
