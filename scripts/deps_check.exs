@@ -202,6 +202,8 @@ defmodule DepsCheck do
     "credo" => :tool,
     "dialyxir" => :tool,
     "ex_doc" => :tool,
+    # The blog's Markdown parser (#373), a dev and test dependency like ExDoc, which already brings it.
+    "earmark_parser" => :tool,
     "excoveralls" => :tool,
     "mix_audit" => :tool,
     "sobelow" => :tool,
