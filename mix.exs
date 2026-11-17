@@ -47,6 +47,10 @@ defmodule Malachi.MixProject do
       # Render ```mermaid fenced blocks as diagrams. GitHub renders them natively; ExDoc needs this hook.
       before_closing_body_tag: &before_closing_body_tag/1,
       extras: extras(),
+      # The changelog is written by the release job after the pull requests' CI, from their highlights and
+      # upgrade notes (#373): a reference there to a function later removed or hidden must not fail every docs
+      # build that follows until a released section is edited.
+      skip_undefined_reference_warnings_on: ["CHANGELOG.md"],
       groups_for_extras: groups_for_extras(),
       groups_for_modules: groups_for_modules()
     ]
@@ -151,6 +155,8 @@ defmodule Malachi.MixProject do
       "docs/guides/clustering-and-resharding.md": [title: "Clustering and re-sharding"],
       "docs/guides/operations.md": [title: "Operations"],
       "README.md": [title: "Overview"],
+      # Written by the release workflow in each version bump commit (scripts/changelog-prepend.sh, #373).
+      "CHANGELOG.md": [title: "Changelog"],
       "docs/ARCHITECTURE.md": [title: "Architecture"],
       "docs/AUTH_USER_MANAGEMENT.md": [title: "Auth and user management (ADR)"],
       # The companion docs/design/design-tokens.json is deliberately not an extra: ExDoc renders
@@ -200,7 +206,8 @@ defmodule Malachi.MixProject do
         "docs/guides/legal-hold.md",
         "docs/guides/clustering-and-resharding.md",
         "docs/guides/operations.md",
-        "README.md"
+        "README.md",
+        "CHANGELOG.md"
       ],
       Architecture: [
         "docs/ARCHITECTURE.md",
