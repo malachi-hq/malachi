@@ -23,8 +23,17 @@ defmodule Malachi.Cluster.SelfHealing do
   sealed segments whose replica set looks healthy: a live node can lose a sealed copy without the
   metadata noticing (a deleted or truncated file, a swapped disk), leaving the cluster silently
   below its replication factor while every replica is "alive". The pass probes each live replica's
-  stored bytes (`Malachi.Cluster.ReplicationServer.stored_bytes/3`, a read-only stat that never
-  opens the log, so steady state costs no descriptors); only a replica whose bytes fall short of
+  stored bytes (`Malachi.Cluster.ReplicationServer.stored_bytes_of/4`, a read-only measurement that never
+  opens the log, so steady state costs no descriptors). It asks each replica about every segment it is
+  probed for in one call per `:probe_chunk` segments, not one call per segment, so a pass costs each replica
+  the number of its segments divided by the chunk, rounded up, where it cost the number of its segments, and a
+  replica that does not answer costs it one timeout. A call measures until the replica's budget for it is spent and
+  hands the rest back, which is asked again at once, so a call never holds a replica's data plane for more than
+  that budget plus one measurement. The segments are asked in a different random order on
+  every pass, so one copy too slow to measure within that timeout does not hide the same segments from every
+  pass. A replica too old to know that call answers
+  `{:error, :unknown_call}` and is asked one segment at a time (`ReplicationServer.stored_bytes/3`), as
+  before. Only a replica whose bytes fall short of
   the sealed `byte_size` is then opened for its exact durable end
   (`Malachi.Cluster.ReplicationServer.durable_end/4`) and re-backfilled from an intact replica via
   `Malachi.Cluster.Catchup`, resuming at the truncation point rather than recopying the segment.
@@ -72,6 +81,16 @@ defmodule Malachi.Cluster.SelfHealing do
   # default five seconds per segment it holds.
   @probe_timeout 2_000
 
+  # The most segments one `ReplicationServer.stored_bytes_of/4` call asks about. Each one is measured inside the
+  # replica's replication server, which serves nothing else meanwhile. Chosen as the largest chunk whose call stays
+  # within 100 ms at the 99th percentile with 10,000 sealed segments on Linux (benchmark/integrity_probe_ab.exs,
+  # #241): 128 measured 38 ms (51 ms at most) and 237 calls per pass, where the per-segment probe made 30,000. That
+  # is the steady state, where every copy's logical size is cached. A copy whose size is not cached yet (a batch
+  # copy just backfilled) is measured by a scan, 100 to 300 ms per 64 MiB on Linux, and the server's own budget per
+  # call (`stored_bytes_of/4`, 100 ms) is what bounds those: it hands the rest of the chunk back and is asked again.
+  # Measured with 32 such copies, one call without the budget held the server for 4.0 s; with it, 205 ms at most.
+  @probe_chunk 128
+
   @type result :: %{
           applied: [Metadata.command()],
           failed: [{Metadata.segment_id(), term()}],
@@ -98,6 +117,9 @@ defmodule Malachi.Cluster.SelfHealing do
       replicas are never backfill sources, and their segment is left out of the integrity pass for this tick.
     * `:settled_confirmed` - `((replica, segment_id) -> boolean)`, whether a copy's settled marker is on disk. A copy
       with its marker is not selected again.
+    * `:stored_bytes_of` - `((replica, [segment_id]) -> answer)`, the integrity probe's batched question
+      (default `Malachi.Cluster.ReplicationServer.stored_bytes_of/4` with a 2 second timeout).
+    * `:probe_chunk` - the most segments one probe call asks about (default 128).
   """
   @spec heal_sealed(Metadata.t(), [Metadata.broker()], pos_integer(), keyword()) :: result()
   def heal_sealed(%Metadata{} = metadata, live_brokers, replication_factor, opts \\ []) do
@@ -262,14 +284,88 @@ defmodule Malachi.Cluster.SelfHealing do
   # short of the sealed byte_size. The replica set is unchanged, so no metadata command results;
   # repairs are reported for observability.
   defp repair_lost_copies(metadata, under_replicated, live_brokers, failed, opts) do
-    metadata.segments
-    |> Map.values()
-    |> Enum.filter(fn segment ->
-      segment.state == :sealed and is_integer(segment.byte_size) and
-        not MapSet.member?(under_replicated, segment.id) and
-        Enum.all?(segment.replica_set, &(&1 in live_brokers))
+    segments =
+      metadata.segments
+      |> Map.values()
+      |> Enum.filter(fn segment ->
+        segment.state == :sealed and is_integer(segment.byte_size) and
+          not MapSet.member?(under_replicated, segment.id) and
+          Enum.all?(segment.replica_set, &(&1 in live_brokers))
+      end)
+
+    answers = probe_replicas(segments, failed, opts)
+    Enum.reduce(segments, %{repaired: [], failed: [], unsettled: []}, &probe_and_repair(&1, failed, answers, opts, &2))
+  end
+
+  # Asks every replica about all the segments it is probed for, in calls of at most `:probe_chunk` ids, and
+  # answers `%{{segment_id, replica} => {:ok, bytes} | :unreachable}`. A latched copy is not asked, as before.
+  # That is one call per replica per chunk, not one per segment per replica. Each replica's segments are
+  # shuffled first: a chunk that fails takes every later chunk of its replica with it (see `probe_chunks/4`),
+  # so with a fixed order one copy that is always too slow would hide the same segments on every pass.
+  defp probe_replicas(segments, failed, opts) do
+    ask = Keyword.get(opts, :stored_bytes_of, &default_stored_bytes_of/2)
+    chunk = Keyword.get(opts, :probe_chunk, @probe_chunk)
+
+    segments
+    |> Enum.flat_map(fn segment ->
+      latched = failed_copies(failed, segment)
+      for replica <- segment.replica_set, replica not in latched, do: {replica, segment.id}
     end)
-    |> Enum.reduce(%{repaired: [], failed: [], unsettled: []}, &probe_and_repair(&1, failed, opts, &2))
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.reduce(%{}, fn {replica, segment_ids}, answers ->
+      segment_ids
+      |> Enum.shuffle()
+      |> Enum.chunk_every(chunk)
+      |> probe_chunks(replica, ask, [])
+      |> Enum.reduce(answers, fn {segment_id, answer}, acc -> Map.put(acc, {segment_id, replica}, answer) end)
+    end)
+  end
+
+  defp default_stored_bytes_of(replica, segment_ids),
+    do: ReplicationServer.stored_bytes_of(replica, segment_ids, @probe_timeout)
+
+  # One call per chunk while the replica answers. A call that spends its budget before the end of its chunk hands
+  # the rest back unmeasured, and those are asked again at once, ahead of the next chunk. A replica too old to know
+  # the batched call is asked one segment at a time, as before it existed. Any other failure, a timeout included,
+  # marks every segment left for that replica unreachable without asking again, so a silent replica costs the pass
+  # one timeout.
+  defp probe_chunks([], _replica, _ask, acc), do: acc
+
+  defp probe_chunks([segment_ids | rest] = chunks, replica, ask, acc) do
+    case ask.(replica, segment_ids) do
+      {:ok, bytes_by_id, unmeasured} when is_map(bytes_by_id) and is_list(unmeasured) ->
+        left = MapSet.new(unmeasured)
+
+        acc =
+          for(
+            segment_id <- segment_ids,
+            segment_id not in left,
+            do: {segment_id, batch_answer(bytes_by_id, segment_id)}
+          ) ++ acc
+
+        cond do
+          unmeasured == [] -> probe_chunks(rest, replica, ask, acc)
+          length(unmeasured) < length(segment_ids) -> probe_chunks([unmeasured | rest], replica, ask, acc)
+          # Nothing of the chunk was measured, so asking again could go on forever. The server always measures at
+          # least one, so only an answer from something else lands here: what is left is unknown this pass.
+          true -> for(segment_id <- Enum.concat([unmeasured | rest]), do: {segment_id, :unreachable}) ++ acc
+        end
+
+      {:error, :unknown_call} ->
+        for(segment_id <- Enum.concat(chunks), do: {segment_id, probe_stored_bytes(replica, segment_id)}) ++ acc
+
+      _error ->
+        for(segment_id <- Enum.concat(chunks), do: {segment_id, :unreachable}) ++ acc
+    end
+  end
+
+  # A segment the answer leaves out, or one its replica could not measure, is unknown, never 0 bytes: a copy
+  # is repaired only on a measurement that says it is short.
+  defp batch_answer(bytes_by_id, segment_id) do
+    case Map.fetch(bytes_by_id, segment_id) do
+      {:ok, bytes} when is_integer(bytes) and bytes >= 0 -> {:ok, bytes}
+      _missing_or_error -> :unreachable
+    end
   end
 
   # A replica that did not answer may still be intact, so when that is the only reason no source was found,
@@ -278,13 +374,15 @@ defmodule Malachi.Cluster.SelfHealing do
   defp no_source_reason([]), do: :no_intact_copy
   defp no_source_reason(unreachable), do: {:unreachable_sources, unreachable}
 
-  defp probe_and_repair(segment, failed, opts, acc) do
+  defp probe_and_repair(segment, failed, answers, opts, acc) do
     # A latched copy refuses every request, so it is not probed, is not a source, and is not repaired here.
     # With a spare broker the heal pass replaces it; without one it stays behind the healthy replicas.
     latched = failed_copies(failed, segment)
 
     probes =
-      for replica <- segment.replica_set, replica not in latched, do: {replica, probe_stored_bytes(replica, segment.id)}
+      for replica <- segment.replica_set,
+          replica not in latched,
+          do: {replica, Map.get(answers, {segment.id, replica}, :unreachable)}
 
     lost = for {replica, {:ok, bytes}} <- probes, bytes < segment.byte_size, do: replica
     unreachable = for {replica, :unreachable} <- probes, do: replica

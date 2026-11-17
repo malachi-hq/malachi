@@ -462,6 +462,24 @@ through `support/ab_lib.sh` and `support/ab_run.exs`. Only a Linux run counts; i
 AB_REPS=7 benchmark/rate_limit_ab.sh /path/to/main-checkout . /tmp/rate-limit-ab
 ```
 
+### `integrity_probe_ab.sh` / `integrity_probe_ab.exs`
+
+A paired A/B of the sealed-copy integrity probe (`SelfHealing.heal_sealed/4`, issue #241), the branch tree
+against a baseline tree, with an A-A control and arms interleaved by run, at 1,000 and 10,000 sealed segments
+on three replication servers in one VM. A sample reports the wall clock of a heal pass and the calls one pass
+makes, counted by tracing what the replication servers receive. On the branch tree alone, a sweep then times
+one batched `stored_bytes_of/4` call for each chunk size, which is how long a replication server serves nothing
+else, and is what the default `:probe_chunk` of `Malachi.Cluster.SelfHealing` was chosen from. `AB_MODE=cold`
+measures batch copies whose logical size is not cached yet (a follower's copy right after a backfill), with and
+without the replication server's per-call budget, and how long a call queued behind them waits. Writing the
+fixture keeps a log open per segment per replica, so it needs `ulimit -n` above three times the largest size.
+Every replica is in one VM, so a call crosses no network and the saving between real nodes is larger than
+what this measures. Only a Linux run counts.
+
+```bash
+AB_REPS=5 benchmark/integrity_probe_ab.sh /path/to/main-checkout . /tmp/integrity-probe-ab
+```
+
 ### `restart_recovery_ab.sh` / `restart_recovery_ab.exs`
 
 A paired A/B of what learning where the active ranges end costs a node (issue #283), the branch tree

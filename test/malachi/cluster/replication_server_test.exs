@@ -505,6 +505,110 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     {:error, {:storage, reason}}
   end
 
+  describe "stored_bytes_of/4 (the batched sealed-copy probe)" do
+    @uncached_segment {{"events", 2}, 0}
+    @latched_segment {{"events", 3}, 0}
+    @absent_segment {{"events", 4}, 0}
+
+    # Every way a copy can be measured, on one server: an open log, a directory nobody has opened since the
+    # restart, a segment it never held, and a copy latched as failed.
+    test "answers every id asked, each exactly as stored_bytes/3 does" do
+      {server, directory} = start_broker_at(store: FaultySegmentStore)
+      {:ok, 2} = ReplicationServer.replicate(server, @uncached_segment, [server], 0, records(["a", "b", "c"]))
+      stop_supervised!(server)
+
+      start_supervised!({ReplicationServer, [name: server, directory: directory, store: FaultySegmentStore]},
+        id: server
+      )
+
+      {:ok, 1} = ReplicationServer.replicate(server, @segment, [server], 0, records(["a", "b"]))
+      {:ok, 0} = ReplicationServer.replicate(server, @latched_segment, [server], 0, records(["a"]))
+      fail_segment!(server, directory, @latched_segment, :eio)
+
+      asked = [@segment, @uncached_segment, @absent_segment, @latched_segment]
+      assert {:ok, answers, []} = ReplicationServer.stored_bytes_of(server, asked)
+
+      assert Map.keys(answers) |> Enum.sort() == Enum.sort(asked)
+      assert answers[@segment] > 0
+      assert answers[@uncached_segment] > 0
+      assert answers[@absent_segment] == 0
+      assert {:error, {:storage, _reason}} = answers[@latched_segment]
+
+      for segment <- asked, do: assert(answers[segment] == ReplicationServer.stored_bytes(server, segment))
+    end
+
+    # One directory that cannot be listed fails its own entry and nothing else.
+    test "a segment that cannot be measured fails only its own entry" do
+      {server, directory} = start_broker_at([])
+      {:ok, 1} = ReplicationServer.replicate(server, @segment, [server], 0, records(["a", "b"]))
+      {:ok, 1} = ReplicationServer.replicate(server, @other_segment, [server], 0, records(["a", "b"]))
+      stop_supervised!(server)
+      start_supervised!({ReplicationServer, [name: server, directory: directory]}, id: server)
+
+      dir = storage_dir(directory, @other_segment)
+      File.chmod!(dir, 0o000)
+      on_exit(fn -> File.chmod(dir, 0o755) end)
+      assert {:error, :eacces} = File.ls(dir), "#{dir} still lists after chmod 000; is the suite running as root?"
+
+      assert {:ok, answers, []} = ReplicationServer.stored_bytes_of(server, [@segment, @other_segment])
+      assert answers[@segment] > 0
+      assert {:error, {:storage, _reason}} = answers[@other_segment]
+    end
+
+    # The budget is what bounds how long one call holds the server: once it is spent, the rest of the list is
+    # handed back in order, and at least one id is measured on every call so asking again always progresses.
+    test "a spent budget hands the rest back unmeasured, after measuring at least one" do
+      server = start_broker()
+      asked = [@segment, @other_segment, @absent_segment]
+      {:ok, 1} = ReplicationServer.replicate(server, @segment, [server], 0, records(["a", "b"]))
+
+      assert {:ok, first, [@other_segment, @absent_segment]} =
+               ReplicationServer.stored_bytes_of(server, asked, 5_000, 0)
+
+      assert first == %{@segment => ReplicationServer.stored_bytes(server, @segment)}
+
+      assert {:ok, second, [@absent_segment]} =
+               ReplicationServer.stored_bytes_of(server, [@other_segment, @absent_segment], 5_000, 0)
+
+      assert second == %{@other_segment => 0}
+
+      assert ReplicationServer.stored_bytes_of(server, [@absent_segment], 5_000, 0) ==
+               {:ok, %{@absent_segment => 0}, []}
+    end
+
+    test "an empty list answers an empty map" do
+      assert ReplicationServer.stored_bytes_of(start_broker(), []) == {:ok, %{}, []}
+    end
+
+    test "an id asked twice is answered once" do
+      server = start_broker()
+      {:ok, 1} = ReplicationServer.replicate(server, @segment, [server], 0, records(["a", "b"]))
+
+      assert {:ok, answers, []} = ReplicationServer.stored_bytes_of(server, [@segment, @segment])
+      assert map_size(answers) == 1
+      assert answers[@segment] == ReplicationServer.stored_bytes(server, @segment)
+    end
+
+    # The caller is a heal pass that must survive a replica it cannot reach.
+    test "a server that is gone answers unreachable instead of exiting the caller" do
+      dead = spawn(fn -> :ok end)
+      monitor = Process.monitor(dead)
+      assert_receive {:DOWN, ^monitor, :process, ^dead, _reason}
+
+      assert ReplicationServer.stored_bytes_of(dead, [@segment]) == {:error, :unreachable}
+
+      assert ReplicationServer.stored_bytes_of(:"no_such_repl_#{System.unique_integer([:positive])}", [@segment]) ==
+               {:error, :unreachable}
+    end
+
+    test "a server that does not answer in time answers unreachable" do
+      silent = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(silent, :kill) end)
+
+      assert ReplicationServer.stored_bytes_of(silent, [@segment], 50) == {:error, :unreachable}
+    end
+  end
+
   describe "min_heap_size (the server's garbage-collection floor)" do
     test "sets the server process's minimum heap, and is not passed on to the segment logs" do
       {name, _directory} = start_broker_at(min_heap_size: 300_000)
