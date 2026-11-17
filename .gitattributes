@@ -3,6 +3,11 @@
 # Ensure shell scripts always use LF line endings
 *.sh text eol=lf
 
+# The site's images live in Git LFS (#373): the blog's chart PNGs and the kit's. scripts/site-images-pull.sh
+# fetches them for the docs build after checking each pointer against its size budget.
+site/blog/**/*.png filter=lfs diff=lfs merge=lfs -text
+site/kit/**/*.png filter=lfs diff=lfs merge=lfs -text
+
 # Ensure executables maintain permissions
 pre-commit.sh text eol=lf
 scripts/setup-dev.sh text eol=lf

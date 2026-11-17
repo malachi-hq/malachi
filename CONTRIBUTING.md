@@ -34,6 +34,13 @@ engaging with the recorded reason wastes your time first.
 explains what the log guarantees and, just as importantly, what it deliberately does not.
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the shorter map.
 
+**Install Git LFS before touching the blog or the kit.** Two folders keep their PNG images in Git LFS
+(`.gitattributes`): the blog's charts, `site/blog/**/*.png`, and the social and LinkedIn kit,
+`site/kit/**/*.png`. Run `git lfs install` once after installing [git-lfs](https://git-lfs.com); without it a
+new image there is committed as a plain file, and CI refuses it. `scripts/site-images-pull.sh` fetches them,
+after checking each one against its size budget (150 KB for a chart, 300 KB for a kit image). A PNG anywhere
+else under `site/` is neither stored in LFS nor checked by it.
+
 ## How an issue is shaped here
 
 Every issue uses the same five sections, whatever its label:

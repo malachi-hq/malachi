@@ -2,6 +2,7 @@ defmodule Mix.Tasks.Malachi.Docs.SiteTest do
   # Mix.shell/1 and File.cd!/2 are global process state, so this file is not async.
   use ExUnit.Case, async: false
 
+  alias Malachi.Site.Chart
   alias Malachi.Test.SiteFixture
   alias Mix.Tasks.Malachi.Docs.Site
 
@@ -58,6 +59,28 @@ defmodule Mix.Tasks.Malachi.Docs.SiteTest do
 
     error = assert_raise Mix.Error, fn -> Site.run(["--root", root, "--check"]) end
     assert error.message =~ "doc/sitemap.xml is missing"
+  end
+
+  test "--check --lfs-pointers accepts a blog chart image left as its Git LFS pointer (#373)", %{root: root} do
+    json = ~s({"name": "rate", "title": "Rate", "unit": "r/s", "points": [{"label": "v1.0.0", "value": 1}]})
+    {:ok, chart} = Chart.parse(json)
+
+    SiteFixture.write(
+      root,
+      "site/blog/2026-11-16-x.md",
+      "---\ntitle: T\ndate: 2026-11-16\nversions: [1.0.0]\nauthor: A\nsummary: S\n---\n\n```malachi-chart\n#{json}\n```\n"
+    )
+
+    SiteFixture.write(
+      root,
+      "site/blog/2026-11-16-x/#{Chart.png_name(chart, json)}",
+      "version https://git-lfs.github.com/spec/v1\noid sha256:00\nsize 9\n"
+    )
+
+    Site.run(["--root", root])
+    assert Site.run(["--root", root, "--check", "--lfs-pointers"]) == :ok
+    error = assert_raise Mix.Error, fn -> Site.run(["--root", root, "--check"]) end
+    assert error.message =~ "is a Git LFS pointer"
   end
 
   test "an argument the task does not take fails, rather than being ignored", %{root: root} do
