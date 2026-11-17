@@ -81,6 +81,10 @@ defmodule Malachi.Site do
   # compares this with LICENSE fails until the two agree.
   @licenses %{"MIT" => "MIT License", "Apache-2.0" => "Apache License 2.0"}
 
+  @doc "The page files of the kit staged beside the landing page, as paths under `site/`."
+  @spec page_sources() :: [String.t()]
+  def page_sources, do: @page_sources
+
   @doc "The project settings the landing page is built from, read from `Mix.Project.config/0`."
   @spec from_project(keyword()) :: map()
   def from_project(project) do

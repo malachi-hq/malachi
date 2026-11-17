@@ -2,6 +2,7 @@ defmodule Mix.Tasks.Malachi.Docs.SiteTest do
   # Mix.shell/1 and File.cd!/2 are global process state, so this file is not async.
   use ExUnit.Case, async: false
 
+  alias Malachi.Test.SiteFixture
   alias Mix.Tasks.Malachi.Docs.Site
 
   @moduletag :tmp_dir
@@ -11,34 +12,9 @@ defmodule Mix.Tasks.Malachi.Docs.SiteTest do
     Mix.shell(Mix.Shell.Process)
     on_exit(fn -> Mix.shell(shell) end)
 
-    write(
-      root,
-      "site/ui_kits/website/index.html",
-      ~s(<meta name="malachi:landing" content="1"><p>{{version}} {{license}}</p>)
-    )
-
-    write(root, "site/ui_kits/website/llms.txt", "# Malachi\n\n> {{version}}\n")
-    write(root, "site/assets/fonts/bricolage.woff2", "font-bytes")
-    write_page_kit(root)
-    write(root, "doc/introduction.html", "<h1>Introduction</h1>")
-    write(root, "doc/index.html", ~s(<meta http-equiv="refresh" content="0; url=introduction.html">))
+    SiteFixture.minimal(root)
 
     %{root: root}
-  end
-
-  # The page files the kit ships beside the landing page. Their content is not checked here, only that they are staged.
-  defp write_page_kit(root) do
-    for rel <- ~w(ui_kits/website/site.css ui_kits/website/site.js ui_kits/website/scenes.js ui_kits/website/model.js
-                  styles.css tokens/base.css tokens/colors.css tokens/effects.css tokens/marketing.css
-                  tokens/spacing.css tokens/typography.css assets/logo-mark.svg assets/logo.svg) do
-      write(root, "site/" <> rel, "/* #{rel} */")
-    end
-  end
-
-  defp write(root, path, content) do
-    full = Path.join(root, path)
-    File.mkdir_p!(Path.dirname(full))
-    File.write!(full, content)
   end
 
   defp messages do
