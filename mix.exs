@@ -171,6 +171,7 @@ defmodule Malachi.MixProject do
       "docs/DOCKER_TESTING.md": [title: "Testing with Docker"],
       "docs/MULTI_ARCH_BUILD.md": [title: "Multi-arch builds"],
       "docs/HOOKS.md": [title: "Git hooks"],
+      "docs/guides/release-communication.md": [title: "Release communication"],
       "docs/guides/running-the-node-loadtest.md": [title: "Running the Node.js load test"],
       "docs/guides/running-the-elixir-loadtest.md": [title: "Running the Elixir load test"],
       "docs/guides/running-chaos-drills.md": [title: "Running the chaos drills"],
@@ -245,7 +246,7 @@ defmodule Malachi.MixProject do
         "docs/generated/chaos-results.md",
         "docs/generated/chaos-upgrade-results.md"
       ],
-      Development: ["docs/HOOKS.md"]
+      Development: ["docs/HOOKS.md", "docs/guides/release-communication.md"]
     ]
   end
 
