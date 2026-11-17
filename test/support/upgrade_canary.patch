@@ -54,7 +54,7 @@ index 19ee988a..1f065fa1 100644
  
 +  @doc """
 +  UPGRADE CANARY (test/support/upgrade_canary.patch): writes `note` into `topic`'s metadata through the
-+  control plane, a command introduced at machine version 12.
++  control plane, a command introduced at machine version 13.
 +  """
 +  @spec canary_note(t(), Metadata.topic_name(), term()) :: {t(), term()}
 +  def canary_note(%__MODULE__{} = broker, topic, note), do: apply_metadata(broker, {:canary_note, topic, note})
@@ -98,15 +98,15 @@ diff --git a/lib/malachi/cluster/machine_version.ex b/lib/malachi/cluster/machin
 index 25f0f782..cea78a6e 100644
 --- a/lib/malachi/cluster/machine_version.ex
 +++ b/lib/malachi/cluster/machine_version.ex
-@@ -106,7 +106,10 @@ defmodule Malachi.Cluster.MachineVersion do
-   # replicas, start, format}` and `{:seal_segment, id, length, byte_size, stored_bytes, at}`.
-   # 11 introduces the legal hold in `Malachi.Metadata` (#307): `{:set_topic_hold, topic, request}`, and the
-   # topic export format that carries a topic's hold.
--  @code_version 11
+@@ -113,7 +113,10 @@ defmodule Malachi.Cluster.MachineVersion do
+   # 12 introduces the `retention.max_records` policy field in `Malachi.Cluster.Policy` (#199), which
+   # `{:define_policy, name, policy}` validates against the effective version, at the next version since 11 is
+   # released.
+-  @code_version 12
 +  # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
-+  # scripts/docker-upgrade-chaos.sh, never into a release. Version 12 introduces
++  # scripts/docker-upgrade-chaos.sh, never into a release. Version 13 introduces
 +  # `{:canary_note, topic, note}` in `Malachi.Metadata`.
-+  @code_version 12
++  @code_version 13
  
    @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
    @type command_key :: {atom(), non_neg_integer()}
@@ -163,7 +163,7 @@ index 03a51c32..581342e0 100644
 +      {:end_migration, 2} => 0,
 +      # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
 +      # scripts/docker-upgrade-chaos.sh, never into a release.
-+      {:canary_note, 3} => 12
++      {:canary_note, 3} => 13
      }
    end
  

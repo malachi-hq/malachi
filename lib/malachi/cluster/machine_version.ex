@@ -43,7 +43,11 @@ defmodule Malachi.Cluster.MachineVersion do
   introduced the `retention.segment_max_age_ms` field (#197), and version 7 is where `Malachi.Metadata`
   made `{:set_segment_replicas, id, replica_set, expected}` a compare-and-swap, and version 8 is where
   `Malachi.Metadata` introduced the group fence (`{:commit_offset, group, topic, offsets, generation}` and
-  `{:open_group, group, topic}`), so each time the others moved with nothing but that no-op.
+  `{:open_group, group, topic}`), and version 9 is where `Malachi.Metadata` introduced the manual purge
+  (`{:set_range_starts, topic, starts}`), and version 10 is where it introduced the batch storage format, and
+  version 11 is where it introduced the legal hold (`{:set_topic_hold, topic, request}`), and version 12 is
+  where `Malachi.Cluster.Policy` introduced the `retention.max_records` field (#199), so each time the others
+  moved with nothing but that no-op.
 
   ## State that a command fills from the log entry
 
@@ -106,7 +110,10 @@ defmodule Malachi.Cluster.MachineVersion do
   # replicas, start, format}` and `{:seal_segment, id, length, byte_size, stored_bytes, at}`.
   # 11 introduces the legal hold in `Malachi.Metadata` (#307): `{:set_topic_hold, topic, request}`, and the
   # topic export format that carries a topic's hold.
-  @code_version 11
+  # 12 introduces the `retention.max_records` policy field in `Malachi.Cluster.Policy` (#199), which
+  # `{:define_policy, name, policy}` validates against the effective version, at the next version since 11 is
+  # released.
+  @code_version 12
 
   @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
   @type command_key :: {atom(), non_neg_integer()}

@@ -8,7 +8,8 @@ defmodule Malachi.Cluster.RetentionCoordinator do
     * `:expire_segment` - `(Malachi.Metadata.segment_meta() -> :ok | {:error, term()})`, removes one
       expired segment from the control plane **and** deletes its stored data on the replicas, and
       answers what the control plane answered (labeled by `Malachi.Cluster.Retention.reply_label/1`);
-    * `:policy` - a `Malachi.Cluster.Retention.policy()` (`:max_age_ms` / `:max_bytes`; `nil` = off);
+    * `:policy` - a `Malachi.Cluster.Retention.policy()` (`:max_age_ms` / `:max_bytes`; `nil` = off); a
+      record count comes only from a topic's policy, never from here;
     * `:policies` - `(-> {:ok, %{name => Malachi.Cluster.Policy.t()}} | {:error, term()})`, the
       cluster's policy definitions, resolved ONCE per sweep (default
       `Malachi.Cluster.PolicyStore.fetch_all/0`). A topic's own metadata says which name it points at;

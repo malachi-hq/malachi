@@ -237,7 +237,12 @@ defmodule Malachi.Cluster.RetentionTest do
     test "a topic with no policy takes every bound from the global policy" do
       assert Retention.effective(nil, %{}, %{max_age_ms: 5_000}, 99) == %{
                resolution: :none,
-               retention: %{max_age_ms: {5_000, :global}, max_bytes: {nil, :global}, segment_max_age_ms: {nil, :global}}
+               retention: %{
+                 max_age_ms: {5_000, :global},
+                 max_bytes: {nil, :global},
+                 max_records: {nil, :global},
+                 segment_max_age_ms: {nil, :global}
+               }
              }
     end
 
@@ -246,13 +251,23 @@ defmodule Malachi.Cluster.RetentionTest do
 
       assert Retention.effective("p", policies, %{max_age_ms: 5_000, max_bytes: 10}, nil) == %{
                resolution: :resolved,
-               retention: %{max_age_ms: {nil, :policy}, max_bytes: {0, :policy}, segment_max_age_ms: {nil, :global}}
+               retention: %{
+                 max_age_ms: {nil, :policy},
+                 max_bytes: {0, :policy},
+                 max_records: {nil, :global},
+                 segment_max_age_ms: {nil, :global}
+               }
              }
 
       partial = %{"p" => %{retention: %{max_bytes: 7}}}
 
       assert Retention.effective("p", partial, %{max_age_ms: 5_000}, nil).retention ==
-               %{max_age_ms: {5_000, :global}, max_bytes: {7, :policy}, segment_max_age_ms: {nil, :global}}
+               %{
+                 max_age_ms: {5_000, :global},
+                 max_bytes: {7, :policy},
+                 max_records: {nil, :global},
+                 segment_max_age_ms: {nil, :global}
+               }
     end
 
     test "a resolved policy that says nothing about retention inherits every bound" do
@@ -260,7 +275,12 @@ defmodule Malachi.Cluster.RetentionTest do
 
       assert Retention.effective("p", policies, %{max_age_ms: 5_000}, 1) == %{
                resolution: :resolved,
-               retention: %{max_age_ms: {5_000, :global}, max_bytes: {nil, :global}, segment_max_age_ms: {nil, :global}}
+               retention: %{
+                 max_age_ms: {5_000, :global},
+                 max_bytes: {nil, :global},
+                 max_records: {nil, :global},
+                 segment_max_age_ms: {nil, :global}
+               }
              }
     end
 
@@ -270,6 +290,7 @@ defmodule Malachi.Cluster.RetentionTest do
                retention: %{
                  max_age_ms: {42, :unresolved_backstop},
                  max_bytes: {nil, :unresolved_backstop},
+                 max_records: {nil, :unresolved_backstop},
                  segment_max_age_ms: {nil, :unresolved_backstop}
                }
              }
@@ -295,9 +316,14 @@ defmodule Malachi.Cluster.RetentionTest do
           if bound, do: elem(Metadata.apply(base, {:bind_topic_policy, "t", bound}), 0), else: base
 
         reported = Retention.effective(bound, policies, global, backstop).retention
-        as_global = Map.new(reported, fn {key, {value, _origin}} -> {key, value} end)
+        as_policy = %{retention: Map.new(reported, fn {key, {value, _origin}} -> {key, value} end)}
 
-        assert expired(bound_metadata, now, global, policies, backstop) == expired(base, now, as_global)
+        # Applied as a policy that sets every bound, not as the global policy: the global never carries a
+        # record count (see "Record count" in the module doc), so only a policy can carry one back.
+        reapplied = elem(Metadata.apply(base, {:bind_topic_policy, "t", "reported"}), 0)
+
+        assert expired(bound_metadata, now, global, policies, backstop) ==
+                 expired(reapplied, now, %{}, %{"reported" => as_policy})
       end
     end
 
@@ -310,9 +336,349 @@ defmodule Malachi.Cluster.RetentionTest do
     defp retention_bounds do
       bound = one_of([constant(nil), integer(0..2_000)])
 
-      gen all(age <- bound, bytes <- bound, keys <- list_of(member_of([:max_age_ms, :max_bytes]), max_length: 2)) do
-        Map.take(%{max_age_ms: age, max_bytes: bytes}, keys)
+      gen all(
+            age <- bound,
+            bytes <- bound,
+            records <- one_of([constant(nil), integer(0..10)]),
+            keys <- list_of(member_of([:max_age_ms, :max_bytes, :max_records]), max_length: 3)
+          ) do
+        Map.take(%{max_age_ms: age, max_bytes: bytes, max_records: records}, keys)
       end
+    end
+  end
+
+  # Binds each of `topics` to the policy named `name`.
+  defp bound_to(metadata, name, topics \\ ["t"]) do
+    for topic <- topics, reduce: metadata do
+      metadata -> elem(Metadata.apply(metadata, {:bind_topic_policy, topic, name}), 0)
+    end
+  end
+
+  describe "record count (#199)" do
+    defp count_policy(max_records), do: %{"p" => %{retention: %{max_records: max_records}}}
+
+    # Topic "t", bound to policy "p", with no segment yet.
+    defp counted_topic do
+      Metadata.new() |> Metadata.apply({:create_topic, "t", 4}) |> elem(0) |> bound_to("p")
+    end
+
+    # Seals `specs` ({id, length}, or {id, length, sealed_at}) into `range` one after another, from offset
+    # `from`. A segment with no `sealed_at` is sealed at 0.
+    defp seal_in(metadata, range, specs, from \\ 0) do
+      {metadata, _end} =
+        Enum.reduce(specs, {metadata, from}, fn spec, {metadata, start} ->
+          {id, length, sealed_at} = with {id, length} <- spec, do: {id, length, 0}
+          {metadata, :ok} = Metadata.apply(metadata, {:register_segment, range, id, [:b1], start})
+          {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, id, length, 100, sealed_at})
+          {metadata, start + length}
+        end)
+
+      metadata
+    end
+
+    defp counted(specs), do: seal_in(counted_topic(), @range, specs)
+
+    defp by_count(metadata, max_records, global \\ %{}),
+      do: expired(metadata, 10_000, global, count_policy(max_records))
+
+    defp split(metadata, range) do
+      {metadata, {:ok, left, right}} = Metadata.apply(metadata, {:split_range, range})
+      {metadata, left, right}
+    end
+
+    test "a range over the bound expires its oldest segments while what is newer still holds the bound" do
+      metadata = counted([{"s0", 10}, {"s1", 10}, {"s2", 10}])
+
+      assert by_count(metadata, 15) == ["s0"]
+      assert by_count(metadata, 10) == ["s0", "s1"]
+      assert by_count(metadata, 1) == ["s0", "s1"]
+    end
+
+    test "a range under or exactly at the bound expires nothing" do
+      metadata = counted([{"s0", 10}, {"s1", 10}, {"s2", 10}])
+
+      assert by_count(metadata, 100) == []
+      assert by_count(metadata, 30) == []
+      assert by_count(metadata, 21) == []
+    end
+
+    test "0 keeps nothing sealed, as max_bytes 0 does" do
+      assert [{"s0", 10}, {"s1", 10}, {"s2", 10}] |> counted() |> by_count(0) == ["s0", "s1", "s2"]
+    end
+
+    test "nil turns the rule off" do
+      assert [{"s0", 10}, {"s1", 10}] |> counted() |> by_count(nil) == []
+    end
+
+    test "the global policy never carries a record count, so a topic that does not set one keeps everything" do
+      unbound =
+        Metadata.new() |> Metadata.apply({:create_topic, "t", 4}) |> elem(0) |> seal_in(@range, [{"s0", 10}])
+
+      assert expired(unbound, 10_000, %{max_records: 0}) == []
+
+      silent = [{"s0", 10}] |> counted()
+      assert expired(silent, 10_000, %{max_records: 0}, %{"p" => %{retention: %{max_age_ms: nil}}}) == []
+      assert Retention.effective(nil, %{}, %{max_records: 0}, nil).retention.max_records == {nil, :global}
+    end
+
+    test "a name nothing defines applies no record count" do
+      metadata = [{"s0", 10}, {"s1", 10}] |> counted() |> bound_to("ghost")
+      assert expired(metadata, 10_000, %{}, count_policy(0)) == []
+    end
+
+    test "the active segment is neither counted nor expired" do
+      metadata = counted([{"s0", 10}])
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, @range, "active", [:b1], 10})
+
+      assert by_count(metadata, 0) == ["s0"]
+      assert by_count(metadata, 5) == []
+    end
+
+    test "an empty sealed segment weighs nothing" do
+      assert [{"s0", 0}, {"s1", 10}] |> counted() |> by_count(10) == ["s0"]
+      assert [{"s0", 10}, {"s1", 0}] |> counted() |> by_count(10) == []
+    end
+
+    test "the walk stops at the first segment it keeps, so a small newer segment is never dropped" do
+      # Newer than s0: 11 (drop). Newer than s1: 1 (keep, and stop). s2 is newer than s1 and stays.
+      assert [{"s0", 3}, {"s1", 10}, {"s2", 1}] |> counted() |> by_count(5) == ["s0"]
+    end
+
+    test "a batch segment counts its records, not its frames" do
+      metadata = counted_topic()
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, @range, "b0", [:b1], 0, :batch})
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, "b0", 10, 100, 40, 0})
+      metadata = seal_in(metadata, @range, [{"r1", 10}], 10)
+
+      assert by_count(metadata, 10) == ["b0"]
+      assert by_count(metadata, 11) == []
+    end
+
+    test "unions with the age and size rules, each id once" do
+      metadata = counted([{"s0", 10}, {"s1", 10}, {"s2", 10}])
+      policies = %{"p" => %{retention: %{max_records: 15, max_age_ms: 5_000, max_bytes: 150}}}
+      ids = Retention.expired(metadata, 10_000, %{}, policies)
+
+      assert Enum.sort(ids) == ["s0", "s1", "s2"]
+      assert ids == Enum.uniq(ids)
+    end
+
+    test "a held topic keeps what the rule picks and reports it" do
+      metadata = [{"s0", 10}, {"s1", 10}] |> counted() |> held()
+
+      assert Retention.plan(metadata, 10_000, %{}, count_policy(10)) ==
+               %{expired: [], held: %{"t" => %{segments: 1, bytes: 100}}}
+    end
+
+    test "a retired range expires whole once every live range descending from it holds the bound" do
+      {metadata, left, right} = [{"p0", 10}, {"p1", 10}] |> counted() |> split(@range)
+      metadata = metadata |> seal_in(left, [{"l0", 10}, {"l1", 10}]) |> seal_in(right, [{"r0", 10}, {"r1", 10}])
+
+      assert by_count(metadata, 15) == ["p0", "p1"]
+      assert by_count(metadata, 10) == ["l0", "p0", "p1", "r0"]
+    end
+
+    test "a live range keeps its own last records however much its sibling lags, so it cannot grow without bound" do
+      # r stays quiet, so the parent is kept for r's readers. l does not wait for it: it keeps its own last
+      # 15 and lets the rest go, rather than keeping all 1000 offsets.
+      {metadata, left, _right} = [{"p0", 10}, {"p1", 10}] |> counted() |> split(@range)
+      metadata = seal_in(metadata, left, for(i <- 0..99, do: {"l#{i}", 10}))
+
+      assert by_count(metadata, 15) == for(i <- 0..97, do: "l#{i}") |> Enum.sort()
+    end
+
+    test "a retired range is never cut in part: its segments mix every child's keys, so it is kept whole" do
+      # Walked on its own, p would drop p0 (p1 and p2 still hold 20 offsets), leaving l's reader only l's
+      # slice of p1 and p2, about 10 of the 15 it is owed.
+      {metadata, _left, right} = [{"p0", 10}, {"p1", 10}, {"p2", 10}] |> counted() |> split(@range)
+      metadata = seal_in(metadata, right, [{"r0", 20}])
+
+      assert by_count(metadata, 15) == []
+      assert by_count(metadata, 10) == []
+    end
+
+    test "a split that just happened keeps the parent: children with only an active segment hold nothing" do
+      {metadata, left, right} = [{"p0", 10}, {"p1", 10}] |> counted() |> split(@range)
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, left, "la", [:b1], 0})
+      assert by_count(metadata, 15) == []
+
+      metadata = seal_in(metadata, right, [{"r0", 20}])
+      assert by_count(metadata, 15) == []
+    end
+
+    test "a retired range goes once its own lines hold the bound, even while an older one is kept for others" do
+      # y splits into x and z, x into x1 and x2. x1 and x2 hold the bound, so x, older than all of theirs, goes.
+      # z does not, so y stays for z's readers. A reader of x1 is served y, then x1: the hole where x was is
+      # older than its last 15, and it steps over it as over any expired segment.
+      {metadata, x, z} = [{"y0", 10}] |> counted() |> split(@range)
+      {metadata, x1, x2} = metadata |> seal_in(x, [{"x0", 10}]) |> split(x)
+      metadata = metadata |> seal_in(z, [{"z0", 5}]) |> seal_in(x1, [{"a0", 20}]) |> seal_in(x2, [{"b0", 20}])
+
+      assert by_count(metadata, 15) == ["x0"]
+    end
+
+    test "a chain of retired ranges expires once every range at the bottom of its lines holds the bound" do
+      {metadata, x, z} = [{"y0", 10}] |> counted() |> split(@range)
+      {metadata, x1, x2} = metadata |> seal_in(x, [{"x0", 10}]) |> split(x)
+      metadata = metadata |> seal_in(z, [{"z0", 20}]) |> seal_in(x1, [{"a0", 20}]) |> seal_in(x2, [{"b0", 20}])
+
+      assert by_count(metadata, 15) == ["x0", "y0"]
+    end
+
+    test "a merge: both retired parents expire once the merged child holds the bound" do
+      {metadata, left, right} = split(counted_topic(), @range)
+      metadata = metadata |> seal_in(left, [{"l0", 10}]) |> seal_in(right, [{"r0", 10}])
+      {metadata, {:ok, child}} = Metadata.apply(metadata, {:merge_ranges, left, right})
+
+      assert by_count(metadata, 15) == []
+
+      metadata = seal_in(metadata, child, [{"c0", 20}])
+      assert by_count(metadata, 15) == ["l0", "r0"]
+    end
+
+    test "a live descendant's purged offsets do not count toward covering its ancestors" do
+      {metadata, left, right} = [{"p0", 10}] |> counted() |> split(@range)
+      metadata = metadata |> seal_in(left, [{"l0", 20}]) |> seal_in(right, [{"r0", 20}])
+
+      assert by_count(metadata, 15) == ["p0"]
+
+      {purged, {:ok, _moves}} = Metadata.apply(metadata, {:set_range_starts, "t", %{left => 10}})
+      assert by_count(purged, 15) == []
+    end
+
+    test "a sealed topic's last ranges are judged as the ranges its readers read, as when it was live" do
+      {metadata, left, right} = [{"p0", 10}, {"p1", 10}] |> counted() |> split(@range)
+      metadata = metadata |> seal_in(left, [{"l0", 10}, {"l1", 20}]) |> seal_in(right, [{"r0", 20}])
+      live = by_count(metadata, 15)
+
+      assert live == ["l0", "p0", "p1"]
+
+      {sealed, :ok} = Metadata.apply(metadata, {:seal_topic, "t"})
+      assert by_count(sealed, 15) == live
+    end
+
+    test "with an age bound too, age expires the parent while the count trims a child on its own" do
+      # p0 is old, every child segment fresh. r is under the bound, so the count keeps p for r's readers,
+      # and age expires it anyway; l trims its own oldest by count.
+      {metadata, left, right} = [{"p0", 10, 0}] |> counted() |> split(@range)
+      metadata = metadata |> seal_in(left, [{"l0", 10, 9_999}, {"l1", 10, 9_999}]) |> seal_in(right, [{"r0", 5, 9_999}])
+      policies = %{"p" => %{retention: %{max_records: 10, max_age_ms: 5_000}}}
+
+      assert by_count(metadata, 10) == ["l0"]
+      assert expired(metadata, 10_000, %{}, policies) == ["l0", "p0"]
+    end
+
+    test "a held topic's retired ranges are reported as held, not expired" do
+      {metadata, left, right} = [{"p0", 10}] |> counted() |> split(@range)
+      metadata = metadata |> seal_in(left, [{"l0", 20}]) |> seal_in(right, [{"r0", 20}]) |> held()
+
+      assert Retention.plan(metadata, 10_000, %{}, count_policy(15)) ==
+               %{expired: [], held: %{"t" => %{segments: 1, bytes: 100}}}
+    end
+
+    test "a segment of a range the metadata does not hold is judged as a range with no history" do
+      metadata = counted([{"s0", 10}, {"s1", 10}])
+      orphaned = %{metadata | ranges: Map.delete(metadata.ranges, @range)}
+
+      assert by_count(orphaned, 10) == ["s0"]
+    end
+
+    test "other topics are untouched by a topic's record count" do
+      metadata = counted([{"s0", 10}, {"s1", 10}])
+
+      metadata =
+        metadata |> Metadata.apply({:create_topic, "u", 4}) |> elem(0) |> seal_in({"u", 0}, [{"u0", 10}, {"u1", 10}])
+
+      assert by_count(metadata, 0) == ["s0", "s1"]
+    end
+
+    property "in one range, what stays holds the bound, one more would not, and what goes is the oldest" do
+      check all(lengths <- list_of(integer(0..15), max_length: 8), max_records <- integer(0..60)) do
+        specs = lengths |> Enum.with_index() |> Enum.map(fn {length, i} -> {"s#{i}", length} end)
+        expired = specs |> counted() |> by_count(max_records) |> MapSet.new()
+
+        {gone, kept} = Enum.split_with(specs, fn {id, _length} -> MapSet.member?(expired, id) end)
+        total = fn list -> list |> Enum.map(&elem(&1, 1)) |> Enum.sum() end
+
+        assert gone == Enum.take(specs, length(gone)), "what expires must be a prefix in offset order"
+        assert total.(kept) >= min(max_records, total.(specs))
+
+        case kept do
+          [] -> :ok
+          [{_oldest, length} | _newer] -> assert total.(kept) - length < max_records
+        end
+      end
+    end
+
+    property "along any line of splits, every reader keeps its own last records and a retired range goes whole or stays" do
+      check all(
+              steps <- list_of({integer(0..7), list_of(integer(0..12), max_length: 3)}, max_length: 4),
+              tail <- list_of(integer(0..12), max_length: 3),
+              max_records <- integer(0..40),
+              max_runs: 200
+            ) do
+        {metadata, _next} =
+          Enum.reduce(steps, {counted_topic(), 0}, fn {pick, lengths}, {metadata, next} ->
+            live = live_ranges(metadata)
+            range = Enum.at(live, rem(pick, length(live)))
+            specs = for {length, i} <- Enum.with_index(lengths), do: {"#{next}-#{i}", length}
+            metadata = seal_in(metadata, range, specs, sealed_end(metadata, range))
+
+            case Metadata.apply(metadata, {:split_range, range}) do
+              {metadata, {:ok, _left, _right}} -> {metadata, next + 1}
+              {_unchanged, {:error, :cannot_split}} -> {metadata, next + 1}
+            end
+          end)
+
+        metadata =
+          for range <- live_ranges(metadata), reduce: metadata do
+            metadata ->
+              specs = for {length, i} <- Enum.with_index(tail), do: {"#{inspect(range)}-#{i}", length}
+              seal_in(metadata, range, specs, sealed_end(metadata, range))
+          end
+
+        expired = metadata |> by_count(max_records) |> MapSet.new()
+
+        own = fn range ->
+          for segment <- sealed_of(metadata, range), do: {MapSet.member?(expired, segment.id), segment.length}
+        end
+
+        total = fn list -> list |> Enum.map(&elem(&1, 1)) |> Enum.sum() end
+        kept_total = fn range -> range |> own.() |> Enum.reject(&elem(&1, 0)) |> total.() end
+
+        for live <- live_ranges(metadata) do
+          mine = own.(live)
+          kept = Enum.drop_while(mine, &elem(&1, 0))
+
+          assert Enum.all?(kept, &(not elem(&1, 0))), "what #{inspect(live)} gives up must be its oldest"
+          assert total.(kept) >= min(max_records, total.(mine))
+        end
+
+        for {retired, %{topic: "t", state: :sealed}} <- metadata.ranges do
+          flags = retired |> own.() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+          assert length(flags) <= 1, "#{inspect(retired)} must go whole or stay whole"
+
+          if flags == [true] do
+            for live <- live_ranges(metadata),
+                retired in metadata.ranges[live].parents,
+                do: assert(kept_total.(live) >= max_records)
+          end
+        end
+      end
+    end
+
+    defp sealed_of(metadata, range),
+      do: metadata.segments |> Map.values() |> Enum.filter(&(&1.range_id == range)) |> Enum.sort_by(& &1.start_offset)
+
+    defp live_ranges(metadata),
+      do: for({id, %{topic: "t", state: :active}} <- metadata.ranges, do: id) |> Enum.sort()
+
+    defp sealed_end(metadata, range) do
+      metadata.segments
+      |> Map.values()
+      |> Enum.filter(&(&1.range_id == range))
+      |> Enum.map(&(&1.start_offset + &1.length))
+      |> Enum.max(fn -> 0 end)
     end
   end
 
@@ -437,6 +803,7 @@ defmodule Malachi.Cluster.RetentionTest do
               segments <- list_of(tuple({integer(1..500), integer(0..10_000)}), max_length: 6),
               max_age <- one_of([constant(nil), integer(0..10_000)]),
               max_bytes <- one_of([constant(nil), integer(0..1_500)]),
+              max_records <- one_of([constant(nil), integer(0..6)]),
               max_runs: 200
             ) do
         # Contiguous one-offset segments, so each registers right after the one before it seals.
@@ -445,11 +812,12 @@ defmodule Malachi.Cluster.RetentionTest do
           |> Enum.with_index()
           |> Enum.map(fn {{bytes, sealed_at}, offset} -> {"s#{offset}", offset, bytes, sealed_at} end)
           |> two_topics()
+          |> bound_to("p", ["t", "u"])
 
-        policy = %{max_age_ms: max_age, max_bytes: max_bytes}
+        policies = %{"p" => %{retention: %{max_age_ms: max_age, max_bytes: max_bytes, max_records: max_records}}}
 
-        free = Retention.plan(metadata, 10_000, policy)
-        kept = Retention.plan(held(metadata), 10_000, policy)
+        free = Retention.plan(metadata, 10_000, %{}, policies)
+        kept = Retention.plan(held(metadata), 10_000, %{}, policies)
 
         {of_t, of_u} = Enum.split_with(free.expired, &(elem(&1, 0) == "t"))
         assert Enum.sort(kept.expired) == Enum.sort(of_u)
