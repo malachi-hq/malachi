@@ -197,7 +197,7 @@ defmodule ReleaseWorkflowTest do
 
     test "the release job reads the pull requests itself and holds exactly these permissions", %{jobs: jobs} do
       assert jobs["release"] =~
-               ~r/^    permissions:\n      contents: write\n      actions: write\n      pull-requests: read\n\n/m
+               ~r/^    permissions:\n      contents: write\n      actions: write\n      pull-requests: read\n      discussions: write\n\n/m
 
       read = step(jobs["release"], "Read the merged pull requests")
       assert read =~ "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}"
@@ -237,6 +237,16 @@ defmodule ReleaseWorkflowTest do
       assert job =~ "body_path: ${{ runner.temp }}/release-notes.md"
       refute job =~ ~r/^          body: /m
       refute job =~ "git log"
+    end
+
+    test "the release opens its discussion in Announcements, from the guarded release step (#373)",
+         %{jobs: jobs} do
+      create = step(jobs["release"], "Create GitHub Release")
+      assert create =~ "discussion_category_name: Announcements\n"
+      assert create =~ "uses: softprops/action-gh-release@"
+
+      # Only this step asks for a discussion, so the permission serves nothing else.
+      assert length(Regex.scan(~r/discussion_category_name:/, jobs["release"])) == 1
     end
 
     test "the changelog takes the same notes, before the push, and goes into the bump commit (#373)",

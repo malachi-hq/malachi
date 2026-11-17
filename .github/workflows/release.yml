@@ -130,12 +130,14 @@ jobs:
     # The App's key is an environment secret: only a run from main passes the environment's branch rule.
     environment: release
     # Scoped here (not workflow-wide) so only this job holds write: it creates the GitHub release (contents) and
-    # dispatches the Pages workflow (actions), and reads the merged pull requests' labels and descriptions
-    # (pull-requests). The push to main uses the App's token, not this one.
+    # its Announcements discussion (discussions), dispatches the Pages workflow (actions), and reads the merged
+    # pull requests' labels and descriptions (pull-requests). The push to main uses the App's token, not this
+    # one.
     permissions:
       contents: write
       actions: write
       pull-requests: read
+      discussions: write
 
     outputs:
       new_version: ${{ steps.bump.outputs.NEW_VERSION }}
@@ -264,6 +266,9 @@ jobs:
           body_path: ${{ runner.temp }}/release-notes.md
           draft: false
           prerelease: false
+          # Opens a discussion of the release in this existing category (#373), so a watcher of Discussions
+          # hears of it, and the release post's link is added to it as a comment once the post is live.
+          discussion_category_name: Announcements
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
