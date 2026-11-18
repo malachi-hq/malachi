@@ -371,7 +371,7 @@ defmodule Malachi.MixProject do
       {:earmark_parser, "~> 1.4.46", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18.5", only: :test},
       {:mix_audit, "~> 2.1.5", only: [:dev, :test], runtime: false},
-      {:sobelow, "~> 0.18.1", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.19.0", only: [:dev, :test], runtime: false},
       {:benchee, "~> 1.5.0", only: :dev, runtime: false},
       {:benchee_html, "~> 1.0", only: :dev, runtime: false},
       {:stream_data, "~> 1.1", only: [:dev, :test], runtime: false}
