@@ -4,6 +4,11 @@ on:
   workflow_run:
     workflows: [Publish results]
     types: [completed]
+  # A merged blog post goes live in minutes rather than after the load tests of Publish results (#373). That
+  # run still rebuilds the site afterwards; the concurrency group below queues the two.
+  push:
+    branches: [main]
+    paths: ['site/blog/**']
   workflow_dispatch:
 concurrency:
   group: pages
@@ -32,6 +37,17 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_run' && 'main' || github.ref }}
+
+      # The blog's and the kit's images live in Git LFS (#373). Cached, since the quota counts every download,
+      # and each pointer is checked (outside LFS, over budget) before anything is fetched.
+      - name: 🖼️ Cache the site's images
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .git/lfs/objects
+          key: site-images-${{ hashFiles('site/blog/**/*.png', 'site/kit/**/*.png') }}
+
+      - name: 🖼️ Fetch the site's images
+        run: scripts/site-images-pull.sh
 
       - name: 🔧 Setup Elixir
         id: beam

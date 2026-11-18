@@ -1227,4 +1227,5 @@ A release is published only for a merge users act on, decided by the pull reques
 Documentation, CI, test and refactoring merges publish nothing on their own and are listed in the next
 release's notes, grouped by type. The `main` and `sha-<commit>` image tags follow every merge.
 
-See the [GitHub Releases](https://github.com/malachi-hq/malachi/releases) for the per-version change history.
+See [CHANGELOG.md](CHANGELOG.md) or the [GitHub Releases](https://github.com/malachi-hq/malachi/releases) for
+the per-version change history, with upgrade notes where a release needs them.

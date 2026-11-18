@@ -130,12 +130,14 @@ jobs:
     # The App's key is an environment secret: only a run from main passes the environment's branch rule.
     environment: release
     # Scoped here (not workflow-wide) so only this job holds write: it creates the GitHub release (contents) and
-    # dispatches the Pages workflow (actions), and reads the merged pull requests' labels and descriptions
-    # (pull-requests). The push to main uses the App's token, not this one.
+    # its Announcements discussion (discussions), dispatches the Pages workflow (actions), and reads the merged
+    # pull requests' labels and descriptions (pull-requests). The push to main uses the App's token, not this
+    # one.
     permissions:
       contents: write
       actions: write
       pull-requests: read
+      discussions: write
 
     outputs:
       new_version: ${{ steps.bump.outputs.NEW_VERSION }}
@@ -231,10 +233,20 @@ jobs:
           NEW_VERSION: ${{ steps.version.outputs.NEW_VERSION }}
         run: scripts/release-notes.sh "$PREV" HEAD "$NEW_VERSION" "$RUNNER_TEMP/release-prs" > "$RUNNER_TEMP/release-notes.md"
 
+      # The same notes without the image and checkout lines, at the top of CHANGELOG.md, in the bump commit
+      # (#373): the release post generator reads a version's changes from there. Written before anything is
+      # pushed, like the notes.
+      - name: Prepend the release to the changelog
+        if: steps.released.outputs.SKIP == 'false' && steps.bump_type.outputs.BUMP_TYPE != 'none'
+        env:
+          PREV: ${{ steps.prev.outputs.TAG }}
+          NEW_VERSION: ${{ steps.version.outputs.NEW_VERSION }}
+        run: scripts/changelog-prepend.sh "$PREV" HEAD "$NEW_VERSION" "$RUNNER_TEMP/release-prs" CHANGELOG.md
+
       - name: Commit version bump
         if: steps.released.outputs.SKIP == 'false' && steps.bump_type.outputs.BUMP_TYPE != 'none'
         run: |
-          git add mix.exs
+          git add mix.exs CHANGELOG.md
           git commit -m "chore: bump version to ${{ steps.version.outputs.NEW_VERSION }}"
           # The checkout holds the App's token, the one actor allowed to push to main without a pull request.
           git push origin HEAD:main
@@ -254,16 +266,49 @@ jobs:
           body_path: ${{ runner.temp }}/release-notes.md
           draft: false
           prerelease: false
+          # Opens a discussion of the release in this existing category (#373), so a watcher of Discussions
+          # hears of it, and the release post's link is added to it as a comment once the post is live.
+          discussion_category_name: Announcements
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # The Pages site is built by pages.yml, which runs after Publish results or on a dispatch, never on a push.
+      # The Pages site is built by pages.yml, which runs after Publish results, on a dispatch, or on a push that
+      # touches site/blog/, never on this version bump's push.
       # Dispatch it here so it checks out main (now bumped) and republishes the site with the new version.
       - name: Rebuild the documentation site for the new version
         if: steps.released.outputs.SKIP == 'false' && steps.bump_type.outputs.BUMP_TYPE != 'none'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run pages.yml --ref main
+
+  # Opens the release's communication checklist issue (#373), from the template that holds the routine. A job
+  # of its own so the release job, which holds the App's key, does not also hold issues: write; and a failure
+  # here leaves the release and its image as they are. The version is the only value it takes from the
+  # release, checked by the script before it reaches the title.
+  announce:
+    needs: release
+    # Empty when the release job found the commit already released, or skipped it.
+    if: needs.release.outputs.new_version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Open the communication checklist issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.release.outputs.new_version }}
+        run: scripts/release-checklist-issue.sh "$VERSION" .github/ISSUE_TEMPLATE/release-communication.md
 
   docker:
     needs: release

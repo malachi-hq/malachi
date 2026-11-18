@@ -23,11 +23,12 @@ defmodule Malachi.MixProject do
       aliases: aliases(),
       test_coverage: [tool: ExCoveralls, threshold: 85],
       elixirc_paths: elixirc_paths(Mix.env()),
-      # Both are apps dialyzer does not put in the default PLT, and both are referenced by code it
-      # analyses: `:mix` by the `Mix.Tasks.*` admin tasks (Mix.Task/Mix.shell/Mix.raise), and `:ex_unit`
-      # by the helpers under `test/support`, which are compiled in the test environment and analysed
-      # there. Without them every such call is reported as an unknown function.
-      dialyzer: [plt_add_apps: [:mix, :ex_unit]]
+      # Apps dialyzer does not put in the default PLT, each referenced by code it analyses: `:mix` by the
+      # `Mix.Tasks.*` admin tasks (Mix.Task/Mix.shell/Mix.raise), `:ex_unit` by the helpers under
+      # `test/support`, which are compiled in the test environment and analysed there, and `:earmark_parser`
+      # (a dev and test dependency, `runtime: false`) by the blog's Malachi.Site.Markdown (#373). Without them
+      # every such call is reported as an unknown function.
+      dialyzer: [plt_add_apps: [:mix, :ex_unit, :earmark_parser]]
     ]
   end
 
@@ -47,6 +48,10 @@ defmodule Malachi.MixProject do
       # Render ```mermaid fenced blocks as diagrams. GitHub renders them natively; ExDoc needs this hook.
       before_closing_body_tag: &before_closing_body_tag/1,
       extras: extras(),
+      # The changelog is written by the release job after the pull requests' CI, from their highlights and
+      # upgrade notes (#373): a reference there to a function later removed or hidden must not fail every docs
+      # build that follows until a released section is edited.
+      skip_undefined_reference_warnings_on: ["CHANGELOG.md"],
       groups_for_extras: groups_for_extras(),
       groups_for_modules: groups_for_modules()
     ]
@@ -151,6 +156,8 @@ defmodule Malachi.MixProject do
       "docs/guides/clustering-and-resharding.md": [title: "Clustering and re-sharding"],
       "docs/guides/operations.md": [title: "Operations"],
       "README.md": [title: "Overview"],
+      # Written by the release workflow in each version bump commit (scripts/changelog-prepend.sh, #373).
+      "CHANGELOG.md": [title: "Changelog"],
       "docs/ARCHITECTURE.md": [title: "Architecture"],
       "docs/AUTH_USER_MANAGEMENT.md": [title: "Auth and user management (ADR)"],
       # The companion docs/design/design-tokens.json is deliberately not an extra: ExDoc renders
@@ -164,6 +171,7 @@ defmodule Malachi.MixProject do
       "docs/DOCKER_TESTING.md": [title: "Testing with Docker"],
       "docs/MULTI_ARCH_BUILD.md": [title: "Multi-arch builds"],
       "docs/HOOKS.md": [title: "Git hooks"],
+      "docs/guides/release-communication.md": [title: "Release communication"],
       "docs/guides/running-the-node-loadtest.md": [title: "Running the Node.js load test"],
       "docs/guides/running-the-elixir-loadtest.md": [title: "Running the Elixir load test"],
       "docs/guides/running-chaos-drills.md": [title: "Running the chaos drills"],
@@ -200,7 +208,8 @@ defmodule Malachi.MixProject do
         "docs/guides/legal-hold.md",
         "docs/guides/clustering-and-resharding.md",
         "docs/guides/operations.md",
-        "README.md"
+        "README.md",
+        "CHANGELOG.md"
       ],
       Architecture: [
         "docs/ARCHITECTURE.md",
@@ -237,7 +246,7 @@ defmodule Malachi.MixProject do
         "docs/generated/chaos-results.md",
         "docs/generated/chaos-upgrade-results.md"
       ],
-      Development: ["docs/HOOKS.md"]
+      Development: ["docs/HOOKS.md", "docs/guides/release-communication.md"]
     ]
   end
 
@@ -356,6 +365,10 @@ defmodule Malachi.MixProject do
       {:credo, "~> 1.7.19", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4.7", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.40.3", only: :dev, runtime: false},
+      # The blog's Markdown (Malachi.Site.Markdown, #373). ExDoc already brings this exact package, but only in
+      # dev; the blog is staged by `mix docs` (dev) and tested in test, so both get it. Not in prod: nothing
+      # there renders Markdown.
+      {:earmark_parser, "~> 1.4.46", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18.5", only: :test},
       {:mix_audit, "~> 2.1.5", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.18.1", only: [:dev, :test], runtime: false},

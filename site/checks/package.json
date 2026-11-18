@@ -2,10 +2,11 @@
   "name": "malachi-landing-checks",
   "private": true,
   "type": "module",
-  "description": "Browser checks: the landing page (Lighthouse scores, 360px layout, JavaScript-off content, reduced motion) and the dashboard under its Content-Security-Policy.",
+  "description": "Browser checks: the landing page (Lighthouse scores, 360px layout, JavaScript-off content, reduced motion) and the dashboard under its Content-Security-Policy. render.mjs draws the blog's chart images to PNG.",
   "scripts": {
     "check": "node run.mjs",
-    "dashboard": "node dashboard.mjs"
+    "dashboard": "node dashboard.mjs",
+    "render": "node render.mjs"
   },
   "devDependencies": {
     "chrome-launcher": "1.2.0",

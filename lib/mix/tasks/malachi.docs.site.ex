@@ -6,6 +6,7 @@ defmodule Mix.Tasks.Malachi.Docs.Site do
 
       mix malachi.docs.site          # stage into doc/, after mix docs has written it
       mix malachi.docs.site --check  # fail when a check of the staged tree fails
+      mix malachi.docs.site --check --lfs-pointers  # the same, accepting blog images left as Git LFS pointers
 
   The `docs` alias runs this task after the ExDoc build, and CI runs `--check` after it. The page source is
   `site/`, the design kit (#263). Every value the page takes (the version, the licence, the base URL)
@@ -19,7 +20,7 @@ defmodule Mix.Tasks.Malachi.Docs.Site do
 
   alias Malachi.Site
 
-  @switches [check: :boolean, root: :string]
+  @switches [check: :boolean, root: :string, lfs_pointers: :boolean]
 
   @impl Mix.Task
   def run(argv) do
@@ -30,7 +31,9 @@ defmodule Mix.Tasks.Malachi.Docs.Site do
     root = Keyword.get(opts, :root, File.cwd!())
     config = Site.from_project(Mix.Project.config())
 
-    if Keyword.get(opts, :check, false), do: check(root, config), else: stage(root, config)
+    if Keyword.get(opts, :check, false),
+      do: check(root, config, lfs_pointers: Keyword.get(opts, :lfs_pointers, false)),
+      else: stage(root, config)
   end
 
   defp stage(root, config) do
@@ -38,11 +41,11 @@ defmodule Mix.Tasks.Malachi.Docs.Site do
     Mix.shell().info("staged the landing page at doc/index.html")
   end
 
-  defp check(root, config) do
-    case Site.verify(root, config) do
+  defp check(root, config, verify_opts) do
+    case Site.verify(root, config, verify_opts) do
       [] ->
         Mix.shell().info(
-          "landing page: staged and filled; every sitemap URL and every link to this site in llms.txt resolves"
+          "landing page: staged and filled; every sitemap URL and every link to this site in llms.txt resolves; the blog is staged and every post is finished"
         )
 
         :ok

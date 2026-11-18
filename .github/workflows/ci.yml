@@ -356,7 +356,23 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      
+
+      # The blog's and the kit's images live in Git LFS (#373), whose free quota counts every download, and a
+      # fork's pushed objects count against this repository's. So a fork's pull request never fetches them, and
+      # every run checks each image's pointer (outside LFS, over budget) before anything is downloaded.
+      - name: 🖼️ Cache the site's images
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .git/lfs/objects
+          key: site-images-${{ hashFiles('site/blog/**/*.png', 'site/kit/**/*.png') }}
+
+      - name: 🖼️ Fetch the site's images
+        env:
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          if [ "$FORK" = true ]; then scripts/site-images-pull.sh --check-only; else scripts/site-images-pull.sh; fi
+
       - name: 🔧 Setup Elixir
         id: beam
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
@@ -399,9 +415,12 @@ jobs:
       # The landing page is staged by the docs alias, and --check proves what it staged: the links, the sitemap,
       # the fonts and the page files. The landing-page job below takes the same tree to the browser.
       - name: 🏠 Check the landing page is staged
-        run: mix malachi.docs.site --check
+        # A fork's images are still their LFS pointers (see above), checked by size instead.
+        run: |
+          if [ "$FORK" = true ]; then mix malachi.docs.site --check --lfs-pointers; else mix malachi.docs.site --check; fi
         env:
           MIX_ENV: dev
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
 
       - name: 📤 Upload the built documentation
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

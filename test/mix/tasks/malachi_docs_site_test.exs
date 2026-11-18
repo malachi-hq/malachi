@@ -2,6 +2,8 @@ defmodule Mix.Tasks.Malachi.Docs.SiteTest do
   # Mix.shell/1 and File.cd!/2 are global process state, so this file is not async.
   use ExUnit.Case, async: false
 
+  alias Malachi.Site.Chart
+  alias Malachi.Test.SiteFixture
   alias Mix.Tasks.Malachi.Docs.Site
 
   @moduletag :tmp_dir
@@ -11,34 +13,9 @@ defmodule Mix.Tasks.Malachi.Docs.SiteTest do
     Mix.shell(Mix.Shell.Process)
     on_exit(fn -> Mix.shell(shell) end)
 
-    write(
-      root,
-      "site/ui_kits/website/index.html",
-      ~s(<meta name="malachi:landing" content="1"><p>{{version}} {{license}}</p>)
-    )
-
-    write(root, "site/ui_kits/website/llms.txt", "# Malachi\n\n> {{version}}\n")
-    write(root, "site/assets/fonts/bricolage.woff2", "font-bytes")
-    write_page_kit(root)
-    write(root, "doc/introduction.html", "<h1>Introduction</h1>")
-    write(root, "doc/index.html", ~s(<meta http-equiv="refresh" content="0; url=introduction.html">))
+    SiteFixture.minimal(root)
 
     %{root: root}
-  end
-
-  # The page files the kit ships beside the landing page. Their content is not checked here, only that they are staged.
-  defp write_page_kit(root) do
-    for rel <- ~w(ui_kits/website/site.css ui_kits/website/site.js ui_kits/website/scenes.js ui_kits/website/model.js
-                  styles.css tokens/base.css tokens/colors.css tokens/effects.css tokens/marketing.css
-                  tokens/spacing.css tokens/typography.css assets/logo-mark.svg assets/logo.svg) do
-      write(root, "site/" <> rel, "/* #{rel} */")
-    end
-  end
-
-  defp write(root, path, content) do
-    full = Path.join(root, path)
-    File.mkdir_p!(Path.dirname(full))
-    File.write!(full, content)
   end
 
   defp messages do
@@ -72,7 +49,7 @@ defmodule Mix.Tasks.Malachi.Docs.SiteTest do
     assert Site.run(["--root", root, "--check"]) == :ok
 
     assert messages() == [
-             "landing page: staged and filled; every sitemap URL and every link to this site in llms.txt resolves"
+             "landing page: staged and filled; every sitemap URL and every link to this site in llms.txt resolves; the blog is staged and every post is finished"
            ]
   end
 
@@ -82,6 +59,28 @@ defmodule Mix.Tasks.Malachi.Docs.SiteTest do
 
     error = assert_raise Mix.Error, fn -> Site.run(["--root", root, "--check"]) end
     assert error.message =~ "doc/sitemap.xml is missing"
+  end
+
+  test "--check --lfs-pointers accepts a blog chart image left as its Git LFS pointer (#373)", %{root: root} do
+    json = ~s({"name": "rate", "title": "Rate", "unit": "r/s", "points": [{"label": "v1.0.0", "value": 1}]})
+    {:ok, chart} = Chart.parse(json)
+
+    SiteFixture.write(
+      root,
+      "site/blog/2026-11-16-x.md",
+      "---\ntitle: T\ndate: 2026-11-16\nversions: [1.0.0]\nauthor: A\nsummary: S\n---\n\n```malachi-chart\n#{json}\n```\n"
+    )
+
+    SiteFixture.write(
+      root,
+      "site/blog/2026-11-16-x/#{Chart.png_name(chart, json)}",
+      "version https://git-lfs.github.com/spec/v1\noid sha256:00\nsize 9\n"
+    )
+
+    Site.run(["--root", root])
+    assert Site.run(["--root", root, "--check", "--lfs-pointers"]) == :ok
+    error = assert_raise Mix.Error, fn -> Site.run(["--root", root, "--check"]) end
+    assert error.message =~ "is a Git LFS pointer"
   end
 
   test "an argument the task does not take fails, rather than being ignored", %{root: root} do

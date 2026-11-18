@@ -5,6 +5,8 @@ defmodule Malachi.SiteTest do
 
   alias Malachi.Site
 
+  import Malachi.Test.SiteFixture, only: [write: 3, write_page_kit: 1]
+
   @moduletag :tmp_dir
 
   @config %{
@@ -43,21 +45,6 @@ defmodule Malachi.SiteTest do
     write(root, "doc/llms.txt", "# Malachi API\n\n- [Module](api.html)\n")
 
     %{root: root}
-  end
-
-  # The page files the kit ships beside the landing page. Their content is not checked here, only that they are staged.
-  defp write_page_kit(root) do
-    for rel <- ~w(ui_kits/website/site.css ui_kits/website/site.js ui_kits/website/scenes.js ui_kits/website/model.js
-                  styles.css tokens/base.css tokens/colors.css tokens/effects.css tokens/marketing.css
-                  tokens/spacing.css tokens/typography.css assets/logo-mark.svg assets/logo.svg) do
-      write(root, "site/" <> rel, "/* #{rel} */")
-    end
-  end
-
-  defp write(root, path, content) do
-    full = Path.join(root, path)
-    File.mkdir_p!(Path.dirname(full))
-    File.write!(full, content)
   end
 
   defp read(root, path), do: File.read!(Path.join(root, path))
@@ -181,6 +168,7 @@ defmodule Malachi.SiteTest do
                "https://example.test/malachi/",
                "https://example.test/malachi/api.html",
                "https://example.test/malachi/benchmarks/",
+               "https://example.test/malachi/blog/",
                "https://example.test/malachi/introduction.html"
              ]
     end
@@ -286,10 +274,12 @@ defmodule Malachi.SiteTest do
       stage!(root)
       File.rm!(Path.join(root, "doc/index.html"))
 
-      # The sitemap still lists the root URL, so it is reported too: a removed landing page is a dead entry.
+      # The sitemap still lists the root URL, and the blog links home to it, so both are reported too: a removed
+      # landing page is a dead entry and a dead link.
       assert Site.verify(root, @config) == [
                "doc/index.html is missing",
-               "doc/sitemap.xml links to https://example.test/malachi/, which is not in doc/"
+               "doc/sitemap.xml links to https://example.test/malachi/, which is not in doc/",
+               "doc/blog/index.html (../index.html) links to https://example.test/malachi/index.html, which is not in doc/"
              ]
     end
 
