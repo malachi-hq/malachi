@@ -7,7 +7,7 @@
  * A policy is one definition for the cluster (retention bounds and a placement spread attribute); a topic
  * is bound to a policy by name. A field left out of `define` inherits the cluster's global value, `--off`
  * turns that rule off, and 0 is a real budget (`--set retention.max_bytes=0` expires every sealed
- * segment).
+ * segment). `retention.max_records` has no global value: a policy that leaves it out keeps every record.
  *
  * Usage:
  *   node policy.js list

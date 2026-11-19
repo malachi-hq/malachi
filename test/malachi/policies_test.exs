@@ -226,6 +226,7 @@ defmodule Malachi.PoliciesTest do
                retention: %{
                  max_age_ms: {60_000, :global},
                  max_bytes: {nil, :global},
+                 max_records: {nil, :global},
                  segment_max_age_ms: {604_800_000, :global}
                },
                spread_by: {"rack", :global},
@@ -241,6 +242,7 @@ defmodule Malachi.PoliciesTest do
       assert bound.retention == %{
                max_age_ms: {60_000, :global},
                max_bytes: {0, :policy},
+               max_records: {nil, :global},
                segment_max_age_ms: {604_800_000, :global}
              }
 
@@ -250,6 +252,7 @@ defmodule Malachi.PoliciesTest do
                {"retention.max_age_ms", 60_000, :global},
                {"retention.max_bytes", 0, :policy},
                {"retention.segment_max_age_ms", 604_800_000, :global},
+               {"retention.max_records", nil, :global},
                {"spread_by", nil, :policy}
              ]
     end
@@ -266,6 +269,7 @@ defmodule Malachi.PoliciesTest do
       assert orphaned.retention == %{
                max_age_ms: {7_000, :unresolved_backstop},
                max_bytes: {nil, :unresolved_backstop},
+               max_records: {nil, :unresolved_backstop},
                segment_max_age_ms: {nil, :unresolved_backstop}
              }
     end
@@ -285,8 +289,8 @@ defmodule Malachi.PoliciesTest do
       assert Policies.reason_string({:unsupported_command, {:bind_topic_policy, 3}, 4, 3}) =~
                ~r/^unsupported_command: .*machine version 3 and this needs 4; finish the rolling upgrade/
 
-      assert Policies.reason_string({:unsupported_policy_field, "retention.max_records", 5, 4}) =~
-               ~r/^unsupported_policy_field: retention.max_records: .*needs 5/
+      assert Policies.reason_string({:unsupported_policy_field, "retention.future_bound", 5, 4}) =~
+               ~r/^unsupported_policy_field: retention.future_bound: .*needs 5/
 
       assert Policies.reason_string(:timeout) =~ ~r/^timeout: .*read it back/
       assert Policies.reason_string(:migrating) == "migrating"

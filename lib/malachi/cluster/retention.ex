@@ -3,15 +3,54 @@ defmodule Malachi.Cluster.Retention do
   Pure retention policy for **sealed** segments: the decision layer, no storage or timers.
 
   Given the control-plane `Malachi.Metadata`, the current time, and a policy, it returns the sealed
-  segment ids to expire. Two independent rules, unioned:
+  segment ids to expire. Independent rules, unioned (a segment any of them picks expires):
 
     * **age**. A sealed segment older than `:max_age_ms` (by its `sealed_at`) expires;
     * **size**. Per range, if the sealed segments total more than `:max_bytes`, the oldest expire
-      until the range is back under the limit.
+      until the range is back under the limit: the range keeps **at most** that many bytes;
+    * **record count**. Per range, the oldest sealed segment expires only while the sealed segments newer
+      than it still hold `:max_records` offsets: the range keeps **at least** that many (see below);
+    * **purge**. A sealed segment wholly below its range's logical start expires (see `expired/5`).
 
-  Size is scoped **per range** (the natural unit; a range's segments have contiguous offsets), age
-  is per segment. The **active** segment is never returned: it is still being written. A `nil`
-  bound disables that rule. `Malachi.Cluster.RetentionCoordinator` executes the returned ids.
+  Size and count are scoped **per range** (the natural unit; a range's segments have contiguous offsets),
+  age is per segment. The **active** segment is never returned: it is still being written, and its length
+  is unknown until it seals, so neither bound counts it. A `nil` bound disables that rule.
+  `Malachi.Cluster.RetentionCoordinator` executes the returned ids.
+
+  ## Record count
+
+  The count rule is the one place a bound reads "at least" rather than "at most", because it exists to keep
+  the last N records. Read as "at most", a range whose segments each hold hundreds of thousands of records
+  would expire every sealed segment under `max_records: 1_000` and keep only the active one. `0` keeps
+  nothing sealed, as `max_bytes: 0` does.
+
+  It counts **offsets**, from each segment's sealed `length`, and only those at or above the range's
+  logical start, so a purge does not inflate the count. An offset is a record unless a produce that failed
+  burned it, so a range can hold fewer readable records than the offsets counted; once log compaction
+  (#206) separates a segment's span from what survives in it, `records/2` is the one place to change.
+
+  A topic that split or merged keeps its retired ranges, and a reader of a range is served their history
+  before its own, filtered to the reader's key slice (`Malachi.Metadata` seals a parent before it creates
+  its children). A retired range's segments mix every child's keys, so counting them says nothing about any
+  one reader. The rule therefore treats the two kinds of range apart:
+
+    * a range nothing descends from (a live range, or the last of a sealed topic) keeps at least
+      `max_records` of its own offsets, whatever its ancestors keep;
+    * a range something descends from expires whole once every range descending from it with nothing
+      below it holds `max_records` on its own, since all of its history is then older than the last
+      `max_records` of every reader of those ranges; until then it is kept whole.
+
+  Every reader of the ranges as they stand at the sweep therefore keeps at least its last `max_records`. A
+  later split hands each child only its key slice of what its parent kept, so a reader of a range split
+  after the sweep can hold fewer until the child fills. A topic with R live ranges keeps up to R times the
+  bound plus one segment each, and the history of the retired ranges not yet covered; the number moves
+  with every split and merge, as the size rule's does. A reader's history can have a hole older than its
+  last `max_records`, where a retired range expired while an older one is kept for another reader. A
+  consumer steps over it as over a hole the size rule or a purge leaves, which, read from offset 0 after a
+  frontend restart, is passed without a skip being reported.
+
+  The record count bound is set by a policy only. The global policy never carries one (`effective/4`
+  reports it off), so a policy written before the field existed never inherits a rule that deletes.
 
   The bound applied to each range is its **topic's policy retention merged over the global policy**
   (the policy overrides only the keys it sets), or the global policy passed in when the topic points at
@@ -131,7 +170,7 @@ defmodule Malachi.Cluster.Retention do
   One sweep's decision at `now_ms`, in a single pass over the sealed segments: what to expire, and what
   a legal hold keeps.
 
-  Every range is judged by the same three rules (`expired/5`). The segments a rule picks in a range of a
+  Every range is judged by the same rules (`expired/5`). The segments a rule picks in a range of a
   held topic go to `held`, counted with their bytes on disk under the topic, instead of to `expired`; a
   held topic no rule would touch is not listed. So `expired` without the hold is `expired` with it plus
   exactly the segments `held` counts.
@@ -144,7 +183,10 @@ defmodule Malachi.Cluster.Retention do
           non_neg_integer() | nil
         ) :: plan()
   def plan(%Metadata{} = metadata, now_ms, global_policy, policies \\ %{}, unresolved_max_age_ms \\ nil) do
-    by_range =
+    # One pass over the ranges for the rules that judge a range alone, as the sweep always made. The count
+    # rule reads a topic's ranges together and runs after, only for the topics whose policy sets it, so a
+    # sweep where none does costs what it cost before the rule existed.
+    judged =
       metadata.segments
       |> Map.values()
       |> Enum.filter(&(&1.state == :sealed))
@@ -155,9 +197,17 @@ defmodule Malachi.Cluster.Retention do
         retention =
           bounds(effective(Metadata.topic_policy_name(metadata, topic), policies, global_policy, unresolved_max_age_ms))
 
-        {topic, Metadata.legal_hold(metadata, topic) != nil,
-         range_expired(metadata, range_id, sealed, now_ms, retention)}
+        oldest_first = Enum.sort_by(sealed, & &1.start_offset)
+        {range_id, retention, oldest_first, range_expired(metadata, range_id, oldest_first, now_ms, retention)}
       end)
+
+    by_count = expired_by_count(metadata, judged)
+
+    by_range =
+      for {range_id, _retention, _oldest_first, ids} <- judged do
+        topic = elem(range_id, 0)
+        {topic, Metadata.legal_hold(metadata, topic) != nil, ids ++ Map.get(by_count, range_id, [])}
+      end
 
     %{
       expired: Enum.uniq(for({_topic, false, ids} <- by_range, id <- ids, do: id)),
@@ -165,11 +215,10 @@ defmodule Malachi.Cluster.Retention do
     }
   end
 
-  # The ids the three rules pick in one range, a segment two rules pick listed twice: the sweep dedups
-  # once over every range, as it always has, and only a held range (rare) is deduplicated on its own.
-  defp range_expired(metadata, range_id, sealed, now_ms, retention) do
-    oldest_first = Enum.sort_by(sealed, & &1.start_offset)
-
+  # The ids the rules that judge one range alone pick in it, a segment two rules pick listed twice: the sweep
+  # dedups once over every range, as it always has, and only a held range (rare) is deduplicated on its own.
+  # The count rule is not among them, since it reads a range's descendants (`expired_by_count/2`).
+  defp range_expired(metadata, range_id, oldest_first, now_ms, retention) do
     expired_by_age(oldest_first, now_ms, Map.get(retention, :max_age_ms)) ++
       expired_by_size(oldest_first, Map.get(retention, :max_bytes)) ++
       expired_by_purge(oldest_first, logical_start(metadata, range_id))
@@ -211,14 +260,24 @@ defmodule Malachi.Cluster.Retention do
       iex> Malachi.Cluster.Retention.effective(nil, %{}, %{max_age_ms: 1_000}, nil)
       %{
         resolution: :none,
-        retention: %{max_age_ms: {1_000, :global}, max_bytes: {nil, :global}, segment_max_age_ms: {nil, :global}}
+        retention: %{
+          max_age_ms: {1_000, :global},
+          max_bytes: {nil, :global},
+          max_records: {nil, :global},
+          segment_max_age_ms: {nil, :global}
+        }
       }
 
       iex> policies = %{"keep" => %{retention: %{max_bytes: 0}}}
       iex> Malachi.Cluster.Retention.effective("keep", policies, %{max_age_ms: 1_000}, nil)
       %{
         resolution: :resolved,
-        retention: %{max_age_ms: {1_000, :global}, max_bytes: {0, :policy}, segment_max_age_ms: {nil, :global}}
+        retention: %{
+          max_age_ms: {1_000, :global},
+          max_bytes: {0, :policy},
+          max_records: {nil, :global},
+          segment_max_age_ms: {nil, :global}
+        }
       }
 
   """
@@ -253,7 +312,12 @@ defmodule Malachi.Cluster.Retention do
     end
   end
 
-  defp from_global(global_policy), do: Map.new(@retention_keys, &{&1, {Map.get(global_policy, &1), :global}})
+  defp from_global(global_policy), do: Map.new(@retention_keys, &{&1, {global_value(global_policy, &1), :global}})
+
+  # A record count bound comes from a policy only (see "Record count" in the module doc), whatever the global
+  # map carries, so no wiring mistake can make every policy that leaves it out inherit a rule that deletes.
+  defp global_value(_global_policy, :max_records), do: nil
+  defp global_value(global_policy, key), do: Map.get(global_policy, key)
 
   # The bounds alone, which is all the sweep needs.
   defp bounds(%{retention: retention}), do: Map.new(retention, fn {key, {value, _origin}} -> {key, value} end)
@@ -299,24 +363,118 @@ defmodule Malachi.Cluster.Retention do
   defp logical_start(metadata, range_id), do: metadata.ranges |> Map.get(range_id, %{}) |> Metadata.logical_start()
 
   defp expired_by_size(_segments, nil), do: []
+  defp expired_by_size(segments, max_bytes), do: expire_oldest(segments, &bytes/1, max_bytes, :at_most)
 
-  defp expired_by_size(segments, max_bytes) do
-    total = Enum.reduce(segments, 0, fn segment, acc -> acc + bytes(segment) end)
+  # The record count rule over every topic whose policy sets it, as `%{range_id => ids}`. Nothing is grouped
+  # or walked for a topic that does not set it, so a cluster that never uses the field pays nothing here.
+  defp expired_by_count(metadata, judged) do
+    counted =
+      for {{topic, _seq}, %{max_records: max_records}, _oldest_first, _ids} when is_integer(max_records) <- judged,
+          into: %{},
+          do: {topic, max_records}
 
-    # Drop the oldest segments (segments is oldest-first) until the range is back under max_bytes.
-    {expired, _running} =
-      Enum.reduce(segments, {[], total}, fn segment, {expired, running} ->
-        if running > max_bytes do
-          {[segment.id | expired], running - bytes(segment)}
-        else
-          {expired, running}
-        end
+    if counted == %{} do
+      %{}
+    else
+      ranges_by_topic =
+        metadata.ranges |> Map.values() |> Enum.filter(&Map.has_key?(counted, &1.topic)) |> Enum.group_by(& &1.topic)
+
+      sealed_by_range =
+        for {{topic, _seq} = range_id, _retention, oldest_first, _ids} <- judged,
+            Map.has_key?(counted, topic),
+            into: %{},
+            do: {range_id, oldest_first}
+
+      sealed_ids_by_topic = sealed_by_range |> Map.keys() |> Enum.group_by(&elem(&1, 0))
+
+      for {topic, max_records} <- counted, reduce: %{} do
+        picked ->
+          ranges = with_unknown_ranges(Map.get(ranges_by_topic, topic, []), Map.get(sealed_ids_by_topic, topic, []))
+          Map.merge(picked, topic_expired_by_count(ranges, sealed_by_range, max_records))
+      end
+    end
+  end
+
+  # A segment always names a range the metadata holds; one that does not is judged as a range nothing
+  # descends from, with no history, which is what the other rules already assume of it (`logical_start/2`).
+  defp with_unknown_ranges(ranges, sealed_range_ids) do
+    known = MapSet.new(ranges, & &1.id)
+
+    unknown =
+      for {topic, _seq} = range_id <- sealed_range_ids,
+          not MapSet.member?(known, range_id),
+          do: %{id: range_id, topic: topic, parents: []}
+
+    ranges ++ unknown
+  end
+
+  defp topic_expired_by_count(ranges, sealed_by_range, max_records) do
+    # The ranges nothing descends from, under each range they descend from. Parents lists are transitive (a
+    # split or a merge gives a child its parents' lists plus the parents themselves), so this is every
+    # descendant at the bottom of each line, however deep.
+    ancestors = for range <- ranges, parent <- range.parents, into: MapSet.new(), do: parent
+    leaves = Enum.reject(ranges, &MapSet.member?(ancestors, &1.id))
+
+    leaves_under =
+      for leaf <- leaves, parent <- leaf.parents, reduce: %{} do
+        index -> Map.update(index, parent, [leaf.id], &[leaf.id | &1])
+      end
+
+    readable = Map.new(leaves, &{&1.id, readable_offsets(Map.get(sealed_by_range, &1.id, []), &1)})
+
+    Map.new(ranges, fn range ->
+      sealed = Map.get(sealed_by_range, range.id, [])
+      {range.id, count_pick(range, sealed, Map.get(leaves_under, range.id, []), readable, max_records)}
+    end)
+  end
+
+  # A range nothing descends from keeps at least `max_records` of its own offsets.
+  defp count_pick(range, sealed, [], _readable, max_records) do
+    start = Metadata.logical_start(range)
+    expire_oldest(sealed, &records(&1, start), max_records, :at_least)
+  end
+
+  # A range something descends from goes whole once every range at the bottom of its lines holds
+  # `max_records` on its own: all of its history is then older than the last `max_records` of every reader
+  # of those ranges as they stand now (a later split hands each child only its slice of what they keep).
+  # Never in part, since its segments mix every child's key slice and no count of them is any one reader's.
+  defp count_pick(_range, sealed, leaves, readable, max_records) do
+    if Enum.all?(leaves, &(Map.fetch!(readable, &1) >= max_records)), do: Enum.map(sealed, & &1.id), else: []
+  end
+
+  defp readable_offsets(sealed, range) do
+    start = Metadata.logical_start(range)
+    Enum.reduce(sealed, 0, &(records(&1, start) + &2))
+  end
+
+  # The oldest-first walk the size and count bounds share (`segments` is oldest-first), stopping at the first
+  # segment it keeps, so what it returns is always a prefix of `segments`. `:at_most` drops while the
+  # segments left weigh more than `limit`; `:at_least` drops while the segments newer than the next one still
+  # weigh at least `limit`.
+  defp expire_oldest(segments, weight, limit, bound) do
+    total = Enum.reduce(segments, 0, &(weight.(&1) + &2))
+
+    {expired, _left} =
+      Enum.reduce_while(segments, {[], total}, fn segment, {expired, left} ->
+        newer = left - weight.(segment)
+
+        if drop?(bound, left, newer, limit),
+          do: {:cont, {[segment.id | expired], newer}},
+          else: {:halt, {expired, left}}
       end)
 
     expired
   end
 
+  defp drop?(:at_most, left, _newer, limit), do: left > limit
+  defp drop?(:at_least, _left, newer, limit), do: newer >= limit
+
   # The bytes the segment takes on disk, not its logical size: a size limit exists to bound the disk, so a
   # compressed segment counts what it actually occupies (`Malachi.Metadata.stored_bytes/1`).
   defp bytes(segment), do: Malachi.Metadata.stored_bytes(segment)
+
+  # The offsets of `segment` at or above its range's logical start `start`. A sealed segment's `length` is its
+  # offset span, which is its record count while nothing removes records from inside a segment (#206).
+  defp records(segment, start),
+    do: max(0, segment.start_offset + segment.length - max(segment.start_offset, start))
 end

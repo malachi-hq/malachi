@@ -52,7 +52,8 @@ defmodule Malachi.Cluster.Policy do
           optional(:retention) => %{
             optional(:max_age_ms) => non_neg_integer() | nil,
             optional(:max_bytes) => non_neg_integer() | nil,
-            optional(:segment_max_age_ms) => pos_integer() | nil
+            optional(:segment_max_age_ms) => pos_integer() | nil,
+            optional(:max_records) => non_neg_integer() | nil
           },
           optional(:spread_by) => String.t() | nil
         }
@@ -78,9 +79,9 @@ defmodule Malachi.Cluster.Policy do
 
   # Every field a policy can set, and the machine version that introduced each one.
   #
-  # This table is the only thing that grows when a field is added (#199 `max_records`, #200's pin caps
-  # and backlog quota, #201's default TTL, #206's cleanup mode), and every surface reads it: validation
-  # here, the wire codec, the mix task and the dashboard. A new field goes in at the release's new
+  # This table is the only thing that grows when a field is added (#199 added `max_records`; #200's pin
+  # caps and backlog quota, #201's default TTL and #206's cleanup mode are next), and every surface reads
+  # it: validation here, the wire codec, the mix task and the dashboard. A new field goes in at the release's new
   # `Malachi.Cluster.MachineVersion.code_version/0`, raised in the same change. That is what keeps a
   # replay deterministic: `{:define_policy, name, policy}` is validated against the group's EFFECTIVE
   # version, so while any member still runs older code, every member refuses the new field alike,
@@ -100,6 +101,11 @@ defmodule Malachi.Cluster.Policy do
       since: 6,
       min: 60_000
     },
+    # How many records' offsets a range keeps at least: the oldest sealed segment expires only while the
+    # sealed segments newer than it still hold this many (#199). Its floor is 0, which keeps nothing sealed,
+    # like `max_bytes: 0`. A policy is the only place it is set: there is no global value, so a policy written
+    # before this field existed never inherits a rule that deletes (see `Malachi.Cluster.Retention`).
+    %{name: "retention.max_records", path: [:retention, :max_records], type: :bound, since: 12},
     %{name: "spread_by", path: [:spread_by], type: :attribute, since: 3}
   ]
 

@@ -354,6 +354,7 @@ const POLICY_FIELDS = {
   'retention.max_age_ms': 'bound',
   'retention.max_bytes': 'bound',
   'retention.segment_max_age_ms': 'bound',
+  'retention.max_records': 'bound',
   spread_by: 'attribute',
 };
 

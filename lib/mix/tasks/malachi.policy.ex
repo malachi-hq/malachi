@@ -17,9 +17,11 @@ defmodule Mix.Tasks.Malachi.Policy do
   A field left out of `define` inherits the cluster's global value; `--off` turns that rule off for the
   policy's topics; `0` is a real budget (`--set retention.max_bytes=0` expires every sealed segment).
   The fields are `retention.max_age_ms`, `retention.max_bytes` (non-negative integers),
-  `retention.segment_max_age_ms` (how old an active segment may get before it is rolled, at least 60000)
-  and `spread_by` (a broker attribute key). `retention.segment_max_age_ms` needs control-plane machine
-  version 6.
+  `retention.segment_max_age_ms` (how old an active segment may get before it is rolled, at least 60000),
+  `retention.max_records` (how many offsets each range keeps at least, a non-negative integer with no
+  global value, so a policy that leaves it out keeps every record) and `spread_by` (a broker attribute
+  key). `retention.segment_max_age_ms` needs control-plane machine version 6, `retention.max_records`
+  version 12.
 
   `delete` refuses a policy a topic is still bound to, because such a topic stops expiring anything once
   the name no longer resolves; `--force` deletes it anyway. `bind` refuses a name the store does not

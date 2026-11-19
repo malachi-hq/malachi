@@ -64,9 +64,10 @@ defmodule Malachi.Cluster.MachineVersioningTest do
         # introduced `retention.segment_max_age_ms`, 7 where `Malachi.Metadata` made `{:set_segment_replicas, ...}`
         # a compare-and-swap on the expected replica set, 8 where `Malachi.Metadata` introduced the group
         # fence, 9 where `Malachi.Metadata` introduced the manual purge, 10 where `Malachi.Metadata`
-        # introduced the batch storage format, and 11 where `Malachi.Metadata` introduced the legal hold; each
-        # time the others moved with it, paying nothing but a no-op `{:machine_version, n - 1, n}`.
-        assert unquote(machine).version() == 11
+        # introduced the batch storage format, 11 where `Malachi.Metadata` introduced the legal hold, and 12
+        # where `Malachi.Cluster.Policy` introduced `retention.max_records`; each time the others moved with
+        # it, paying nothing but a no-op `{:machine_version, n - 1, n}`.
+        assert unquote(machine).version() == 12
 
         for version <- 0..unquote(machine).version(),
             do: assert(unquote(machine).which_module(version) == unquote(machine))
