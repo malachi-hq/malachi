@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": "2026-11-21T12:15:50Z",
+    "timestamp": "2026-11-22T12:29:38Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "eba2ccd",
-    "git_ref_date": "2026-11-20T12:41:32Z",
+    "git_ref": "b505649",
+    "git_ref_date": "2026-11-21T12:16:12Z",
     "malachi_version": "0.28.4",
     "hardware": {
       "cpu": "x86_64",
@@ -12,7 +12,7 @@
     }
   },
   "certification": "UPGRADE AND ROLLBACK CERTIFICATION",
-  "verdict": "passed",
+  "verdict": "failed",
   "replication_factor": 3,
   "events": [
     "p1: rolling every node from OLD to NEW (pin 11)",
@@ -25,11 +25,13 @@
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 76621,
-    "post_chaos_records_per_s": 4153
+    "acked_writes": 77004,
+    "post_chaos_records_per_s": 18083
   },
-  "failures": [],
-  "evidence_dir": null,
+  "failures": [
+    "a process crashed during the upgrade (see the logs above)"
+  ],
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261122T115527Z-b505649",
   "details": {
     "old_ref": "v0.28.4",
     "old_rule": "the newest release, whose code this tree changes",
@@ -45,9 +47,9 @@
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 22046,
-      "phase2": 16064,
-      "phase3": 38511
+      "phase1": 21709,
+      "phase2": 16216,
+      "phase3": 39079
     },
     "vnodes": 4,
     "vnode_rule": "sharded: v0.28.4 resumes its vnode members after a restart",
