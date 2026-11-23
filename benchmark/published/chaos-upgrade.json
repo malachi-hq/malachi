@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": "2026-11-22T12:29:38Z",
+    "timestamp": "2026-11-23T14:09:49Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "b505649",
-    "git_ref_date": "2026-11-21T12:16:12Z",
+    "git_ref": "2c414af",
+    "git_ref_date": "2026-11-22T12:29:59Z",
     "malachi_version": "0.28.4",
     "hardware": {
       "cpu": "x86_64",
@@ -25,13 +25,13 @@
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 77004,
-    "post_chaos_records_per_s": 18083
+    "acked_writes": 73682,
+    "post_chaos_records_per_s": 16137
   },
   "failures": [
-    "a process crashed during the upgrade (see the logs above)"
+    "no produce was acknowledged through p3: node 1 without the pin, while malachi1 was down (stuck at 7513)"
   ],
-  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261122T115527Z-b505649",
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261123T133419Z-2c414af",
   "details": {
     "old_ref": "v0.28.4",
     "old_rule": "the newest release, whose code this tree changes",
@@ -47,9 +47,9 @@
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 21709,
-      "phase2": 16216,
-      "phase3": 39079
+      "phase1": 21661,
+      "phase2": 16222,
+      "phase3": 35799
     },
     "vnodes": 4,
     "vnode_rule": "sharded: v0.28.4 resumes its vnode members after a restart",
