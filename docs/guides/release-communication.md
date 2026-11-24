@@ -82,8 +82,9 @@ These channels have no integration here: each post is published from the browser
 approves its text. Accounts, logins, terms and verification codes stay with the maintainer.
 
 - Medium and Hashnode: their import tools, from the post's URL, which keeps the canonical link.
-- The Malachi LinkedIn Page: a feed post per release, and an Article for a milestone, with "originally
-  published at" and the canonical link.
+- The [Malachi LinkedIn Page](https://www.linkedin.com/company/malachi-hq): a feed post per release, from `site/kit/linkedin-feed-post.md`,
+  and an Article for a milestone, from `site/kit/linkedin-article.md`, which carries "originally published at"
+  and the canonical link.
 - Elixir Forum, ElixirStatus (the source of Elixir Weekly and Elixir Radar), Reddit, Bluesky and X.
 
 ## A first round, done once

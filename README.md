@@ -25,6 +25,7 @@ membership, self-healing, and rack-aware placement.
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/malachi-hq/malachi/badge)](https://scorecard.dev/viewer/?uri=github.com/malachi-hq/malachi)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Sponsor](https://img.shields.io/badge/sponsor-❤-ff69b4)](https://github.com/sponsors/HectorIFC)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Malachi-0A66C2)](https://www.linkedin.com/company/malachi-hq)
 
 ## 💖 Sponsors
 

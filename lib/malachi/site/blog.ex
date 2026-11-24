@@ -386,6 +386,7 @@ defmodule Malachi.Site.Blog do
     <a href="index.html">Blog</a>
     #{feed_foot}<a href="../introduction.html">Docs</a>
     <a href="https://github.com/malachi-hq/malachi/releases">Releases</a>
+    <a href="https://www.linkedin.com/company/malachi-hq">LinkedIn</a>
     </nav>
     </div>
     </footer>
