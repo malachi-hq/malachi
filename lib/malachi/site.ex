@@ -1,5 +1,6 @@
 defmodule Malachi.Site do
   alias Malachi.Site.Blog
+  alias Malachi.Site.Newsletter
 
   @moduledoc """
   Stages the landing page at the root of the published documentation site, and the files that go with it.
@@ -33,7 +34,8 @@ defmodule Malachi.Site do
 
   The blog (#373) is staged with the rest, and `verify/3` adds its checks, which `Malachi.Site.Blog` lists: every
   post finished and readable, its images in place and within budget, the index and the Atom feed staged, and the
-  links of its pages resolving on this site.
+  links of its pages resolving on this site. With a `newsletter:` in `mix.exs`, the blog's pages carry its form
+  and `blog/privacy.html` its privacy note (`Malachi.Site.Newsletter`).
   """
 
   @source "site"
@@ -112,7 +114,8 @@ defmodule Malachi.Site do
       version: project[:version],
       licenses: get_in(project, [:package, :licenses]),
       site_url: project[:site_url],
-      main: get_in(project, [:docs, :main])
+      main: get_in(project, [:docs, :main]),
+      newsletter: project[:newsletter]
     }
   end
 
@@ -177,6 +180,7 @@ defmodule Malachi.Site do
   @spec stage(Path.t(), map()) :: :ok
   def stage(root, config) do
     meta = metadata(config)
+    newsletter = Newsletter.from_config!(config)
     doc = Path.join(root, "doc")
     main = config.main <> ".html"
 
@@ -198,7 +202,7 @@ defmodule Malachi.Site do
     fonts = font_files!(root)
     # Before the sitemap, which lists every page in doc/, the blog's among them. The blog refuses a post it
     # cannot read before it writes anything.
-    :ok = Blog.stage(root, doc, meta, &write!(doc, &1, &2))
+    :ok = Blog.stage(root, doc, meta, &write!(doc, &1, &2), newsletter)
     sitemap_xml = sitemap(doc, meta)
 
     File.mkdir_p!(Path.join(doc, "fonts"))
@@ -265,7 +269,7 @@ defmodule Malachi.Site do
       staged_font_errors(root, doc) ++
       sitemap_errors(doc, meta) ++
       llms_errors(doc, meta) ++
-      Blog.errors(root, doc, meta, opts)
+      Blog.errors(root, doc, meta, Keyword.put(opts, :newsletter, Newsletter.from_config!(config)))
   end
 
   @doc false

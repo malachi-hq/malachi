@@ -87,6 +87,21 @@ approves its text. Accounts, logins, terms and verification codes stay with the 
   and the canonical link.
 - Elixir Forum, ElixirStatus (the source of Elixir Weekly and Elixir Radar), Reddit, Bluesky and X.
 
+## The newsletter
+
+The newsletter sends `blog/feed.xml` by email, through the provider's RSS-to-email campaign. The blog carries
+its sign-up form only once it is configured, so turning it on takes these steps, in this order:
+
+1. The maintainer creates the provider's account, with RSS-to-email on the blog's feed, double opt-in, and
+   open and click tracking turned off where the provider allows it.
+2. The provider generates the embedded form's code. The form must post as plain HTML, with no script.
+3. The maintainer writes the privacy note in `site/newsletter/privacy.md` (headings from `##`): who sends the
+   email, what the provider keeps and tracks, and how to unsubscribe and ask for deletion.
+4. The `@newsletter` setting in `mix.exs` takes the form's values: `action`, `email_field`, `consent_field`
+   (with `consent_value` when it is not `1`) and the `hidden` fields, as `Malachi.Site.Newsletter` describes.
+
+`mix malachi.docs.site --check` then requires the privacy note and the configured form on every blog page.
+
 ## A first round, done once
 
 - A thread in the Elixir Forum's libraries category.
