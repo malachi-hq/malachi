@@ -2,7 +2,8 @@
 
 What Malachi publishes about itself outside the repository, kept beside the site so it is versioned with it
 (issue #373). The maintainer writes every sentence: each `<!-- narrative ... -->` marker below is a place for
-that text, and nothing here is published until it is filled in and approved.
+that text, and nothing is published until it is filled in and approved. The texts already on the Page are
+copied here as published.
 
 ## Images
 
@@ -24,9 +25,34 @@ names its admins.
 
 | Field | Limit | Text |
 | --- | --- | --- |
-| Tagline | 120 characters | <!-- narrative: the tagline --> |
-| About | 2,000 characters | <!-- narrative: the About text --> |
+| Tagline | 120 characters | Nodes fail. Topics split. Not one record lost or copied. |
+| About | 2,000 characters | below |
 | Hashtags | 3 | <!-- narrative: up to three hashtags --> |
+
+The About text, as published:
+
+```text
+Malachi is an open source log broker for systems that cannot afford to lose a record or deliver it twice.
+
+Nodes fail. Disks fill up. Topics outgrow their partitions. Malachi is built for those moments: every write is replicated through Raft consensus, topics reshard while producers keep writing, and a restarted node rejoins without losing what it acknowledged.
+
+It is written in Elixir and runs on the BEAM, the runtime built for systems that have to stay up.
+
+What every release ships with, in the open:
+• Benchmarks measured on that release's exact code, with the hardware and the run-to-run noise
+• Chaos drills that kill nodes, break storage and roll out bad configs, with their results published
+• A changelog and upgrade notes
+
+Secure by default: mTLS, OIDC sign-in and per-topic access control.
+
+Malachi is an independent implementation inspired by the public design of NorthGuard. It is not affiliated with or endorsed by LinkedIn.
+
+Follow the Page for release results and the engineering behind them.
+Code, docs and results: https://malachi-hq.github.io/malachi
+```
+
+Specialties: Distributed systems, Event streaming, Message broker, Log storage, Elixir, Erlang/OTP, Raft
+consensus, Open source, Observability, Chaos engineering, Performance benchmarking. Founded: 2026.
 
 Writing rules, for the About text above all: Malachi is an independent implementation inspired by the public
 design of NorthGuard, with no affiliation with LinkedIn implied, and no claim that either system is better.
