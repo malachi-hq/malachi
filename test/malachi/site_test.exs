@@ -5,7 +5,7 @@ defmodule Malachi.SiteTest do
 
   alias Malachi.Site
 
-  import Malachi.Test.SiteFixture, only: [write: 3, write_page_kit: 1]
+  import Malachi.Test.SiteFixture, only: [write: 3, write_page_kit: 1, write_social_preview: 1, png: 2]
 
   @moduletag :tmp_dir
 
@@ -37,6 +37,7 @@ defmodule Malachi.SiteTest do
     write(root, "site/assets/fonts/bricolage.woff2", "font-bytes")
     write(root, "site/assets/fonts/OFL.txt", "SIL Open Font License")
     write_page_kit(root)
+    write_social_preview(root)
 
     write(root, "doc/index.html", @redirect)
     write(root, "doc/introduction.html", "<h1>Introduction</h1>")
@@ -242,10 +243,89 @@ defmodule Malachi.SiteTest do
       assert snapshot(root) == first
     end
 
+    test "stages the kit's social preview, byte for byte, where the landing page's og:image names it", %{root: root} do
+      stage!(root)
+
+      assert read(root, "doc/kit/social-preview.png") == read(root, "site/kit/social-preview.png")
+    end
+
+    test "refuses when the social preview is missing, and leaves doc/ as it was", %{root: root} do
+      File.rm!(Path.join(root, "site/kit/social-preview.png"))
+      before = snapshot(root)
+
+      error = assert_raise Mix.Error, fn -> stage!(root) end
+      assert error.message =~ "site/kit/social-preview.png is missing"
+      assert error.message =~ "site/kit/render.sh"
+      assert snapshot(root) == before
+    end
+
     defp snapshot(root) do
       Path.wildcard(Path.join(root, "doc/**/*"))
       |> Enum.filter(&File.regular?/1)
       |> Map.new(&{&1, File.read!(&1)})
+    end
+  end
+
+  describe "verify/2, the social preview" do
+    @preview "doc/kit/social-preview.png"
+    @pointer "version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 14000\n"
+
+    test "reports the staged preview when it is missing", %{root: root} do
+      stage!(root)
+      File.rm!(Path.join(root, @preview))
+
+      assert "#{@preview} is missing" in Site.verify(root, @config)
+    end
+
+    test "reports a Git LFS pointer, and accepts it with lfs_pointers: true", %{root: root} do
+      stage!(root)
+      write(root, @preview, @pointer)
+
+      assert "#{@preview} is a Git LFS pointer, not the image: run git lfs pull" in Site.verify(root, @config)
+      assert Site.verify(root, @config, lfs_pointers: true) == []
+    end
+
+    test "reports a PNG of another size, and a file that is not a PNG", %{root: root} do
+      stage!(root)
+
+      for content <- [png(1200, 630), png(640, 1280), "GIF89a not a png at all"] do
+        write(root, @preview, content)
+
+        assert "#{@preview} is not a 1280x640 PNG: run site/kit/render.sh" in Site.verify(root, @config),
+               inspect(content)
+      end
+    end
+
+    test "reports a preview over the 300 KB budget, at the budget it passes", %{root: root} do
+      stage!(root)
+      header = png(1280, 640)
+
+      write(root, @preview, header <> :binary.copy(<<0>>, 300 * 1024 - byte_size(header)))
+      assert Site.verify(root, @config) == []
+
+      write(root, @preview, header <> :binary.copy(<<0>>, 300 * 1024 + 1 - byte_size(header)))
+      assert "#{@preview} is 300 KB; the social preview is at most 300 KB" in Site.verify(root, @config)
+    end
+
+    test "reports an og:image or twitter:image on this site that is not staged, and passes another site's", %{
+      root: root
+    } do
+      stage!(root)
+      html = read(root, "doc/index.html")
+
+      write(
+        root,
+        "doc/index.html",
+        html <>
+          ~s(<meta property="og:image" content="https://example.test/malachi/kit/missing.png">) <>
+          ~s(<meta name="twitter:image" content="https://example.test/malachi/kit/gone.png">) <>
+          ~s(<meta property="og:image" content="https://cdn.example.org/x.png">)
+      )
+
+      assert Site.verify(root, @config) == [
+               "doc/index.html (image) links to https://example.test/malachi/kit/missing.png, which is not in doc/",
+               "doc/index.html (image) links to https://example.test/malachi/kit/gone.png, which is not in doc/"
+             ]
     end
   end
 
@@ -1426,6 +1506,19 @@ defmodule Malachi.SiteTest do
       assert html =~ ~s(<link rel="canonical" href="https://example.test/malachi/">)
       assert html =~ ~s(<meta property="og:url" content="https://example.test/malachi/">)
       assert html =~ ~s(<meta property="og:title")
+    end
+
+    test "previews with the kit's social preview, which it stages, on Open Graph and on X", %{root: root} do
+      stage!(root)
+      html = read(root, "doc/index.html")
+      url = "https://example.test/malachi/kit/social-preview.png"
+
+      assert html =~ ~s(<meta property="og:image" content="#{url}">)
+      assert html =~ ~s(<meta property="og:image:width" content="1280">)
+      assert html =~ ~s(<meta property="og:image:height" content="640">)
+      assert html =~ ~s(<meta name="twitter:card" content="summary_large_image">)
+      assert html =~ ~s(<meta name="twitter:image" content="#{url}">)
+      assert File.regular?(Path.join(root, "doc/kit/social-preview.png"))
     end
 
     test "its JSON-LD block parses and carries the version and licence from the config", %{root: root} do

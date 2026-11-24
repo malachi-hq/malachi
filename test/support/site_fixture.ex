@@ -22,9 +22,17 @@ defmodule Malachi.Test.SiteFixture do
     :ok
   end
 
+  @doc "The first bytes of a PNG of the given size: the signature and the IHDR chunk that declares it."
+  @spec png(pos_integer(), pos_integer()) :: binary()
+  def png(width, height), do: <<137, "PNG", 13, 10, 26, 10, 13::32, "IHDR", width::32, height::32, 8, 6, 0, 0, 0>>
+
+  @doc "The kit's social preview, which the landing page stages, as a PNG of the size the site checks."
+  @spec write_social_preview(Path.t()) :: :ok
+  def write_social_preview(root), do: write(root, "site/kit/social-preview.png", png(1280, 640))
+
   @doc """
   The smallest checkout that stages and verifies: a landing page and llms.txt with placeholders, one font, the
-  page kit, and the ExDoc pages they link to.
+  page kit, the social preview, and the ExDoc pages they link to.
   """
   @spec minimal(Path.t()) :: :ok
   def minimal(root) do
@@ -37,6 +45,7 @@ defmodule Malachi.Test.SiteFixture do
     write(root, "site/ui_kits/website/llms.txt", "# Malachi\n\n> {{version}}\n")
     write(root, "site/assets/fonts/bricolage.woff2", "font-bytes")
     write_page_kit(root)
+    write_social_preview(root)
     write(root, "doc/introduction.html", "<h1>Introduction</h1>")
     write(root, "doc/index.html", ~s(<meta http-equiv="refresh" content="0; url=introduction.html">))
   end
