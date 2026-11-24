@@ -85,6 +85,7 @@ defmodule Malachi.Site.BlogTest do
       assert page =~ "<svg"
       assert page =~ ~s(<link rel="alternate" type="application/atom+xml" title="Malachi blog" href="feed.xml">)
       assert page =~ ~s(<link rel="stylesheet" href="../blog.css">)
+      assert page =~ ~s(<a href="https://www.linkedin.com/company/malachi-hq">LinkedIn</a>)
       assert File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/#{png}"))
       assert File.exists?(Path.join(root, "doc/blog.css"))
       assert verify(root) == []
