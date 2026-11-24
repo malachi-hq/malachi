@@ -522,7 +522,10 @@ defmodule Malachi.Site.Blog do
     end
   end
 
-  defp lfs_pointer?(path) do
+  @doc false
+  # For Malachi.Site, which checks the kit's social preview the same way.
+  @spec lfs_pointer?(Path.t()) :: boolean()
+  def lfs_pointer?(path) do
     case File.open(path, [:read, :binary], &IO.binread(&1, byte_size(@lfs_pointer))) do
       {:ok, @lfs_pointer} -> true
       _ -> false

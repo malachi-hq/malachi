@@ -26,6 +26,11 @@ defmodule Malachi.Site do
   other sites. Fonts
   under `/fonts/` on this host are checked, and so is every font this site serves, whichever folder holds it.
 
+  The social preview (`site/kit/social-preview.png`, #373) is staged at `doc/kit/social-preview.png`, where the
+  landing page's `og:image` names it, and `verify/3` checks that it is the image itself (not its Git LFS pointer,
+  unless `lfs_pointers: true`), 1280x640 and within 300 KB, and that every `og:image` and `twitter:image` on the
+  landing page resolves in `doc/`.
+
   The blog (#373) is staged with the rest, and `verify/3` adds its checks, which `Malachi.Site.Blog` lists: every
   post finished and readable, its images in place and within budget, the index and the Atom feed staged, and the
   links of its pages resolving on this site.
@@ -55,6 +60,13 @@ defmodule Malachi.Site do
     "assets/logo-mark.svg",
     "assets/logo.svg"
   ]
+  # The image a link to the site previews with (#373): drawn in site/kit by render.sh, stored in Git LFS, and staged
+  # where the landing page's og:image names it. Its size is the one render.sh draws, its budget the kit's.
+  @social_preview "kit/social-preview.png"
+  @social_preview_size {1280, 640}
+  @social_preview_max_bytes 300 * 1024
+  # The landing page's image tags: each names a file this site must serve, or another site's.
+  @image_meta ~r{<meta\s+(?:property="og:image"|name="twitter:image")\s+content="([^"]*)"}
   @landing_marker ~s(<meta name="malachi:landing" content="1">)
   @summary_begin "<!-- malachi:summary begin -->"
   @summary_end "<!-- malachi:summary end -->"
@@ -152,14 +164,15 @@ defmodule Malachi.Site do
   end
 
   @doc """
-  Writes the landing page, the fonts, `llms.txt`, `robots.txt` and `sitemap.xml` into `root/doc`.
+  Writes the landing page, the fonts, the social preview, `llms.txt`, `robots.txt` and `sitemap.xml` into `root/doc`.
 
   The checks run before anything is written. Each file is written to a temporary name and then renamed into
   place, so no file is left half-written; a run interrupted between two renames can leave `doc/` partly
   staged. Running `stage` again completes such a run, unless `doc/llms.txt` already holds a summary from
   another version, which needs `mix docs` first. Raises when `doc/<main>.html` is missing, because the landing
   page links to it; when `site/fonts` holds no font, or two fonts share a name ignoring case, or a font or the
-  fonts folder cannot be read or listed; when `index.html`, `llms.txt` or the licence in `mix.exs` cannot be used.
+  fonts folder cannot be read or listed; when `site/kit/social-preview.png` is missing; when `index.html`,
+  `llms.txt` or the licence in `mix.exs` cannot be used.
   """
   @spec stage(Path.t(), map()) :: :ok
   def stage(root, config) do
@@ -169,6 +182,14 @@ defmodule Malachi.Site do
 
     unless File.exists?(Path.join(doc, main)) do
       Mix.raise("doc/#{main} is missing, so the landing page would link to nothing. Run mix docs first.")
+    end
+
+    preview = Path.join([root, @source, @social_preview])
+
+    unless File.regular?(preview) do
+      Mix.raise(
+        "#{@source}/#{@social_preview} is missing, so links to the site would preview no image. Run site/kit/render.sh."
+      )
     end
 
     landing = root |> read!(@landing_source) |> fill(meta) |> stage_paths() |> with_marker()
@@ -187,6 +208,8 @@ defmodule Malachi.Site do
     end
 
     remove_stale_fonts(doc, fonts)
+    File.mkdir_p!(Path.join(doc, Path.dirname(@social_preview)))
+    replace!(Path.join(doc, @social_preview), &File.cp!(preview, &1))
     write!(doc, "index.html", landing)
     write!(doc, "llms.txt", llms)
     for {dest, text} <- pages, do: write!(doc, dest, text)
@@ -234,6 +257,8 @@ defmodule Malachi.Site do
     doc = Path.join(root, "doc")
 
     index_errors(doc, meta) ++
+      image_meta_errors(doc, meta) ++
+      social_preview_errors(doc, Keyword.get(opts, :lfs_pointers, false)) ++
       page_errors(doc) ++
       css_url_errors(doc, site_path(meta)) ++
       ensure_file(doc, "robots.txt") ++
@@ -248,6 +273,52 @@ defmodule Malachi.Site do
   # in doc/ or names another site. The same reading of a URL as the sitemap and llms.txt checks.
   @spec link_errors(Path.t(), map(), String.t(), String.t()) :: [String.t()]
   def link_errors(doc, meta, url, where), do: unresolved(doc, meta, url, where)
+
+  # Every og:image and twitter:image on the landing page names a file staged in doc/, or another site's.
+  defp image_meta_errors(doc, meta) do
+    case File.read(Path.join(doc, "index.html")) do
+      {:ok, html} ->
+        for [_, url] <- Regex.scan(@image_meta, html),
+            error <- unresolved(doc, meta, url, "doc/index.html (image)"),
+            do: error
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  # The staged preview is the image itself, at the size render.sh draws and within the kit's budget. A fork's pull
+  # request never fetches LFS images (`lfs_pointers: true`), and site-images-pull.sh --check-only has checked the
+  # pointer's declared size instead.
+  defp social_preview_errors(doc, pointers?) do
+    shown = "doc/#{@social_preview}"
+    path = Path.join(doc, @social_preview)
+    {w, h} = @social_preview_size
+
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, size: size}} when size > @social_preview_max_bytes ->
+        ["#{shown} is #{div(size, 1024)} KB; the social preview is at most #{div(@social_preview_max_bytes, 1024)} KB"]
+
+      {:ok, %File.Stat{type: :regular}} ->
+        cond do
+          Blog.lfs_pointer?(path) and pointers? -> []
+          Blog.lfs_pointer?(path) -> ["#{shown} is a Git LFS pointer, not the image: run git lfs pull"]
+          png_size(path) == {w, h} -> []
+          true -> ["#{shown} is not a #{w}x#{h} PNG: run site/kit/render.sh"]
+        end
+
+      _ ->
+        ["#{shown} is missing"]
+    end
+  end
+
+  # The width and height a PNG's header declares, or nil for a file that is not a PNG.
+  defp png_size(path) do
+    case File.open(path, [:read, :binary], &IO.binread(&1, 24)) do
+      {:ok, <<137, "PNG", 13, 10, 26, 10, _len::32, "IHDR", w::32, h::32>>} -> {w, h}
+      _ -> nil
+    end
+  end
 
   @css_url ~r/url\(\s*["']?([^"')\s]+)["']?\s*\)/
 

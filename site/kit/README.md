@@ -11,7 +11,7 @@ copied here as published.
 | --- | --- | --- | --- |
 | `logo.svg` | `logo.png` | 300x300 | the LinkedIn Page's logo |
 | `linkedin-cover.svg` | `linkedin-cover.png` | 1128x191 | the LinkedIn Page's cover |
-| `social-preview.svg` | `social-preview.png` | 1280x640 | the repository's social preview, and the site's `og:image` once step 8 of #373 stages it |
+| `social-preview.svg` | `social-preview.png` | 1280x640 | the repository's social preview, and the site's `og:image` (staged at `doc/kit/social-preview.png`) |
 
 `site/kit/render.sh` draws the PNGs from their sources with the Playwright pinned in `site/checks`. The PNGs
 are stored in Git LFS and checked against a 300 KB budget by `scripts/site-images-pull.sh`. The images carry

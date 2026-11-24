@@ -5,8 +5,8 @@
 #
 #   logo.svg            -> logo.png            300x300    the LinkedIn Page's logo
 #   linkedin-cover.svg  -> linkedin-cover.png  1128x191   the LinkedIn Page's cover
-#   social-preview.svg  -> social-preview.png  1280x640   the repository's social preview (the site's og:image
-#                                                          once step 8 of #373 stages it)
+#   social-preview.svg  -> social-preview.png  1280x640   the repository's social preview and the site's
+#                                                          og:image (Malachi.Site stages it)
 #
 # Each is drawn by site/checks/render.mjs, the Playwright already pinned in site/checks (JavaScript off, every
 # request refused); install it once with `cd site/checks && npm ci && npx playwright install --only-shell
