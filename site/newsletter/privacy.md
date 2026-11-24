@@ -22,8 +22,8 @@ advertising, no profiling, and your address is never sold or shared with anyone 
 - The technical data our email provider records with your subscription, such as the language it uses for its
   emails to you.
 
-You do not have to subscribe to read the blog. Every post is on this site and in its
-[Atom feed](feed.xml), which needs no email address.
+You do not have to subscribe to read the blog. Every post is on [the blog](index.html), which also offers an
+Atom feed that needs no email address.
 
 ## The legal basis
 
