@@ -117,6 +117,7 @@ Hacker News, Lobsters and r/apachekafka wait until a benchmark with a published 
 ## Writing rules
 
 - The maintainer writes every public text. The generator writes data and placeholders only.
+- Every public text is in English, the provider's emails and pages included.
 - Malachi is described as an independent implementation inspired by NorthGuard's public design. Nothing
   implies an affiliation with LinkedIn, and nothing says that either system is better than the other.
 - A number cites the hardware and the commit that measured it, and a difference within the runners' noise is
