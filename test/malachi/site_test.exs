@@ -363,6 +363,44 @@ defmodule Malachi.SiteTest do
              ]
     end
 
+    test "reports a link on the landing page to a page of this site that was never written", %{root: root} do
+      stage!(root)
+      write(root, "doc/index.html", read(root, "doc/index.html") <> ~s(<a class="x" href="nope.html">Nope</a>))
+
+      assert Site.verify(root, @config) == ["doc/index.html links to nope.html, which is not in doc/"]
+    end
+
+    test "a link to a folder resolves through its index.html, and is reported without one", %{root: root} do
+      stage!(root)
+      html = read(root, "doc/index.html")
+
+      write(root, "doc/index.html", html <> ~s(<a href="benchmarks/">Benchmarks</a><a href="blog/">Blog</a>))
+      assert Site.verify(root, @config) == []
+
+      File.mkdir_p!(Path.join(root, "doc/empty"))
+      write(root, "doc/index.html", html <> ~s(<A HREF="empty/">Empty</A>))
+      assert Site.verify(root, @config) == ["doc/index.html links to empty/, which is not in doc/"]
+    end
+
+    test "passes over fragments and links to other sites on the landing page", %{root: root} do
+      stage!(root)
+
+      links =
+        ~s(<a href="#main">Skip</a><a href="https://github.com/malachi-hq/malachi">GitHub</a>) <>
+          ~s(<a href="mailto:someone@example.test">Mail</a><a href="https://example.test/other/">Other</a>)
+
+      write(root, "doc/index.html", read(root, "doc/index.html") <> links)
+
+      assert Site.verify(root, @config) == []
+    end
+
+    test "reports a relative link on the landing page that climbs out of the site", %{root: root} do
+      stage!(root)
+      write(root, "doc/index.html", read(root, "doc/index.html") <> ~s(<a href="../elsewhere.html">Out</a>))
+
+      assert Site.verify(root, @config) == ["doc/index.html links to ../elsewhere.html, which leaves this site"]
+    end
+
     test "reports a font the landing page references and the staged tree does not ship", %{root: root} do
       stage!(root)
       write(root, "doc/index.html", read(root, "doc/index.html") <> ~s(<link href="fonts/missing.woff2">))
@@ -1033,11 +1071,11 @@ defmodule Malachi.SiteTest do
       assert Enum.any?(Site.verify(root, @config), &(&1 =~ "fonts/missing.woff2, which is not in doc/"))
     end
 
-    test "a link that is not a font is not reported, even when this check cannot read it", %{root: root} do
+    test "a link this check cannot read is reported once, as a link and not as a font", %{root: root} do
       stage!(root)
       write(root, "doc/index.html", read(root, "doc/index.html") <> ~s(<a href="https:about">x</a>))
 
-      assert Site.verify(root, @config) == []
+      assert Site.verify(root, @config) == ["doc/index.html links to https:about, which this check cannot read"]
     end
 
     test "a backslash in a root-relative link in llms.txt is another site's path, as the forward slash is", %{
@@ -1260,11 +1298,11 @@ defmodule Malachi.SiteTest do
       assert Enum.any?(Site.verify(root, @config), &(&1 =~ "dist/gone.woff2, which is not in doc/"))
     end
 
-    test "a link to a page outside fonts/ that is not a font is not reported", %{root: root} do
+    test "a missing page outside fonts/ is reported once, as a link and not as a font", %{root: root} do
       stage!(root)
       write(root, "doc/index.html", read(root, "doc/index.html") <> ~s[<a href="dist/notes.html">x</a>])
 
-      assert Site.verify(root, @config) == []
+      assert Site.verify(root, @config) == ["doc/index.html links to dist/notes.html, which is not in doc/"]
     end
 
     test "a list-item reference definition in llms.txt is read as a link, and its target checked", %{root: root} do
@@ -1567,6 +1605,18 @@ defmodule Malachi.SiteTest do
       stage!(root)
 
       assert read(root, "doc/index.html") =~ ~s(href="introduction.html")
+    end
+
+    test "links the blog from its top navigation and its footer, and the link resolves", %{root: root} do
+      stage!(root)
+      html = read(root, "doc/index.html")
+
+      for nav <- [~r{<nav class="top-nav".*?</nav>}s, ~r{<nav class="foot-nav".*?</nav>}s] do
+        [block] = Regex.run(nav, html)
+        assert block =~ ~r{<a[^>]*href="blog/"[^>]*>Blog</a>}, "no Blog link in #{inspect(nav)}"
+      end
+
+      refute Enum.any?(Site.verify(root, @config), &(&1 =~ "doc/index.html links to"))
     end
 
     test "the staged marketing stylesheet reaches the font in doc/fonts/, not a path that is not staged", %{root: root} do
