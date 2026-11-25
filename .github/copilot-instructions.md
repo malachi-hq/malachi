@@ -2,8 +2,8 @@
 
 ## Project overview
 
-Malachi is an open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-storage
-architecture: a CP (consistent, partition-tolerant), horizontally-scalable **log broker**. Clients speak
+Malachi is an open-source, 100% Elixir independent implementation inspired by the public design of LinkedIn's
+**NorthGuard** log storage, not affiliated with LinkedIn: a CP (consistent, partition-tolerant), horizontally-scalable **log broker**. Clients speak
 **topics, keys, and opaque cursors**, never partitions or offsets, so the broker can split, merge, and
 restripe its storage underneath without breaking clients. The control plane is replicated by quorum (Raft
 via `ra`); cluster membership uses SWIM.

@@ -1,6 +1,7 @@
 # Contributing to Malachi
 
-Malachi is an OSS reimplementation of LinkedIn's NorthGuard: a CP log broker on the BEAM, where a
+Malachi is an independent OSS implementation inspired by the public design of LinkedIn's NorthGuard (not
+affiliated with LinkedIn): a CP log broker on the BEAM, where a
 record belongs to a segment, a segment is the unit of replication, and an acknowledged write is durable
 on a majority before the client hears about it.
 

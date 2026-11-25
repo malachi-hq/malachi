@@ -1,7 +1,7 @@
 # Malachi
 
-**An open-source, 100% Elixir reimplementation of LinkedIn's NorthGuard log-storage architecture: a
-CP, horizontally scalable log broker.**
+**An open-source, 100% Elixir log broker, inspired by the public design of LinkedIn's NorthGuard: a CP,
+horizontally scalable log broker.** Malachi is not affiliated with or endorsed by LinkedIn.
 
 Clients speak topics, keys and positions in a range's history, never a fixed partition count. That is
 the point: the broker can split a topic's storage and restripe it across nodes underneath a running
