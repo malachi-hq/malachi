@@ -234,6 +234,21 @@ jobs:
         with:
           sarif_file: 'trivy-docker-results.sarif'
 
+      # The SARIF run above only records: it has no exit code, and a pull request's code scanning check reports
+      # just the alerts that pull request introduces, so a CVE already on main is invisible in every pull
+      # request. This run fails the job on any HIGH or CRITICAL finding a package update fixes, and prints them
+      # as a table in the log. A CVE with no fixed package is left out, since no pull request can clear it;
+      # the Security tab still lists it. The fix is usually to move the minimum versions in the Dockerfile.
+      - name: Fail on fixable HIGH or CRITICAL image findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'image'
+          image-ref: 'malachi:security-test'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          exit-code: '1'
+
   shell-hygiene:
     name: Shell Hygiene
     runs-on: ubuntu-latest
