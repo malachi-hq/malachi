@@ -6,10 +6,15 @@ defmodule Malachi.MixProject do
   # Where the published site lives. Once the site's staging task is wired into the docs build (see Malachi.Site),
   # its sitemap and robots.txt will be built from this value, so a custom domain will change this one line.
   @site_url "https://malachi-hq.github.io/malachi"
-  # The blog's newsletter form (Malachi.Site.Newsletter), copied from the form code the provider generates: nil
-  # until the account exists, and then [action: ..., email_field: ..., consent_field: ..., hidden: [...]].
-  # Setting it also requires the privacy note, site/newsletter/privacy.md.
-  @newsletter nil
+  # The blog's newsletter form (Malachi.Site.Newsletter), copied from the legacy embedded code of the Mailrelay
+  # signup form Blog (a plain HTML POST, no script). anotheremail is its honeypot, which must reach it empty. The
+  # privacy note it links to is site/newsletter/privacy.md.
+  @newsletter [
+    action: "https://malachihq.ipzmarketing.com/f/AMhLnCtAXyE",
+    email_field: "subscriber[email]",
+    consent_field: "subscriber[subscribed_with_acceptance]",
+    hidden: [{"anotheremail", ""}]
+  ]
 
   def project do
     [
