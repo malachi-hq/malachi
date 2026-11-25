@@ -70,10 +70,11 @@ defmodule KitTest do
     end
   end
 
-  test "the post templates leave every sentence to the maintainer: labels, fields and markers only" do
+  test "the post templates leave every sentence to the maintainer: labels, fields, markers and the hashtags" do
     for file <- ["linkedin-feed-post.md", "linkedin-article.md"] do
       text = File.read!(Path.join(@kit, file))
       assert text =~ "<!-- narrative:", file
+      assert String.ends_with?(text, "\n#Elixir #EventStreaming #OpenSource\n"), file
       assert text =~ "{{post_url}}", file
 
       visible =
@@ -83,12 +84,14 @@ defmodule KitTest do
         |> Enum.map(&String.trim/1)
         |> Enum.reject(&(&1 == ""))
 
-      # What stays once the comments are gone: a title field, the version line and the attribution line.
+      # What stays once the comments are gone: a title field, the version line, the attribution line and the
+      # Page's default hashtags, the last line of each template.
       for line <- visible do
         assert line in [
                  "# {{title}}",
                  "Malachi {{version}}: {{post_url}}",
-                 "Originally published at {{post_url}} on {{date}}."
+                 "Originally published at {{post_url}} on {{date}}.",
+                 "#Elixir #EventStreaming #OpenSource"
                ],
                "#{file}: #{line}"
       end
