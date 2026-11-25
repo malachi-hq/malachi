@@ -1,7 +1,7 @@
 # Introduction
 
-Malachi is a **distributed log storage system** written in Elixir: an open-source reimplementation of the
-architecture behind LinkedIn's NorthGuard, running on the BEAM.
+Malachi is a **distributed log storage system** written in Elixir: an independent, open-source implementation
+inspired by the public design of LinkedIn's NorthGuard, running on the BEAM. Malachi is not affiliated with or endorsed by LinkedIn.
 
 It is a **log, not a queue**. Producers append records to a named, ordered, replicated log; consumers read
 from a position they carry themselves. Nothing is destroyed on read, several consumers can read the same

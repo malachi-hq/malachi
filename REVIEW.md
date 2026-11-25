@@ -12,7 +12,8 @@ is a good outcome.
 
 ## What Malachi is, for a reviewer
 
-Malachi is an open source reimplementation of LinkedIn's NorthGuard log broker on the BEAM. A change is
+Malachi is an independent open source log broker on the BEAM, inspired by the public design of LinkedIn's
+NorthGuard and not affiliated with LinkedIn. A change is
 measured against two things: whether it keeps every acknowledged write, and whether it keeps Malachi
 shaped like NorthGuard. `docs/ARCHITECTURE.md` describes that shape. The short version a reviewer needs:
 

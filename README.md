@@ -4,7 +4,8 @@
 
 # Malachi
 
-An open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-storage architecture, a CP
+An open-source, 100% Elixir log broker: an independent implementation inspired by the public design of LinkedIn's
+**NorthGuard** log storage, a CP
 (consistent, partition-tolerant), horizontally-scalable **log broker**. Clients speak topics, keys, and positions in a range's history,
 never a fixed partition count, so the broker can split, merge, and restripe its storage underneath
 without breaking clients. Metadata is replicated by Raft (`ra`), and a produce is acknowledged once a
@@ -1116,7 +1117,8 @@ Malachi.Auth.change_password("myuser", "newpass")
 
 ## 🏗️ Architecture
 
-Malachi ports LinkedIn's NorthGuard log-storage design to Elixir/OTP:
+Malachi follows the public design of LinkedIn's NorthGuard log storage, implemented independently in Elixir/OTP.
+Malachi is not affiliated with or endorsed by LinkedIn.
 
 - **Control plane**: topic/range/segment metadata as a deterministic state machine, replicated per vnode by Raft (`ra`) and sharded across vnodes by topic.
 - **Data plane**: a `Log` of `segments` per range, replicated across nodes and acknowledged once a majority of a segment's replicas has fsynced the batch ([what an acknowledgement covers](docs/ARCHITECTURE.md#what-an-acknowledgement-covers)); placement is HRW/rendezvous and rack-aware.

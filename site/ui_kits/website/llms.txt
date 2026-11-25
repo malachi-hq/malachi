@@ -1,6 +1,6 @@
 # Malachi
 
-> Open source reimplementation of LinkedIn's NorthGuard, written in Elixir on Erlang/OTP 28, MIT licensed. Clients speak topics, keys and opaque cursors; ranges split and merge underneath; a write is acknowledged once a majority of copies have fsynced it.
+> Independent open source log broker inspired by the public design of LinkedIn's NorthGuard, not affiliated with LinkedIn, written in Elixir on Erlang/OTP 28, MIT licensed. Clients speak topics, keys and opaque cursors; ranges split and merge underneath; a write is acknowledged once a majority of copies have fsynced it.
 
 Malachi is in active development and not production-ready. The quickstart below runs plaintext on localhost only; configure TLS before serving real traffic.
 
