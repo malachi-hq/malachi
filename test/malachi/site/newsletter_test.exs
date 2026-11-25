@@ -154,7 +154,7 @@ defmodule Malachi.Site.NewsletterTest do
       assert html =~ ~s(<form method="post" action="https://forms.example.test/f/abc?x=1&amp;y=2">)
 
       assert html =~
-               ~s(<input id="newsletter-email" type="email" name="subscriber[email]" autocomplete="email" required>)
+               ~s(<input id="newsletter-email" type="email" name="subscriber[email]" autocomplete="email" maxlength="254" required>)
 
       assert html =~ ~s(<input type="checkbox" name="privacy" value="1" required>)
       assert html =~ ~s(<a href="privacy.html">privacy note</a>)

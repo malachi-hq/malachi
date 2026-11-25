@@ -134,7 +134,7 @@ defmodule Malachi.Site.Newsletter do
     <h2 id="newsletter-title">Newsletter</h2>
     <form method="post" action="#{e(newsletter.action)}">
     <label for="newsletter-email">Email</label>
-    <input id="newsletter-email" type="email" name="#{e(newsletter.email_field)}" autocomplete="email" required>
+    <input id="newsletter-email" type="email" name="#{e(newsletter.email_field)}" autocomplete="email" maxlength="254" required>
     <label class="consent"><input type="checkbox" name="#{e(newsletter.consent_field)}" value="#{e(newsletter.consent_value)}" required> I accept the <a href="privacy.html">privacy note</a></label>
     #{hidden}<button type="submit">Subscribe</button>
     </form>
