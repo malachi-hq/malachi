@@ -23,11 +23,15 @@ defmodule Malachi.Site.Blog do
       exceeds 150 KB, or is not named for the chart's current data; a PNG beside a post that no chart names;
     * on the staged tree: a page, the index or the feed missing; the feed not in date order, over 20
       entries, or not holding one entry per post among the newest; a link or image on a blog page that does not
-      resolve on this site, or a relative one that climbs above it; a script loaded from anywhere on a blog page.
+      resolve on this site, or a relative one that climbs above it; a script loaded from anywhere on a blog page;
+    * the newsletter's (`Malachi.Site.Newsletter`): a form while none is configured, a page without exactly
+      one form posting to the configured `action`, a form on the privacy note, and a privacy note that is
+      missing, unfinished (a placeholder or a `malachi-seed` block) or draws a chart.
   """
 
   alias Malachi.Site.Chart
   alias Malachi.Site.Markdown
+  alias Malachi.Site.Newsletter
 
   @dir "site/blog"
   @max_charts 3
@@ -206,26 +210,37 @@ defmodule Malachi.Site.Blog do
 
   @doc """
   Writes every post's page and images, `blog/index.html` and (when there is a post) `blog/feed.xml` into `doc`.
-  Raises when a post cannot be read or rendered: staging part of the blog would publish the rest without it.
+  With a `newsletter`, each page but the privacy note ends with its form, and `blog/privacy.html` is written.
+  Raises when a post or the privacy note cannot be read or rendered: staging part of the blog would publish the
+  rest without it.
   """
-  @spec stage(Path.t(), Path.t(), %{String.t() => String.t()}, (Path.t(), String.t() -> :ok)) :: :ok
-  def stage(root, doc, meta, write) do
+  @spec stage(Path.t(), Path.t(), %{String.t() => String.t()}, (Path.t(), String.t() -> :ok), Newsletter.t() | nil) ::
+          :ok
+  def stage(root, doc, meta, write, newsletter \\ nil) do
     posts =
       case Enum.split_with(read_all(root), &match?({:ok, _}, &1)) do
         {ok, []} -> Enum.map(ok, fn {:ok, post} -> post end)
         {_, failed} -> Mix.raise("the blog cannot be staged:\n" <> Enum.map_join(failed, "\n", &elem(&1, 1)))
       end
 
+    privacy =
+      case newsletter && Newsletter.privacy(root) do
+        nil -> nil
+        {:ok, rendered} -> rendered
+        {:error, message} -> Mix.raise("the blog cannot be staged:\n" <> message)
+      end
+
     blog = Path.join(doc, "blog")
     File.rm_rf!(blog)
 
     for post <- posts do
-      write.(Path.join("blog", post.slug <> ".html"), page(post, meta))
+      write.(Path.join("blog", post.slug <> ".html"), page(post, meta, newsletter))
       copy_images(root, blog, post)
     end
 
-    write.("blog/index.html", index(posts, meta))
+    write.("blog/index.html", index(posts, meta, newsletter))
     if posts != [], do: write.("blog/feed.xml", feed(posts, meta))
+    if privacy, do: write.("blog/privacy.html", privacy_page(privacy, meta))
     :ok
   end
 
@@ -261,7 +276,7 @@ defmodule Malachi.Site.Blog do
   def image_url(post, %{chart: chart, json: json}, meta),
     do: "#{meta["base_url"]}/blog/#{post.slug}/#{Chart.png_name(chart, json)}"
 
-  defp page(post, meta) do
+  defp page(post, meta, newsletter) do
     url = url(post, meta)
 
     image =
@@ -301,13 +316,14 @@ defmodule Malachi.Site.Blog do
       </header>
       #{post.html}
       </article>
+      #{form(newsletter)}
       """
     )
   end
 
   defp versions_text(versions), do: Enum.map_join(versions, ", ", &"v#{&1}")
 
-  defp index(posts, meta) do
+  defp index(posts, meta, newsletter) do
     items =
       case posts do
         [] ->
@@ -338,6 +354,27 @@ defmodule Malachi.Site.Blog do
       #{if posts != [], do: ~s(<p><a href="feed.xml">Atom feed</a></p>), else: ""}
       #{items}
       </section>
+      #{form(newsletter)}
+      """
+    )
+  end
+
+  defp form(nil), do: ""
+  defp form(newsletter), do: Newsletter.form(newsletter)
+
+  # The maintainer's privacy note, under the blog's header and footer, with no form of its own.
+  defp privacy_page(rendered, meta) do
+    shell(
+      feed?: false,
+      title: "Newsletter privacy | Malachi blog",
+      description: "Newsletter privacy",
+      canonical: "#{meta["base_url"]}/blog/privacy.html",
+      head: ~s(<meta property="og:type" content="website">),
+      main: """
+      <article class="post">
+      <h1>Newsletter privacy</h1>
+      #{rendered.html}
+      </article>
       """
     )
   end
@@ -442,10 +479,12 @@ defmodule Malachi.Site.Blog do
 
   `lfs_pointers: true` accepts a chart image that is still its Git LFS pointer: a fork's pull request never
   fetches the images, and `scripts/site-images-pull.sh --check-only` has checked their declared sizes instead.
+  `newsletter:` is the configured `Malachi.Site.Newsletter`, `nil` (the default) when there is none.
   """
   @spec errors(Path.t(), Path.t(), map(), keyword()) :: [String.t()]
   def errors(root, doc, meta, opts \\ []) do
     pointers? = Keyword.get(opts, :lfs_pointers, false)
+    newsletter = Keyword.get(opts, :newsletter)
     read = read_all(root)
     posts = for {:ok, post} <- read, do: post
 
@@ -453,7 +492,8 @@ defmodule Malachi.Site.Blog do
       Enum.flat_map(posts, &unfinished/1) ++
       duplicate_versions(posts) ++
       Enum.flat_map(posts, &image_errors(root, &1, pointers?)) ++
-      staged_errors(doc, posts, meta)
+      Newsletter.source_errors(root, newsletter) ++
+      staged_errors(doc, posts, meta, newsletter)
   end
 
   defp unfinished(post) do
@@ -532,20 +572,28 @@ defmodule Malachi.Site.Blog do
     end
   end
 
-  defp staged_errors(doc, posts, meta) do
+  defp staged_errors(doc, posts, meta, newsletter) do
+    # Each page, its URL, and whether it carries the newsletter's form: every page but the privacy note.
     pages =
-      for post <- posts, do: {"blog/#{post.slug}.html", url(post, meta)}
+      for post <- posts, do: {"blog/#{post.slug}.html", url(post, meta), true}
 
-    pages = [{"blog/index.html", "#{meta["base_url"]}/blog/index.html"} | pages]
+    privacy =
+      if newsletter,
+        do: [{"blog/privacy.html", "#{meta["base_url"]}/blog/privacy.html", false}],
+        else: []
 
-    Enum.flat_map(pages, fn {rel, page_url} -> page_errors(doc, rel, page_url, meta) end) ++
+    pages = [{"blog/index.html", "#{meta["base_url"]}/blog/index.html", true} | pages] ++ privacy
+
+    Enum.flat_map(pages, fn {rel, page_url, form?} ->
+      page_errors(doc, rel, page_url, meta, &Newsletter.form_errors(rel, &1, newsletter, form?))
+    end) ++
       feed_errors(doc, posts)
   end
 
-  defp page_errors(doc, rel, page_url, meta) do
+  defp page_errors(doc, rel, page_url, meta, form_errors) do
     case File.read(Path.join(doc, rel)) do
       {:ok, html} ->
-        script_errors(rel, html) ++ link_errors(doc, rel, html, page_url, meta)
+        script_errors(rel, html) ++ form_errors.(html) ++ link_errors(doc, rel, html, page_url, meta)
 
       {:error, _} ->
         ["doc/#{rel} is missing; stage the site again"]
