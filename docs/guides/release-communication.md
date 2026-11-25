@@ -100,7 +100,8 @@ its sign-up form only once it is configured, so turning it on takes these steps,
 4. The `@newsletter` setting in `mix.exs` takes the form's values: `action`, `email_field`, `consent_field`
    (with `consent_value` when it is not `1`) and the `hidden` fields, as `Malachi.Site.Newsletter` describes.
 
-`mix malachi.docs.site --check` then requires the privacy note and the configured form on every blog page.
+`mix malachi.docs.site --check` then requires the privacy note, and on every blog page one form posting to the
+configured `action` (the check reads the form's tag, not its fields: stage the site again after changing them).
 
 ## A first round, done once
 

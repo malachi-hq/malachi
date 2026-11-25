@@ -24,8 +24,9 @@ defmodule Malachi.Site.Blog do
     * on the staged tree: a page, the index or the feed missing; the feed not in date order, over 20
       entries, or not holding one entry per post among the newest; a link or image on a blog page that does not
       resolve on this site, or a relative one that climbs above it; a script loaded from anywhere on a blog page;
-    * the newsletter's (`Malachi.Site.Newsletter`): a form while none is configured, a page without the
-      configured form, and a privacy note that is missing or unfinished.
+    * the newsletter's (`Malachi.Site.Newsletter`): a form while none is configured, a page without exactly
+      one form posting to the configured `action`, a form on the privacy note, and a privacy note that is
+      missing, unfinished (a placeholder or a `malachi-seed` block) or draws a chart.
   """
 
   alias Malachi.Site.Chart

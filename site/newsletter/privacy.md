@@ -1,7 +1,7 @@
 This note explains what happens to your data when you subscribe to the Malachi newsletter. It is written to meet
 the EU General Data Protection Regulation (GDPR) and the Brazilian General Data Protection Law (LGPD).
 
-Last updated: 2026-11-24.
+Last updated: 2026-11-25.
 
 ## Who is responsible
 
@@ -31,10 +31,15 @@ We process your data on the basis of your consent (GDPR article 6(1)(a), LGPD ar
 ticking the box on the form and confirming your address. You can withdraw it at any time, as described below.
 Withdrawing it does not affect the emails sent before.
 
-## This site
+## This blog
 
-The subscription form is plain HTML. This site sets no cookie and runs no script or tracking pixel. When you
-press Subscribe, your browser sends the form directly to our email provider.
+The subscription form is plain HTML. The blog's pages, this note included, set no cookie, store nothing in your
+browser and run no script or tracking pixel. When you press Subscribe, your browser sends the form directly to
+our email provider.
+
+The rest of this website, its home page and its documentation, is not part of the newsletter and does run
+scripts. The home page remembers your color theme in your browser's local storage, and the documentation loads
+a diagram library (Mermaid) from the jsDelivr network, which receives your IP address when you open a page of it.
 
 ## Our email provider
 

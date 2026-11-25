@@ -1,7 +1,7 @@
 defmodule Malachi.Site.Newsletter do
   @moduledoc """
   The blog's newsletter form (issue #373): a plain HTML form that posts the reader's email to the newsletter
-  provider, with no script, cookie or pixel on the site, and the privacy note it links to.
+  provider, with no script, cookie or pixel on the blog's pages, and the privacy note it links to.
 
   It is configured by the `newsletter:` key of the project in `mix.exs`, copied from the form code the provider
   generates. While the key is `nil` the blog has no form and no privacy note. When it is set:
@@ -19,8 +19,10 @@ defmodule Malachi.Site.Newsletter do
   The privacy note is the maintainer's text in `#{"site/newsletter/privacy.md"}`, Markdown rendered by
   `Malachi.Site.Markdown` (its headings start at `##`, under the page's title), and is staged at
   `blog/privacy.html`. `Malachi.Site.Blog` stages the form at the end
-  of the index and of every post, and its check reports a blog page with a form while none is configured, a page
-  whose form is not the configured one, and a privacy note that is missing, unfinished or draws a chart.
+  of the index and of every post, and its check reports a blog page with a form while none is configured, a blog
+  page without exactly one form posting to the configured `action`, a form on the privacy note, and a privacy
+  note that is missing, unfinished (a placeholder or a `malachi-seed` block) or draws a chart. The check reads
+  the form's tag, not its fields: after a change to the fields, stage the site again.
   """
 
   alias Malachi.Site.Chart
@@ -196,7 +198,8 @@ defmodule Malachi.Site.Newsletter do
 
   @doc """
   The problems with the forms on one staged blog page, `rel` under `doc/`: none when `wanted?` is false or no
-  newsletter is configured, else exactly the configured form, posting to its `action`.
+  newsletter is configured, else exactly one form, posting with `method="post"` to the configured `action`. Its
+  fields are not compared.
   """
   @spec form_errors(String.t(), String.t(), t() | nil, boolean()) :: [String.t()]
   def form_errors(rel, html, newsletter, wanted?) do
