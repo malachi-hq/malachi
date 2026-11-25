@@ -1,6 +1,7 @@
 defmodule Malachi.Site do
   alias Malachi.Site.Blog
   alias Malachi.Site.Newsletter
+  alias Malachi.Site.Theme
 
   @moduledoc """
   Stages the landing page at the root of the published documentation site, and the files that go with it.
@@ -197,7 +198,9 @@ defmodule Malachi.Site do
       )
     end
 
-    landing = root |> read!(@landing_source) |> fill(meta) |> stage_paths() |> with_marker()
+    # The theme switch is the blog's too (Malachi.Site.Theme), so the landing page takes it from the same source.
+    theme = Theme.placeholders(Theme.script!(root))
+    landing = root |> read!(@landing_source) |> fill(Map.merge(meta, theme)) |> stage_paths() |> with_marker()
     llms = merge_llms(summary_block(fill(read!(root, @llms_source), meta)), Path.join(doc, "llms.txt"))
     pages = for rel <- @page_sources, do: {dest_of(rel), stage_asset(dest_of(rel), read!(root, rel))}
     fonts = font_files!(root)

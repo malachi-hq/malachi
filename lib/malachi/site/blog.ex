@@ -23,7 +23,8 @@ defmodule Malachi.Site.Blog do
       exceeds 150 KB, or is not named for the chart's current data; a PNG beside a post that no chart names;
     * on the staged tree: a page, the index or the feed missing; the feed not in date order, over 20
       entries, or not holding one entry per post among the newest; a link or image on a blog page that does not
-      resolve on this site, or a relative one that climbs above it; a script loaded from anywhere on a blog page;
+      resolve on this site, or a relative one that climbs above it; a script on a blog page other than the inline theme switch (`Malachi.Site.Theme`), which every page carries
+      exactly once, an event handler attribute or a `javascript:` URL;
     * the newsletter's (`Malachi.Site.Newsletter`): a form while none is configured, a page without exactly
       one form posting to the configured `action`, a form on the privacy note, and a privacy note that is
       missing, unfinished (a placeholder or a `malachi-seed` block) or draws a chart.
@@ -32,6 +33,7 @@ defmodule Malachi.Site.Blog do
   alias Malachi.Site.Chart
   alias Malachi.Site.Markdown
   alias Malachi.Site.Newsletter
+  alias Malachi.Site.Theme
 
   @dir "site/blog"
   @max_charts 3
@@ -217,6 +219,8 @@ defmodule Malachi.Site.Blog do
   @spec stage(Path.t(), Path.t(), %{String.t() => String.t()}, (Path.t(), String.t() -> :ok), Newsletter.t() | nil) ::
           :ok
   def stage(root, doc, meta, write, newsletter \\ nil) do
+    theme = Theme.script!(root)
+
     posts =
       case Enum.split_with(read_all(root), &match?({:ok, _}, &1)) do
         {ok, []} -> Enum.map(ok, fn {:ok, post} -> post end)
@@ -234,13 +238,13 @@ defmodule Malachi.Site.Blog do
     File.rm_rf!(blog)
 
     for post <- posts do
-      write.(Path.join("blog", post.slug <> ".html"), page(post, meta, newsletter))
+      write.(Path.join("blog", post.slug <> ".html"), page(post, meta, newsletter, theme))
       copy_images(root, blog, post)
     end
 
-    write.("blog/index.html", index(posts, meta, newsletter))
+    write.("blog/index.html", index(posts, meta, newsletter, theme))
     if posts != [], do: write.("blog/feed.xml", feed(posts, meta))
-    if privacy, do: write.("blog/privacy.html", privacy_page(privacy, meta))
+    if privacy, do: write.("blog/privacy.html", privacy_page(privacy, meta, theme))
     :ok
   end
 
@@ -276,7 +280,7 @@ defmodule Malachi.Site.Blog do
   def image_url(post, %{chart: chart, json: json}, meta),
     do: "#{meta["base_url"]}/blog/#{post.slug}/#{Chart.png_name(chart, json)}"
 
-  defp page(post, meta, newsletter) do
+  defp page(post, meta, newsletter, theme) do
     url = url(post, meta)
 
     image =
@@ -292,6 +296,7 @@ defmodule Malachi.Site.Blog do
       end
 
     shell(
+      theme: theme,
       feed?: true,
       title: "#{post.title} | Malachi blog",
       description: post.summary,
@@ -323,7 +328,7 @@ defmodule Malachi.Site.Blog do
 
   defp versions_text(versions), do: Enum.map_join(versions, ", ", &"v#{&1}")
 
-  defp index(posts, meta, newsletter) do
+  defp index(posts, meta, newsletter, theme) do
     items =
       case posts do
         [] ->
@@ -343,6 +348,7 @@ defmodule Malachi.Site.Blog do
       end
 
     shell(
+      theme: theme,
       feed?: posts != [],
       title: "Malachi blog",
       description: "Malachi blog",
@@ -363,8 +369,9 @@ defmodule Malachi.Site.Blog do
   defp form(newsletter), do: Newsletter.form(newsletter)
 
   # The maintainer's privacy note, under the blog's header and footer, with no form of its own.
-  defp privacy_page(rendered, meta) do
+  defp privacy_page(rendered, meta, theme) do
     shell(
+      theme: theme,
       feed?: false,
       title: "Newsletter privacy | Malachi blog",
       description: "Newsletter privacy",
@@ -398,6 +405,7 @@ defmodule Malachi.Site.Blog do
     <meta name="description" content="#{e(opts[:description])}">
     <link rel="canonical" href="#{e(opts[:canonical])}">
     #{opts[:head]}
+    #{Theme.head(opts[:theme])}
     #{feed_head}<link rel="stylesheet" href="../styles.css">
     <link rel="stylesheet" href="../tokens/marketing.css">
     <link rel="stylesheet" href="../site.css">
@@ -425,6 +433,7 @@ defmodule Malachi.Site.Blog do
     <a href="https://github.com/malachi-hq/malachi/releases">Releases</a>
     <a href="https://www.linkedin.com/company/malachi-hq">LinkedIn</a>
     </nav>
+    #{Theme.toggle()}
     </div>
     </footer>
     </body>
@@ -488,12 +497,19 @@ defmodule Malachi.Site.Blog do
     read = read_all(root)
     posts = for {:ok, post} <- read, do: post
 
+    {theme, theme_errors} =
+      case File.read(Path.join(root, Theme.source())) do
+        {:ok, text} -> {String.trim(text), []}
+        {:error, _} -> {nil, ["#{Theme.source()} cannot be read, so no blog page's script can be checked against it"]}
+      end
+
     for({:error, message} <- read, do: message) ++
       Enum.flat_map(posts, &unfinished/1) ++
       duplicate_versions(posts) ++
       Enum.flat_map(posts, &image_errors(root, &1, pointers?)) ++
       Newsletter.source_errors(root, newsletter) ++
-      staged_errors(doc, posts, meta, newsletter)
+      theme_errors ++
+      staged_errors(doc, posts, meta, newsletter, theme)
   end
 
   defp unfinished(post) do
@@ -572,7 +588,7 @@ defmodule Malachi.Site.Blog do
     end
   end
 
-  defp staged_errors(doc, posts, meta, newsletter) do
+  defp staged_errors(doc, posts, meta, newsletter, theme) do
     # Each page, its URL, and whether it carries the newsletter's form: every page but the privacy note.
     pages =
       for post <- posts, do: {"blog/#{post.slug}.html", url(post, meta), true}
@@ -585,25 +601,52 @@ defmodule Malachi.Site.Blog do
     pages = [{"blog/index.html", "#{meta["base_url"]}/blog/index.html", true} | pages] ++ privacy
 
     Enum.flat_map(pages, fn {rel, page_url, form?} ->
-      page_errors(doc, rel, page_url, meta, &Newsletter.form_errors(rel, &1, newsletter, form?))
+      page_errors(doc, rel, page_url, meta, theme, &Newsletter.form_errors(rel, &1, newsletter, form?))
     end) ++
       feed_errors(doc, posts)
   end
 
-  defp page_errors(doc, rel, page_url, meta, form_errors) do
+  defp page_errors(doc, rel, page_url, meta, theme, form_errors) do
     case File.read(Path.join(doc, rel)) do
       {:ok, html} ->
-        script_errors(rel, html) ++ form_errors.(html) ++ link_errors(doc, rel, html, page_url, meta)
+        script_errors(rel, html, theme) ++ form_errors.(html) ++ link_errors(doc, rel, html, page_url, meta)
 
       {:error, _} ->
         ["doc/#{rel} is missing; stage the site again"]
     end
   end
 
-  defp script_errors(rel, html) do
-    if Regex.match?(~r/<script\b[^>]*\bsrc\s*=/i, html),
-      do: ["doc/#{rel} loads a script; blog pages load none"],
-      else: []
+  @script_open ~r/<script\b/i
+  @script_element ~r/<script\b([^>]*)>(.*?)<\/script\s*>/is
+  @event_handler ~r/<[a-z][^>]*?\son[a-z]+\s*=/i
+  @javascript_url ~r/\b(?:href|src|action|formaction|xlink:href)\s*=\s*["']?\s*javascript:/i
+
+  # A blog page runs one script, the theme switch, inline and byte for byte the source's (`Malachi.Site.Theme`), and
+  # nothing else: no script loaded by `src`, no other inline script (an inline SVG's included), no event handler
+  # attribute and no `javascript:` URL. `theme` is nil when the source cannot be read, which errors/4 reports once.
+  defp script_errors(rel, html, theme) do
+    elements = Regex.scan(@script_element, html, capture: :all_but_first)
+    opened = @script_open |> Regex.scan(html) |> length()
+
+    loaded = for [attrs, _] <- elements, attrs =~ ~r/\bsrc\s*=/i, do: "doc/#{rel} loads a script; blog pages load none"
+
+    others =
+      for [attrs, body] <- elements, not (attrs =~ ~r/\bsrc\s*=/i), theme != nil, body != theme do
+        "doc/#{rel} runs an inline script other than the theme switch"
+      end
+
+    switch =
+      cond do
+        theme == nil -> []
+        Enum.count(elements, fn [attrs, body] -> String.trim(attrs) == "" and body == theme end) == 1 -> []
+        true -> ["doc/#{rel} does not carry the theme switch exactly once"]
+      end
+
+    unclosed = if opened > length(elements), do: ["doc/#{rel} has a script element that is never closed"], else: []
+    handlers = if html =~ @event_handler, do: ["doc/#{rel} has an event handler attribute (on...=)"], else: []
+    urls = if html =~ @javascript_url, do: ["doc/#{rel} has a javascript: URL"], else: []
+
+    loaded ++ others ++ switch ++ unclosed ++ handlers ++ urls
   end
 
   @href ~r/\b(?:href|src)="([^"]*)"/

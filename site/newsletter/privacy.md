@@ -33,12 +33,14 @@ Withdrawing it does not affect the emails sent before.
 
 ## This blog
 
-The subscription form is plain HTML. The blog's pages, this note included, set no cookie, store nothing in your
-browser and run no script or tracking pixel. When you press Subscribe, your browser sends the form directly to
-our email provider.
+The subscription form is plain HTML. The blog's pages, this note included, set no cookie and run no tracking
+pixel and no script from anywhere else. Their one script is the color theme switch, written into each page
+itself: it stores nothing until you pick a theme, and then only that choice, in your browser's local storage,
+where the home page reads it too. When you press Subscribe, your browser sends the form directly to our email
+provider.
 
 The rest of this website, its home page and its documentation, is not part of the newsletter and does run
-scripts. The home page remembers your color theme in your browser's local storage, and the documentation loads
+scripts. The home page shares the blog's theme switch and runs its own animations, and the documentation loads
 a diagram library (Mermaid) from the jsDelivr network, which receives your IP address when you open a page of it.
 
 ## Our email provider

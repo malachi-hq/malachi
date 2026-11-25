@@ -19,7 +19,7 @@
 <meta name="twitter:image" content="{{base_url}}/kit/social-preview.png">
 <link rel="alternate" type="text/plain" href="llms.txt" title="llms.txt">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"Malachi","version":"{{version}}","description":"Open source reimplementation of LinkedIn's NorthGuard, written in Elixir on OTP 28. In active development and not production-ready. The quickstart runs plaintext on localhost only; configure TLS before serving real traffic.","codeRepository":"https://github.com/malachi-hq/malachi","license":"https://spdx.org/licenses/{{license}}.html","programmingLanguage":"Elixir (Erlang/OTP 28)","runtimePlatform":"Erlang/OTP 28","author":{"@type":"Organization","name":"MalachiHQ","url":"{{base_url}}/","sameAs":["https://www.linkedin.com/company/malachi-hq","https://github.com/malachi-hq"]}}</script>
-<script>(function(){try{var v=localStorage.getItem("malachi-theme")||"system";var d=v==="dark"||(v==="system"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("dark",d)}catch(e){}})()</script>
+{{theme_head}}
 <link rel="preload" href="../../assets/fonts/bricolage-grotesque-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="../../styles.css">
 <link rel="stylesheet" href="../../tokens/marketing.css">
@@ -265,12 +265,7 @@ docker run \
 <a href="https://github.com/malachi-hq/malachi/releases">Releases</a>
 <a href="https://www.linkedin.com/company/malachi-hq">LinkedIn</a>
 </nav>
-<fieldset class="seg js-only">
-<legend class="label">Theme</legend>
-<label><input type="radio" name="theme" value="system" checked><span>System</span></label>
-<label><input type="radio" name="theme" value="light"><span>Light</span></label>
-<label><input type="radio" name="theme" value="dark"><span>Dark</span></label>
-</fieldset>
+{{theme_toggle}}
 </div>
 </footer>
 </body>

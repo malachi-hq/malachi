@@ -55,6 +55,33 @@ defmodule Malachi.Site.ChartTest do
       assert length(Regex.scan(~r/fill="#3b5bdb"/, svg)) == 1
     end
 
+    test "every coloured element carries a chart- class the dark theme recolours, and keeps its light colour" do
+      {:ok, chart} = Chart.parse(@json)
+      svg = Chart.to_svg(chart)
+
+      elements = Regex.scan(~r/<(?:rect|text|line)\b[^>]*>/, svg) |> List.flatten()
+      assert elements != []
+
+      for element <- elements, element =~ ~r/\b(?:fill|stroke)="#/ do
+        assert element =~ ~r/\bclass="chart-[a-z-]+"/, "no chart- class on #{element}"
+      end
+
+      classes = Regex.scan(~r/class="(chart-[a-z-]+)"/, svg, capture: :all_but_first) |> List.flatten() |> Enum.uniq()
+      css = File.read!(Path.expand("../../../site/ui_kits/website/blog.css", __DIR__))
+
+      for class <- classes do
+        assert css =~ ~r/\.dark \.chart \S*\.#{class}\b/, "blog.css has no dark rule for .#{class}"
+      end
+    end
+
+    test "holds no stylesheet and no CSS variable, so the PNG render draws it exactly as before" do
+      {:ok, chart} = Chart.parse(@json)
+      svg = Chart.to_svg(chart)
+      refute svg =~ "<style"
+      refute svg =~ "var("
+      assert svg =~ ~s(fill="#ffffff")
+    end
+
     test "escapes every text, so a title or a label can add no element" do
       {:ok, chart} =
         Chart.parse(

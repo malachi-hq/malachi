@@ -4,6 +4,8 @@ defmodule Malachi.Test.SiteFixture do
   and `mix malachi.docs.site`. They stage into it and never touch the real `doc/`.
   """
 
+  alias Malachi.Site.Theme
+
   @doc "Writes `content` at `path` under `root`, creating its folders."
   @spec write(Path.t(), Path.t(), iodata()) :: :ok
   def write(root, path, content) do
@@ -19,8 +21,16 @@ defmodule Malachi.Test.SiteFixture do
   @spec write_page_kit(Path.t()) :: :ok
   def write_page_kit(root) do
     for rel <- Malachi.Site.page_sources(), do: write(root, "site/" <> rel, "/* #{rel} */")
-    :ok
+    write_theme(root)
   end
+
+  @doc """
+  The theme switch's script (`Malachi.Site.Theme`), which the landing page and every blog page inline. A stand-in:
+  the checks compare a page's script with whatever the checkout holds, not with the real switch.
+  """
+  @spec write_theme(Path.t(), String.t()) :: :ok
+  def write_theme(root, script \\ "/* theme switch */document.documentElement.dataset.fixture=1;"),
+    do: write(root, Theme.source(), script <> "\n")
 
   @doc "The first bytes of a PNG of the given size: the signature and the IHDR chunk that declares it."
   @spec png(pos_integer(), pos_integer()) :: binary()

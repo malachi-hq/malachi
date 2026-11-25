@@ -4,6 +4,7 @@ defmodule Malachi.SiteTest do
   use ExUnit.Case, async: true
 
   alias Malachi.Site
+  alias Malachi.Site.Theme
 
   import Malachi.Test.SiteFixture, only: [write: 3, write_page_kit: 1, write_social_preview: 1, png: 2]
 
@@ -1605,6 +1606,18 @@ defmodule Malachi.SiteTest do
       stage!(root)
 
       assert read(root, "doc/index.html") =~ ~s(href="introduction.html")
+    end
+
+    test "carries the shared theme switch once, from theme.js, before its stylesheets", %{root: root} do
+      stage!(root)
+      html = read(root, "doc/index.html")
+      script = Theme.script!(root)
+
+      assert [_] = Regex.scan(~r/#{Regex.escape("<script>" <> script <> "</script>")}/, html)
+      assert [_] = Regex.scan(~r/#{Regex.escape(Theme.toggle())}/, html)
+      refute html =~ "{{theme_"
+      [head | _] = String.split(html, ~s(<link rel="stylesheet"), parts: 2)
+      assert head =~ script
     end
 
     test "links the blog from its top navigation and its footer, and the link resolves", %{root: root} do

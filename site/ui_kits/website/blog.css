@@ -26,3 +26,11 @@
 .newsletter input[type=email]{font:inherit;padding:var(--space-2) var(--space-3);border:1px solid var(--border);border-radius:var(--radius-md);background:var(--background);color:var(--foreground)}
 .newsletter .consent{display:flex;gap:var(--space-2);align-items:flex-start;font-size:var(--text-sm)}
 .newsletter button{justify-self:start;font:inherit;font-weight:var(--weight-semibold);padding:var(--space-2) var(--space-4);border:0;border-radius:var(--radius-md);background:var(--primary);color:var(--primary-foreground);cursor:pointer}
+/* Charts in the dark theme (#385). The SVG keeps its light colours as attributes, which the PNG render reads with no
+   page CSS; under .dark these rules take over, since a CSS property beats a presentation attribute. */
+.dark .chart .chart-bg{fill:var(--card)}
+.dark .chart .chart-title,.dark .chart .chart-value{fill:var(--foreground)}
+.dark .chart .chart-unit,.dark .chart .chart-label,.dark .chart .chart-gap-label{fill:var(--muted-foreground)}
+.dark .chart .chart-axis{stroke:var(--border)}
+.dark .chart .chart-bar{fill:var(--chart-1)}
+.dark .chart .chart-gap{stroke:var(--muted-foreground)}
