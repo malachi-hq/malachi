@@ -35,7 +35,7 @@ defmodule Malachi.Site.NewsletterTest do
     )
   end
 
-  defp privacy(root, text \\ "## What is kept\n\nWhat the provider keeps.\n"), do: write(root, @privacy, text)
+  defp privacy(root, text), do: SiteFixture.write_privacy_note(root, text)
   defp read(root, path), do: File.read!(Path.join(root, path))
   defp edit(root, path, fun), do: write(root, path, fun.(read(root, path)))
   defp forms(html), do: ~r/<form\b/ |> Regex.scan(html) |> length()
@@ -170,7 +170,6 @@ defmodule Malachi.Site.NewsletterTest do
   describe "staging" do
     test "with no newsletter: no form, no privacy note, and the check passes", %{root: root} do
       post(root)
-      privacy(root)
       :ok = Site.stage(root, @base)
 
       assert forms(read(root, "doc/blog/index.html")) == 0
@@ -182,7 +181,6 @@ defmodule Malachi.Site.NewsletterTest do
     test "with a newsletter: the form ends the index and every post, the note is staged, the check passes",
          %{root: root} do
       post(root)
-      privacy(root)
       :ok = Site.stage(root, @config)
 
       for page <- ["doc/blog/index.html", "doc/blog/2026-11-16-v1-2-3.html"] do
@@ -201,13 +199,13 @@ defmodule Malachi.Site.NewsletterTest do
     end
 
     test "with no post, the index still carries the form", %{root: root} do
-      privacy(root)
       :ok = Site.stage(root, @config)
       assert forms(read(root, "doc/blog/index.html")) == 1
       assert Site.verify(root, @config) == []
     end
 
     test "refuses a newsletter without its privacy note, and leaves the blog as it was", %{root: root} do
+      File.rm!(Path.join(root, @privacy))
       :ok = Site.stage(root, @base)
       before = read(root, "doc/blog/index.html")
 
@@ -232,7 +230,6 @@ defmodule Malachi.Site.NewsletterTest do
   describe "the check" do
     setup %{root: root} do
       post(root)
-      privacy(root)
       :ok = Site.stage(root, @config)
       :ok
     end

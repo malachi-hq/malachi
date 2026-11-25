@@ -31,8 +31,16 @@ defmodule Malachi.Test.SiteFixture do
   def write_social_preview(root), do: write(root, "site/kit/social-preview.png", png(1280, 640))
 
   @doc """
+  The newsletter's privacy note, `site/newsletter/privacy.md`. The blog stages it only while `mix.exs`
+  configures a newsletter, and the real one does, so every fixture carries a finished note.
+  """
+  @spec write_privacy_note(Path.t(), iodata()) :: :ok
+  def write_privacy_note(root, text \\ "## What is kept\n\nWhat the provider keeps.\n"),
+    do: write(root, "site/newsletter/privacy.md", text)
+
+  @doc """
   The smallest checkout that stages and verifies: a landing page and llms.txt with placeholders, one font, the
-  page kit, the social preview, and the ExDoc pages they link to.
+  page kit, the social preview, the newsletter's privacy note, and the ExDoc pages they link to.
   """
   @spec minimal(Path.t()) :: :ok
   def minimal(root) do
@@ -46,6 +54,7 @@ defmodule Malachi.Test.SiteFixture do
     write(root, "site/assets/fonts/bricolage.woff2", "font-bytes")
     write_page_kit(root)
     write_social_preview(root)
+    write_privacy_note(root)
     write(root, "doc/introduction.html", "<h1>Introduction</h1>")
     write(root, "doc/index.html", ~s(<meta http-equiv="refresh" content="0; url=introduction.html">))
   end
