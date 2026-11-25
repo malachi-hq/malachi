@@ -27,7 +27,6 @@ names its admins.
 | --- | --- | --- |
 | Tagline | 120 characters | Nodes fail. Topics split. Not one record lost or copied. |
 | About | 2,000 characters | below |
-| Hashtags | 3 | <!-- narrative: up to three hashtags --> |
 
 The About text, as published:
 
