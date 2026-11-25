@@ -4,6 +4,12 @@ WORKDIR /app
 
 RUN apk add --no-cache git build-base ca-certificates
 
+# Patched OpenSSL, as explicit minimum versions. The runner copies libssl.so.3 and libcrypto.so.3 from
+# this stage (see below), and that copy is what OTP's crypto NIF loads, so the fix has to land here. The
+# base image predates the patched packages, so a digest bump alone does not bring them. Each future CVE
+# in these packages moves these minimums; apk fails the build if the repository no longer has them.
+RUN apk add --no-cache 'libssl3>=3.5.9-r1' 'libcrypto3>=3.5.9-r1'
+
 ENV MIX_ENV=prod
 ENV ERL_FLAGS="+JPperf true"
 
@@ -34,11 +40,18 @@ LABEL org.opencontainers.image.title="Malachi" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="HectorIFC"
 
+# zlib, libssl3 and libcrypto3 carry explicit minimum versions: the base image predates the patched
+# packages, so neither a digest bump nor Dependabot brings them. The OpenSSL libraries are overwritten
+# by the builder's copy below; pinning them here keeps the apk database, which image scanners read,
+# honest about what ships. Each future CVE in these packages moves these minimums.
 RUN apk add --no-cache \
         libstdc++ \
         libgcc \
         ncurses-libs \
-        ca-certificates
+        ca-certificates \
+        'zlib>=1.4-r0' \
+        'libssl3>=3.5.9-r1' \
+        'libcrypto3>=3.5.9-r1'
 
 # Copy OpenSSL libraries from builder to ensure binary compatibility with crypto.so
 # The elixir:1.19-otp-28-alpine image has crypto.so compiled against a specific OpenSSL version

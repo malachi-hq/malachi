@@ -350,7 +350,7 @@ endpoint.
 | **User** | `malachi` (UID 1000) |
 | **Workdir** | `/app` |
 | **JIT Compilation** | Enabled (`+JPperf true`) |
-| **Runtime Dependencies** | `libssl3` and `libcrypto3` (copied from the builder), `libstdc++`, `libgcc`, `ncurses-libs` |
+| **Runtime Dependencies** | `libssl3` and `libcrypto3` `>=3.5.9-r1` (copied from the builder), `zlib>=1.4-r0`, `libstdc++`, `libgcc`, `ncurses-libs` |
 
 ---
 
