@@ -42,6 +42,7 @@ subjects:
 ---
 # Erlang distribution cookie + user passwords. REPLACE before applying, or create out-of-band with
 # `kubectl create secret generic malachi-secrets --from-literal=release-cookie=$(openssl rand -hex 32) ...`
+# The cookie placeholder below is refused at boot: a clustered node will not start on a value committed here.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -57,10 +58,16 @@ stringData:
 ---
 # Inter-node TLS material (mounted at /etc/malachi/dist). REPLACE with your CA + a CA-signed node cert/key;
 # dist_tls.conf is the ssl_dist options file (see rel/dist_tls.conf.example, paths under /etc/malachi/dist).
-# Generate dev material with scripts/generate-dist-certs.sh, then e.g.:
+# A connecting node checks that the peer's certificate names the host it dialled, here each pod's name in the
+# headless service; OTP's default check takes no wildcard. One certificate naming the three pods serves them all,
+# and growing the StatefulSet means issuing it again (per-pod certificates, from cert-manager say, avoid that).
+# Use a CA of its own for distribution: any certificate it signs can join the cluster. For example (namespace
+# "default"):
+#   DIST_CERT_DIR=dist DIST_CONF_PREFIX=/etc/malachi/dist DIST_CERT_HOSTS=malachi-0.malachi-headless.default.svc.cluster.local,malachi-1.malachi-headless.default.svc.cluster.local,malachi-2.malachi-headless.default.svc.cluster.local \
+#     scripts/generate-dist-certs.sh
 #   kubectl create secret generic malachi-dist-tls \
-#     --from-file=ca.crt=priv/dist_cert/ca.crt --from-file=node.crt=priv/dist_cert/node.crt \
-#     --from-file=node.key=priv/dist_cert/node.key --from-file=dist_tls.conf=priv/dist_cert/dist_tls.conf
+#     --from-file=ca.crt=dist/ca.crt --from-file=node.crt=dist/node.crt \
+#     --from-file=node.key=dist/node.key --from-file=dist_tls.conf=dist/dist_tls.conf
 apiVersion: v1
 kind: Secret
 metadata:
@@ -72,8 +79,8 @@ stringData:
   node.key: "REPLACE_WITH_NODE_KEY_PEM"
   dist_tls.conf: |
     [
-      {server, [{certfile, "/etc/malachi/dist/node.crt"}, {keyfile, "/etc/malachi/dist/node.key"}, {cacertfile, "/etc/malachi/dist/ca.crt"}, {verify, verify_peer}, {fail_if_no_peer_cert, true}]},
-      {client, [{certfile, "/etc/malachi/dist/node.crt"}, {keyfile, "/etc/malachi/dist/node.key"}, {cacertfile, "/etc/malachi/dist/ca.crt"}, {verify, verify_peer}]}
+      {server, [{certfile, "/etc/malachi/dist/node.crt"}, {keyfile, "/etc/malachi/dist/node.key"}, {cacertfile, "/etc/malachi/dist/ca.crt"}, {verify, verify_peer}, {fail_if_no_peer_cert, true}, {secure_renegotiate, true}, {versions, ['tlsv1.3', 'tlsv1.2']}]},
+      {client, [{certfile, "/etc/malachi/dist/node.crt"}, {keyfile, "/etc/malachi/dist/node.key"}, {cacertfile, "/etc/malachi/dist/ca.crt"}, {verify, verify_peer}, {secure_renegotiate, true}, {versions, ['tlsv1.3', 'tlsv1.2']}]}
     ].
 ---
 # Headless service: stable per-pod DNS (malachi-0.malachi-headless.<ns>.svc.cluster.local) for Erlang
@@ -99,6 +106,35 @@ spec:
       port: 4369
     - name: dist
       port: 9100
+---
+# Only the Malachi pods reach each other's epmd (4369) and distribution (9100) ports: binding them to the pod IP
+# (MALACHI_DIST_INTERFACE below) picks the interface, this picks who may connect. The client protocol (4040) and
+# the dashboard and metrics (4041) stay open to the cluster. Needs a CNI that enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: malachi-distribution
+spec:
+  podSelector:
+    matchLabels:
+      app: malachi
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: malachi
+      ports:
+        - protocol: TCP
+          port: 4369
+        - protocol: TCP
+          port: 9100
+    - ports:
+        - protocol: TCP
+          port: 4040
+        - protocol: TCP
+          port: 4041
 ---
 # Client-facing service: round-robins the binary log protocol (4040) and the dashboard/metrics (4041)
 # across Ready pods.
@@ -238,6 +274,14 @@ spec:
                   key: release-cookie
             - name: ERL_AFLAGS
               value: "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100"
+            # epmd and the distribution port listen on the pod IP alone (rel/env.sh.eex), the address the pod's
+            # name in the headless service resolves to; epmd keeps loopback too.
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: MALACHI_DIST_INTERFACE
+              value: $(POD_IP)
             # --- Inter-node TLS: run Erlang distribution (ra + replication) over mutual TLS instead of
             #     plaintext. Certs + the options file come from the malachi-dist-tls Secret below. ---
             - name: MALACHI_DIST_TLS
