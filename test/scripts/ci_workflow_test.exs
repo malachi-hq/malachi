@@ -70,6 +70,83 @@ defmodule Malachi.CiWorkflowTest do
     |> Enum.reject(&is_nil/1)
   end
 
+  # The workflow's top-level env.
+  defp workflow_env(ci) do
+    [document] = :yamerl_constr.string(String.to_charlist(ci), [:str_node_as_binary])
+    {"env", env} = List.keyfind(document, "env", 0)
+    Map.new(env)
+  end
+
+  # What keeps the partitions and TEST_PARTITIONS in step: the matrix lists 1 to TEST_PARTITIONS, and the suite step
+  # runs its own partition of that many, exporting its coverage under its own name.
+  defp partition_problems(ci) do
+    partitions = workflow_env(ci)["TEST_PARTITIONS"]
+    {_id, test} = List.keyfind(WorkflowText.yaml_jobs(ci), "test", 0)
+    entries = WorkflowText.matrix_entries(test["strategy"])
+    body = Map.fetch!(WorkflowText.jobs(ci), "test")
+    suite = Enum.find(WorkflowText.steps(ci), &(&1.job == "test" and &1.run =~ "mix coveralls.json"))
+
+    [
+      {:not_a_count, not (is_integer(partitions) and partitions > 0)},
+      {:matrix_mismatch, is_integer(partitions) and entries != for(k <- 1..partitions//1, do: %{"partition" => k})},
+      {:no_suite_step, suite == nil},
+      {:not_partitioned, suite != nil and not String.contains?(suite.run, ~s/--partitions "$TEST_PARTITIONS"/)},
+      {:not_exported,
+       suite != nil and not String.contains?(suite.run, ~s/--export-coverage "partition-$MIX_TEST_PARTITION"/)},
+      {:partition_unset, not String.contains?(body, "MIX_TEST_PARTITION: ${{ matrix.partition }}")}
+    ]
+    |> Enum.filter(&elem(&1, 1))
+    |> Enum.map(&elem(&1, 0))
+  end
+
+  # What makes the coverage job's number the suite's and its threshold binding: it waits for the partitions,
+  # counts their exports, merges them, and fails below the threshold, in steps that block.
+  defp coverage_problems(ci) do
+    {_id, coverage} = List.keyfind(WorkflowText.yaml_jobs(ci), "coverage", 0)
+
+    steps =
+      for step <- WorkflowText.steps(ci),
+          step.job == "coverage",
+          step.conditions == [] and step.continue_on_error == [],
+          do: step.run
+
+    merge = Enum.find(steps, &(&1 =~ "mix coveralls.multiple"))
+
+    [
+      {:not_after_test, List.wrap(coverage["needs"]) != ["test"]},
+      {:no_count_check, not Enum.any?(steps, &(&1 =~ ~s/[ "$found" -eq "$TEST_PARTITIONS" ]/))},
+      {:no_merge, merge == nil},
+      {:no_threshold, merge != nil and not (merge =~ "--type local")},
+      {:no_report, merge != nil and not (merge =~ "--type json")},
+      {:not_imported, merge != nil and not (merge =~ "--import-cover cover/partitions")},
+      {:runs_tests, merge != nil and not (merge =~ "--exclude test")}
+    ]
+    |> Enum.filter(&elem(&1, 1))
+    |> Enum.map(&elem(&1, 0))
+  end
+
+  # Download steps, in any workflow, that read artifacts from another run: the way a pull request's artifact could
+  # reach a job with more privileges than the pull request's own run.
+  defp cross_run_downloads do
+    for file <- WorkflowText.files(),
+        step <- WorkflowText.steps(File.read!(file)),
+        String.starts_with?(step.uses || "", "actions/download-artifact@"),
+        Map.has_key?(step.with, "run-id") or Map.has_key?(step.with, "github-token"),
+        do: {Path.basename(file), step.job}
+  end
+
+  # Workflows triggered by the completion of this one, which would run with the base repository's privileges on
+  # whatever a pull request's run left behind.
+  defp ci_followers do
+    for file <- WorkflowText.files(),
+        [document] = :yamerl_constr.file(String.to_charlist(file), [:str_node_as_binary]),
+        {"on", on} <- [List.keyfind(document, "on", 0)],
+        is_list(on),
+        {"workflow_run", settings} <- on,
+        "CI" in List.wrap(Map.new(settings)["workflows"]),
+        do: Path.basename(file)
+  end
+
   describe "no failure is hidden" do
     test "no step may fail without failing the run" do
       assert hiding_steps(@ci) == []
@@ -101,7 +178,7 @@ defmodule Malachi.CiWorkflowTest do
       tampered = in_job(@ci, "summary", ~s/if [ "${{ needs.quality.result }}" != "success" ]; then/, "if false; then")
       assert unchecked_jobs(tampered) == [{"quality", :not_checked}]
 
-      tampered = in_job(@ci, "summary", "needs: [test, docker, quality,", "needs: [test, docker,")
+      tampered = in_job(@ci, "summary", "needs: [test, coverage, docker, quality,", "needs: [test, coverage, docker,")
       assert unchecked_jobs(tampered) == [{"quality", :not_needed}]
     end
 
@@ -143,6 +220,63 @@ defmodule Malachi.CiWorkflowTest do
 
       tampered = in_job(@ci, "test", "uses: actions/setup-node@", "uses: actions/setup-python@")
       assert suite_jobs_off_node(tampered) == [{"test", []}]
+    end
+  end
+
+  describe "the partitions and the merged coverage" do
+    test "the matrix and the suite step agree on the number of partitions" do
+      assert partition_problems(@ci) == []
+
+      assert partition_problems(String.replace(@ci, "partition: [1, 2, 3, 4]", "partition: [1, 2, 3]")) == [
+               :matrix_mismatch
+             ]
+
+      assert partition_problems(String.replace(@ci, "  TEST_PARTITIONS: 4\n", "  TEST_PARTITIONS: 5\n")) == [
+               :matrix_mismatch
+             ]
+
+      assert partition_problems(String.replace(@ci, "  TEST_PARTITIONS: 4\n", "  TEST_PARTITIONS: four\n")) == [
+               :not_a_count
+             ]
+
+      assert partition_problems(in_job(@ci, "test", ~s/--partitions "$TEST_PARTITIONS" /, "")) == [:not_partitioned]
+
+      assert partition_problems(in_job(@ci, "test", ~s/--export-coverage "partition-$MIX_TEST_PARTITION" /, "")) == [
+               :not_exported
+             ]
+
+      assert partition_problems(
+               in_job(@ci, "test", "MIX_TEST_PARTITION: ${{ matrix.partition }}", "MIX_TEST_PARTITION: 1")
+             ) ==
+               [:partition_unset]
+    end
+
+    test "the coverage job merges every partition's export and fails below the threshold" do
+      assert coverage_problems(@ci) == []
+
+      assert coverage_problems(in_job(@ci, "coverage", "    needs: test\n", "")) == [:not_after_test]
+      assert coverage_problems(in_job(@ci, "coverage", " --type local", "")) == [:no_threshold]
+      assert coverage_problems(in_job(@ci, "coverage", " --exclude test", "")) == [:runs_tests]
+
+      assert coverage_problems(in_job(@ci, "coverage", ~s/[ "$found" -eq "$TEST_PARTITIONS" ]/, "true")) == [
+               :no_count_check
+             ]
+
+      hidden = in_job(@ci, "coverage", "--exclude test\n", "--exclude test\n        continue-on-error: true\n")
+      assert coverage_problems(hidden) == [:no_merge]
+    end
+
+    test "the threshold is coveralls.json's minimum_coverage, 85, and mix.exs sets none ExCoveralls would ignore" do
+      assert File.read!(Path.expand("../../coveralls.json", __DIR__))
+             |> Jason.decode!()
+             |> get_in(["coverage_options", "minimum_coverage"]) == 85
+
+      assert Mix.Project.config()[:test_coverage] == [tool: ExCoveralls]
+    end
+
+    test "no workflow reads another run's artifacts or runs after this one, where a pull request's coverage could reach" do
+      assert cross_run_downloads() == []
+      assert ci_followers() == []
     end
   end
 end

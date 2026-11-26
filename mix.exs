@@ -41,7 +41,9 @@ defmodule Malachi.MixProject do
       blog_comments: @blog_comments,
       docs: docs(),
       aliases: aliases(),
-      test_coverage: [tool: ExCoveralls, threshold: 85],
+      # The threshold is coveralls.json's minimum_coverage, the one ExCoveralls reads: a `threshold:` here is read
+      # only by Elixir's own coverage tool, which this project does not use (#390).
+      test_coverage: [tool: ExCoveralls],
       elixirc_paths: elixirc_paths(Mix.env()),
       # Apps dialyzer does not put in the default PLT, each referenced by code it analyses: `:mix` by the
       # `Mix.Tasks.*` admin tasks (Mix.Task/Mix.shell/Mix.raise), `:ex_unit` by the helpers under
@@ -330,6 +332,7 @@ defmodule Malachi.MixProject do
         "coveralls.post": :test,
         "coveralls.html": :test,
         "coveralls.json": :test,
+        "coveralls.multiple": :test,
         "deps.audit": :test,
         sobelow: :test
       ]

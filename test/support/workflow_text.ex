@@ -79,8 +79,9 @@ defmodule Malachi.Test.WorkflowText do
 
   @doc """
   The entries a job runs for, from its `strategy` as yamerl reads it: every combination of its axes, plus its
-  `include` entries, or one empty entry when it has no matrix. An `exclude` is not read, so a matrix with one
-  raises instead of counting an entry that never runs.
+  `include` entries, or one empty entry when it has no matrix. An axis given as an expression
+  (`${{ fromJSON(...) }}`) is only known when the workflow runs, so it counts as one entry holding the expression.
+  An `exclude` is not read, so a matrix with one raises instead of counting an entry that never runs.
   """
   @spec matrix_entries(list() | nil) :: [map()]
   def matrix_entries(nil), do: [%{}]
@@ -92,10 +93,13 @@ defmodule Malachi.Test.WorkflowText do
 
     combinations =
       Enum.reduce(axes, [%{}], fn {key, values}, acc ->
-        for entry <- acc, value <- values, do: Map.put(entry, key, value)
+        for entry <- acc, value <- axis_values(values), do: Map.put(entry, key, value)
       end)
 
     combinations = if axes == %{} and include != [], do: [], else: combinations
     combinations ++ Enum.map(include, &Map.new/1)
   end
+
+  defp axis_values(values) when is_list(values), do: values
+  defp axis_values(expression) when is_binary(expression), do: [expression]
 end

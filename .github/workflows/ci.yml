@@ -15,15 +15,25 @@ permissions:
 
 env:
   MIX_ENV: test
+  # How many partitions the suite is split across (#390). The test job's matrix lists 1 to this number, and
+  # test/scripts/ci_workflow_test.exs fails when the two disagree. Picked from measured wall time on CI.
+  TEST_PARTITIONS: 4
 
 jobs:
+  # The suite, split across TEST_PARTITIONS jobs that run at once (#390): mix test --partitions hands each test
+  # module to one partition, so the partitions together run every test once. Each one exports its coverage for the
+  # coverage job, which merges them and applies the threshold. The checks that read the source rather than run it
+  # (formatting, warnings, credo, design tokens, unused dependencies) are Code Quality's.
   test:
-    name: Test
+    name: Test (partition ${{ matrix.partition }})
     runs-on: ubuntu-latest
 
-    # The suite and its coverage only. The checks that read the source rather than run it (formatting,
-    # warnings, credo, design tokens, unused dependencies) are Code Quality's, so this job is the suite's
-    # time and nothing else (#390).
+    strategy:
+      # Every partition runs to its end, so one failing partition does not hide another's failures.
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
+
     steps:
       - name: 🛡️ Harden the runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -73,8 +83,82 @@ jobs:
           done
           exit 1
       
+      # No threshold here: a partition covers only the modules its tests reach, so the threshold applies to the
+      # merged report in the coverage job. --slowest-modules lists where this partition's time went.
       - name: 📊 Run tests with coverage
-        run: mix coveralls.json
+        env:
+          MIX_TEST_PARTITION: ${{ matrix.partition }}
+        run: mix coveralls.json --partitions "$TEST_PARTITIONS" --export-coverage "partition-$MIX_TEST_PARTITION" --slowest-modules 30
+
+      - name: 📤 Upload the partition's coverage
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-partition-${{ matrix.partition }}
+          path: cover/partition-${{ matrix.partition }}.coverdata
+          if-no-files-found: error
+          retention-days: 1
+
+  # One coverage report for the whole suite, from the partitions' exported data, and the threshold applied to it
+  # (minimum_coverage in coveralls.json). Every partition must have exported: a missing one would lower the number
+  # without saying why, so the job counts them first. --exclude test runs no test: the data is imported, and the
+  # local report is what fails below the threshold.
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: 📥 Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 🔧 Setup Elixir
+        id: beam
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
+        with:
+          version-file: .github/beam-versions
+          version-type: strict
+
+      - name: 📦 Cache dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
+
+      - name: 🔨 Install dependencies
+        run: |
+          # Retry: the Hex registry occasionally drops the connection mid-fetch. Fail only if all attempts fail.
+          for i in 1 2 3; do
+            mix deps.get && exit 0
+            echo "mix deps.get failed (attempt $i/3)"
+            if [ "$i" -lt 3 ]; then sleep 5; fi
+          done
+          exit 1
+
+      - name: 📥 Download the partitions' coverage
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: coverage-partition-*
+          path: cover/partitions
+          merge-multiple: true
+
+      - name: 🔢 Check every partition exported its coverage
+        run: |
+          found=$(find cover/partitions -name 'partition-*.coverdata' | wc -l)
+          echo "found $found of $TEST_PARTITIONS partitions"
+          [ "$found" -eq "$TEST_PARTITIONS" ]
+
+      - name: 📊 Merge the coverage and apply the threshold
+        run: mix coveralls.multiple --type json --type local --import-cover cover/partitions --exclude test
 
       - name: 📈 Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
@@ -526,7 +610,7 @@ jobs:
   summary:
     name: CI Summary
     runs-on: ubuntu-latest
-    needs: [test, docker, quality, multinode, dialyzer, landing-page, terraform]
+    needs: [test, coverage, docker, quality, multinode, dialyzer, landing-page, terraform]
     if: always()
 
     steps:
@@ -537,6 +621,7 @@ jobs:
       - name: 📊 Check results
         run: |
           echo "Test Status: ${{ needs.test.result }}"
+          echo "Coverage Status: ${{ needs.coverage.result }}"
           echo "Docker Status: ${{ needs.docker.result }}"
           echo "Quality Status: ${{ needs.quality.result }}"
           echo "Multinode Status: ${{ needs.multinode.result }}"
@@ -546,6 +631,11 @@ jobs:
 
           if [ "${{ needs.test.result }}" != "success" ]; then
             echo "❌ Tests failed!"
+            exit 1
+          fi
+
+          if [ "${{ needs.coverage.result }}" != "success" ]; then
+            echo "❌ Coverage below the threshold, or not merged!"
             exit 1
           fi
 

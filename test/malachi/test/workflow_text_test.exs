@@ -42,6 +42,11 @@ defmodule Malachi.Test.WorkflowTextTest do
                [%{"partition" => 1}, %{"partition" => 2}, %{"extra" => true}]
     end
 
+    test "an axis given as an expression counts as one entry holding it" do
+      assert WorkflowText.matrix_entries(strategy("    runner: ${{ fromJSON(needs.plan.outputs.runners) }}\n")) ==
+               [%{"runner" => "${{ fromJSON(needs.plan.outputs.runners) }}"}]
+    end
+
     test "an exclude is refused rather than counted as entries that run" do
       assert_raise ArgumentError, "a matrix exclude is not read", fn ->
         WorkflowText.matrix_entries(strategy("    partition: [1, 2]\n    exclude:\n      - partition: 2\n"))
