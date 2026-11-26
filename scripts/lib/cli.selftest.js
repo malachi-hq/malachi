@@ -13,6 +13,13 @@ const assert = require('assert');
 const path = require('path');
 const { spawn } = require('child_process');
 const { FakeBroker } = require('./testing/fake_broker');
+const { msFromEnv, waits } = require('./cli');
+
+// The CLIs started here wait this long for a cluster they cannot reach, and this long for each connect and its
+// authentication, rather than their defaults of 10 and 15 seconds (./cli.js, checked in the last case): the
+// cases prove how the waits behave, which shorter ones prove as well, in seconds rather than a minute and more.
+const WAIT_MS = 2000;
+const CONNECT_MS = 3000;
 
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -24,7 +31,15 @@ const started = new Set();
 // `interrupt()` (SIGINT, as Ctrl-C).
 function start(script, args, port) {
   const child = spawn(process.execPath, [path.join(__dirname, '..', script), ...args], {
-    env: { ...process.env, MALACHI_HOST: '127.0.0.1', MALACHI_PORT: String(port), MALACHI_USER: 'u', MALACHI_PASS: 'p' },
+    env: {
+      ...process.env,
+      MALACHI_HOST: '127.0.0.1',
+      MALACHI_PORT: String(port),
+      MALACHI_USER: 'u',
+      MALACHI_PASS: 'p',
+      MALACHI_UNREACHABLE_WAIT_MS: String(WAIT_MS),
+      MALACHI_CONNECT_TIMEOUT_MS: String(CONNECT_MS),
+    },
   });
   let out = '';
   child.stdout.on('data', (d) => (out += d));
@@ -65,9 +80,8 @@ check('a follower reads on across its broker going down and coming back, however
   try {
     await untilOut(cli, /first/);
     broker.stop();
-    // fetches find no broker for longer than a run that reads once waits (about ten seconds): waited out,
-    // not an exit
-    await tick(12000);
+    // fetches find no broker for longer than a run that reads once waits (WAIT_MS): waited out, not an exit
+    await tick(WAIT_MS * 1.5);
     const back = await new FakeBroker().start(broker.port);
     back.setRoutes('t', [[0, 0, 16, 'self']]);
     back.write('t', 0, ['first', 'second']);
@@ -88,7 +102,7 @@ check('a group follower and a subscriber started before the cluster wait for it,
   const subscriber = start('subscriber.js', ['t', '--group', 's', '--member', 's1'], port);
   try {
     // longer than a run that reads once waits for the cluster
-    await tick(12000);
+    await tick(WAIT_MS * 1.5);
     for (const cli of [follower, subscriber]) assert.doesNotMatch(cli.out(), /Error/);
     const broker = await new FakeBroker().start(port);
     broker.setRoutes('t', [[0, 0, 16, 'self']]);
@@ -107,14 +121,14 @@ check('a group follower and a subscriber started before the cluster wait for it,
   }
 });
 
-check('a run that reads once gives up on a cluster it cannot reach after about ten seconds, its group join too', async () => {
+check('a run that reads once gives up on a cluster it cannot reach after its wait, its group join too', async () => {
   for (const args of [['t'], ['t', '--group', 'g']]) {
     const started = Date.now();
     const cli = start('consumer.js', args, await freePort());
     assert.strictEqual(await cli.exitWithin(40000), 1, args.join(' '));
     const waited = Date.now() - started;
     assert.match(cli.out(), /Error: metadata_unavailable/, args.join(' '));
-    assert.ok(waited >= 10000 && waited < 20000, `${args.join(' ')}: gave up after ${waited} ms`);
+    assert.ok(waited >= WAIT_MS && waited < WAIT_MS * 3, `${args.join(' ')}: gave up after ${waited} ms`);
   }
 });
 
@@ -134,9 +148,10 @@ check('a run that reads once gives up on a broker that takes the connection and 
       assert.strictEqual(await cli.exitWithin(40000), 1, args.join(' '));
       const waited = Date.now() - started;
       assert.match(cli.out(), /Error: metadata_unavailable/, args.join(' '));
-      // ten seconds and the connect still on its way then: one address only, which takes the connection at
-      // once and then leaves its authentication unanswered for the 15 s it is given
-      assert.ok(waited >= 10000 && waited < 27000, `${args.join(' ')}: gave up after ${waited} ms`);
+      // the wait and the connect still on its way then: one address only, which takes the connection at once
+      // and then leaves its authentication unanswered for the CONNECT_MS it is given. Above the wait plus one
+      // connect is a connect timeout the CLI did not take from its configuration.
+      assert.ok(waited >= WAIT_MS && waited < WAIT_MS + CONNECT_MS + 2000, `${args.join(' ')}: gave up after ${waited} ms`);
     }
   } finally {
     silent.stop();
@@ -196,6 +211,33 @@ check('--member without --group is refused by both group CLIs', async () => {
     assert.strictEqual(await cli.exitWithin(40000), 1, script);
     assert.match(cli.out(), /--member requires --group/, script);
   }
+});
+
+check('the waits default to 10 s for an unreachable cluster and 15 s a connect, and refuse what is not a wait', async () => {
+  assert.deepStrictEqual(waits({}), { unreachableWaitMs: 10000, connectTimeout: 15000 });
+  assert.deepStrictEqual(waits({ MALACHI_UNREACHABLE_WAIT_MS: '', MALACHI_CONNECT_TIMEOUT_MS: '' }), {
+    unreachableWaitMs: 10000,
+    connectTimeout: 15000,
+  });
+  assert.deepStrictEqual(waits({ MALACHI_UNREACHABLE_WAIT_MS: '2500', MALACHI_CONNECT_TIMEOUT_MS: '700' }), {
+    unreachableWaitMs: 2500,
+    connectTimeout: 700,
+  });
+  for (const bad of ['0', '-1', '1.5', '10s', ' 10', 'abc']) {
+    assert.throws(() => msFromEnv('MALACHI_UNREACHABLE_WAIT_MS', 10000, { MALACHI_UNREACHABLE_WAIT_MS: bad }), /positive number of milliseconds/, bad);
+  }
+});
+
+check('a CLI started with a wait that is not one exits non-zero and says which variable', async () => {
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'consumer.js'), 't'], {
+    env: { ...process.env, MALACHI_HOST: '127.0.0.1', MALACHI_PORT: String(await freePort()), MALACHI_UNREACHABLE_WAIT_MS: 'soon' },
+  });
+  let out = '';
+  child.stdout.on('data', (d) => (out += d));
+  child.stderr.on('data', (d) => (out += d));
+  const code = await new Promise((resolve) => child.on('exit', resolve));
+  assert.notStrictEqual(code, 0, out);
+  assert.match(out, /MALACHI_UNREACHABLE_WAIT_MS must be a positive number of milliseconds/);
 });
 
 async function selfTest() {
