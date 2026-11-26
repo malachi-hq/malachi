@@ -17,7 +17,7 @@ env:
   MIX_ENV: test
   # How many partitions the suite is split across (#390). The test job's matrix lists 1 to this number, and
   # test/scripts/ci_workflow_test.exs fails when the two disagree. Picked from measured wall time on CI.
-  TEST_PARTITIONS: 6
+  TEST_PARTITIONS: 8
 
 jobs:
   # The suite, split across TEST_PARTITIONS jobs that run at once (#390): mix test --partitions hands each test
@@ -32,7 +32,7 @@ jobs:
       # Every partition runs to its end, so one failing partition does not hide another's failures.
       fail-fast: false
       matrix:
-        partition: [1, 2, 3, 4, 5, 6]
+        partition: [1, 2, 3, 4, 5, 6, 7, 8]
 
     steps:
       - name: 🛡️ Harden the runner
