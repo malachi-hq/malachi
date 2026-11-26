@@ -166,3 +166,26 @@ defmodule Malachi.Cluster.DistGuardTest do
     for cookie <- DistGuard.denylist(), do: assert(cookie =~ ~r/\A[A-Za-z0-9_]+\z/)
   end
 end
+
+defmodule Malachi.Cluster.DistGuardFactsEnvTest do
+  # facts/1 against the environment, apart from the async module above: it sets a variable the whole VM reads.
+  use ExUnit.Case, async: false
+
+  alias Malachi.Cluster.DistGuard
+
+  test "the options file comes from the VM's own arguments, never from MALACHI_DIST_TLS_OPTFILE" do
+    previous = System.get_env("MALACHI_DIST_TLS_OPTFILE")
+
+    on_exit(fn ->
+      if previous,
+        do: System.put_env("MALACHI_DIST_TLS_OPTFILE", previous),
+        else: System.delete_env("MALACHI_DIST_TLS_OPTFILE")
+    end)
+
+    System.put_env("MALACHI_DIST_TLS_OPTFILE", "/dist/verified.conf")
+
+    # this VM was started with no -ssl_dist_optfile, so there is no file its distribution reads
+    assert :init.get_argument(:ssl_dist_optfile) == :error
+    assert DistGuard.facts(true).optfile == nil
+  end
+end

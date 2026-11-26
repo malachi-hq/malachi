@@ -1084,6 +1084,7 @@ defmodule Malachi.ApplicationDistributionSafeTest do
   import ExUnit.CaptureLog
 
   alias Malachi.Application, as: App
+  alias Malachi.Cluster.DistGuard
 
   defp gate(checked) do
     test = self()
@@ -1133,5 +1134,28 @@ defmodule Malachi.ApplicationDistributionSafeTest do
   test "the suite's own node is not clustered, so the gate passes it" do
     refute App.clustered?()
     assert App.ensure_distribution_safe() == :ok
+  end
+
+  test "a discovery strategy alone makes a node clustered, and the gate then checks it" do
+    topology = Application.get_env(:malachi, :cluster_topology)
+    tls = System.get_env("MALACHI_DIST_TLS")
+
+    on_exit(fn ->
+      Application.put_env(:malachi, :cluster_topology, topology)
+      if tls, do: System.put_env("MALACHI_DIST_TLS", tls), else: System.delete_env("MALACHI_DIST_TLS")
+    end)
+
+    Application.put_env(:malachi, :cluster_topology, Map.put(topology || %{}, :strategy, :epmd))
+    System.delete_env("MALACHI_DIST_TLS")
+
+    assert App.clustered?()
+    refute App.peers?()
+
+    # this VM runs plaintext distribution, which a clustered node refuses without the explicit opt-out; the facts
+    # carry a valid cookie of the test's own, since the cookie is checked first and this VM's comes from the host
+    facts = %{DistGuard.facts(App.clustered?()) | cookie: String.duplicate("c", 32), baked_cookie: nil}
+    {output, _} = gate(DistGuard.check(facts))
+    assert_received {:halted, 78}
+    assert output =~ "does not run over TLS"
   end
 end

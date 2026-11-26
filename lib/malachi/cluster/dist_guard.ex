@@ -19,9 +19,11 @@ defmodule Malachi.Cluster.DistGuard do
   `MALACHI_DIST_TLS=false` is the one way to run plaintext distribution; any value other than `true`, `false` or
   unset is refused.
 
-  `rel/env.sh.eex` applies the same cookie and TLS rules in the release before the VM starts, so a refused node never
-  opens its distribution port; this module is the check for every node, the ones `mix run` starts included, and the
-  release template takes its denylist from here. `check/1` is pure; `facts/0` reads the running VM.
+  In a release, `rel/env.sh.eex` applies the cookie rules, requires TLS and reads the options file's terms before the
+  VM starts, so those refusals come before the node listens. Reading the options file as Erlang terms and comparing
+  its CA with `MALACHI_TLS_CACERTFILE` happen only here, once the VM runs and its distribution port is open. This
+  module is the check for every node, the ones `mix run` starts included, and the release template takes its
+  denylist from here. `check/1` is pure; `facts/1` reads the running VM.
   """
 
   # Cookies committed to this repository, now or in its history: they stay refused for good, since the history is
@@ -127,7 +129,8 @@ defmodule Malachi.Cluster.DistGuard do
   @doc """
   The facts `check/1` reads, from the running VM: whether the node is clustered (`clustered?`, from the caller, which
   knows its configuration), the cookie in effect, the release's baked cookie, `MALACHI_DIST_TLS`, the distribution
-  protocols and options file the VM was started with, and `MALACHI_TLS_CACERTFILE`.
+  protocols and the options file the VM was started with (`-ssl_dist_optfile`, never a variable), and
+  `MALACHI_TLS_CACERTFILE`.
   """
   @spec facts(boolean()) :: facts()
   def facts(clustered?) do
@@ -137,7 +140,9 @@ defmodule Malachi.Cluster.DistGuard do
       baked_cookie: baked_cookie(System.get_env("RELEASE_ROOT")),
       dist_tls: System.get_env("MALACHI_DIST_TLS"),
       proto_dist: init_values(:proto_dist),
-      optfile: List.first(init_values(:ssl_dist_optfile)) || System.get_env("MALACHI_DIST_TLS_OPTFILE"),
+      # Only the file the VM was started with: a variable naming another would vouch for options the distribution
+      # does not use (a VM started with -ssl_dist_opt alone, say).
+      optfile: List.first(init_values(:ssl_dist_optfile)),
       client_cacertfile: System.get_env("MALACHI_TLS_CACERTFILE")
     }
   end
