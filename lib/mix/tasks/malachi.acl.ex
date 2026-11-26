@@ -110,7 +110,7 @@ defmodule Mix.Tasks.Malachi.Acl do
       mix malachi.acl revoke <username> <operation> <pattern>
 
     operation: produce | consume    pattern: a topic (orders.eu) or a *-suffixed prefix (orders.*)
-    connection: --node (or $MALACHI_NODE, default malachi@127.0.0.1), --cookie (or $RELEASE_COOKIE)
+    #{Rpc.connection_usage()}
     """
   end
 end

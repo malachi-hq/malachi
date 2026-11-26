@@ -212,7 +212,7 @@ defmodule Mix.Tasks.Malachi.Purge do
 
     to answer a data subject's request, add both: --request <id> --reason <text>
 
-    connection: --node (or $MALACHI_NODE, default malachi@127.0.0.1), --cookie (or $RELEASE_COOKIE)
+    #{Rpc.connection_usage()}
     """
   end
 end

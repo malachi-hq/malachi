@@ -127,7 +127,7 @@ defmodule Mix.Tasks.Malachi.Flag do
     lists the cluster's feature flags, or switches one on once every configured node advertises the
     capability it names. a flag is never switched back off.
 
-    connection: --node (or $MALACHI_NODE, default malachi@127.0.0.1), --cookie (or $RELEASE_COOKIE)
+    #{Rpc.connection_usage()}
     """
   end
 end

@@ -6,7 +6,11 @@ defmodule Malachi.CLI.Rpc do
   than raising) so the tasks own their own output/exit behavior.
   """
 
+  alias Malachi.Cluster.DistGuard
+
   @default_node "malachi@127.0.0.1"
+  # How a task's VM starts with TLS distribution: the protocol is fixed when a VM boots.
+  @tls_erl_options ~s(ELIXIR_ERL_OPTIONS="-proto_dist inet_tls -ssl_dist_optfile <options file>")
   @rpc_timeout 5_000
   # Connect budget: a fresh mix VM's distribution plus epmd churn from rapid successive tasks can take a
   # moment to settle, so retry generously (attempts x backoff) before giving up.
@@ -32,7 +36,9 @@ defmodule Malachi.CLI.Rpc do
       if connect_with_retry(node, @connect_attempts) do
         :ok
       else
-        {:error, "could not connect to #{node} (check --node/--cookie and that the node is running and named)"}
+        {:error,
+         "could not connect to #{node} (check --node/--cookie and that the node is running and named; a node on " <>
+           "TLS distribution needs this task started with MALACHI_DIST_TLS=true and #{@tls_erl_options})"}
       end
     end
   end
@@ -41,15 +47,53 @@ defmodule Malachi.CLI.Rpc do
     if Node.alive?() do
       :ok
     else
-      # Name the task's node by the OS pid: each `mix` invocation is a fresh VM where
-      # `System.unique_integer/1` resets, so two back-to-back tasks would otherwise both pick
-      # `malachi_cli_1` and collide in epmd. The OS pid is distinct per invocation, so rapid successive tasks
-      # never clash. A start failure (e.g. epmd not reachable) is surfaced, not raised.
-      case Node.start(:"malachi_cli_#{:os.getpid()}@127.0.0.1", name_domain: :longnames) do
-        {:ok, _pid} -> :ok
-        {:error, reason} -> {:error, "could not start distribution (#{inspect(reason)}); is epmd running?"}
+      with :ok <- check_transport(System.get_env("MALACHI_DIST_TLS"), DistGuard.facts(false)) do
+        start_distribution()
       end
     end
+  end
+
+  # Name the task's node by the OS pid: each `mix` invocation is a fresh VM where `System.unique_integer/1` resets, so
+  # two back-to-back tasks would otherwise both pick `malachi_cli_1` and collide in epmd. The OS pid is distinct per
+  # invocation, so rapid successive tasks never clash. A start failure (e.g. epmd not reachable) is surfaced, not
+  # raised.
+  defp start_distribution do
+    case Node.start(:"malachi_cli_#{:os.getpid()}@127.0.0.1", name_domain: :longnames) do
+      {:ok, _pid} -> :ok
+      {:error, reason} -> {:error, "could not start distribution (#{inspect(reason)}); is epmd running?"}
+    end
+  end
+
+  @doc """
+  Whether this task's VM can speak the distribution `MALACHI_DIST_TLS` (`tls`) asks for, from the VM's facts
+  (`Malachi.Cluster.DistGuard.facts/1`): `:ok`, or `{:error, message}` when TLS distribution was asked for and the VM
+  was started without `-proto_dist inet_tls` or without an options file. The protocol is fixed when a VM boots, so
+  a task cannot switch to TLS once it runs; the message says how to start it.
+  """
+  @spec check_transport(String.t() | nil, %{proto_dist: [String.t()], optfile: Path.t() | nil}) ::
+          :ok | {:error, String.t()}
+  def check_transport("true", %{proto_dist: protos, optfile: optfile}) do
+    if "inet_tls" in protos and optfile not in [nil, ""],
+      do: :ok,
+      else:
+        {:error,
+         "MALACHI_DIST_TLS=true, but this task's VM was started without TLS distribution: run it with " <>
+           @tls_erl_options}
+  end
+
+  def check_transport(_tls, _facts), do: :ok
+
+  @doc """
+  The usage text for reaching a node, which every task that does (`mix malachi.user`, `acl`, `ring`, `reshard`,
+  `flag`, `hold`, `policy`, `purge`) prints.
+  """
+  @spec connection_usage() :: String.t()
+  def connection_usage do
+    """
+    connection: --node (or $MALACHI_NODE, default malachi@127.0.0.1), and the cookie in $RELEASE_COOKIE
+      (--cookie also takes it, but a flag shows in ps and in the shell history)
+      a node on TLS distribution: MALACHI_DIST_TLS=true #{@tls_erl_options}\
+    """
   end
 
   # A fresh node's distribution (and epmd, under rapid task churn) may not be ready the instant it boots, so
