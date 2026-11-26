@@ -31,13 +31,13 @@ defmodule Malachi.Site.Markdown do
   @type chart :: %{chart: Chart.t(), json: String.t()}
 
   @typedoc """
-  What rendering a post gives: its HTML, its charts, the `src` of every image it shows (in order, as written),
-  and how many `<!-- narrative -->` placeholders and `malachi-seed` blocks it still holds.
+  What rendering a post gives: its HTML, its charts, every image it shows (its `src` as written and its `alt`
+  text, in order), and how many `<!-- narrative -->` placeholders and `malachi-seed` blocks it still holds.
   """
   @type result :: %{
           html: String.t(),
           charts: [chart()],
-          images: [String.t()],
+          images: [%{src: String.t(), alt: String.t()}],
           narratives: non_neg_integer(),
           seeds: non_neg_integer()
         }
@@ -122,11 +122,14 @@ defmodule Malachi.Site.Markdown do
 
   defp node({"img", attrs, _children, _}, acc) do
     src = attr(attrs, "src") || ""
+    # EarmarkParser hands the alt text over already HTML-escaped (and only that attribute), so it is decoded
+    # before it is escaped once, as every other attribute is.
+    alt = unescape(attr(attrs, "alt") || "")
 
     case link_error(src, ["https"]) do
       nil ->
-        {~s(<img src="#{escape(src)}" alt="#{escape(attr(attrs, "alt") || "")}"#{title(attrs)}>),
-         %{acc | images: [src | acc.images]}}
+        {~s(<img src="#{escape(src)}" alt="#{escape(alt)}"#{title(attrs)} loading="lazy" decoding="async">),
+         %{acc | images: [%{src: src, alt: alt} | acc.images]}}
 
       reason ->
         {"", error(acc, "the image #{inspect(src)} #{reason}")}
@@ -225,4 +228,15 @@ defmodule Malachi.Site.Markdown do
   end
 
   defp escape(text), do: Chart.escape(text)
+
+  # The inverse of the escaping EarmarkParser applies to an image's alt text: `&amp;` last, so an escaped
+  # entity in the source (`&amp;lt;`) comes back as the text it was (`&lt;`), not as `<`.
+  defp unescape(text) do
+    text
+    |> String.replace("&#39;", "'")
+    |> String.replace("&quot;", "\"")
+    |> String.replace("&lt;", "<")
+    |> String.replace("&gt;", ">")
+    |> String.replace("&amp;", "&")
+  end
 end
