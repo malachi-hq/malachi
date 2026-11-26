@@ -63,8 +63,8 @@ then the text. The rest of what a post can carry:
   (`Malachi.Site.Authors`), with the reading time and the date. The draft's `author` is git's `user.name`:
   set it to a name listed there, or add the author, whose photo goes in `site/blog/authors/`.
 - **A cover.** `cover: cover.png` in the front matter names a PNG beside the post, drawn from `cover.svg` at
-  1200x675. It is the large image under the byline, the link previews' image, the feed's first image and the
-  dev.to article's main image.
+  1200x675. It is the large image under the byline, the link previews' image, the feed's first image and, when the task sends
+  the draft to dev.to, the article's main image.
 - **Illustrations.** A diagram is shown as `![alt](<post>/<name>.png)` and drawn from `<name>.svg` beside it.
   `mix malachi.release.post --images` renders every chart, cover and illustration whose PNG is missing or
   older than its source.
@@ -97,7 +97,9 @@ DEVTO_API_KEY=... mix malachi.release.post --devto site/blog/<post>.md
 
 A second run updates the same draft while it is a draft; once it is published on dev.to the script refuses it,
 and the article is edited there. The key stays in the maintainer's environment and never reaches CI. Use one of
-the two ways for a post, not both, or dev.to holds two drafts of it.
+the two ways for a post, not both: the task run after the import finds the imported draft by its canonical URL
+and writes over it, losing any tags or edits made there, and an import that runs after the task may leave a
+second draft.
 
 ## From the browser, each post approved before it is published
 

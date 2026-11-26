@@ -92,7 +92,7 @@ are a place to start contributing.
 
 ## Follow along
 
-New posts arrive with each release: subscribe to the [newsletter](index.html) on the blog, follow the
+New posts arrive with each release: subscribe to the [newsletter](index.html#newsletter-title) on the blog, follow the
 [Atom feed](feed.xml) or the [Malachi page on LinkedIn](https://www.linkedin.com/company/malachi-hq).
 
 ## What changed in v0.28.4
