@@ -6,15 +6,13 @@ defmodule Malachi.DashboardSecurityTest do
   alias Malachi.Auth.UserStore
   alias Malachi.Dashboard.SecurityHeaders
   alias Malachi.Test.DashboardHelper
+  alias Malachi.Test.PollingHelper
 
   # These tests require dashboard authentication and rate limiting enabled in config/test.exs
 
   setup do
     # Reset rate limiter BEFORE tests (not just on_exit)
     Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
-
-    # Wait for application to be fully started
-    :timer.sleep(200)
 
     # Remove users if they exist from previous tests
     _ = Malachi.Auth.remove_user("dashboard_admin")
@@ -896,14 +894,8 @@ defmodule Malachi.DashboardSecurityTest do
   describe "rate limiting" do
     @tag :slow
     test "excessive login attempts trigger rate limit" do
-      # Wait for other tests to finish their rate limited operations
-      :timer.sleep(100)
-
-      # Reset rate limiter for this IP to start fresh
+      # Reset rate limiter for this IP to start fresh. A call: the bucket is empty when it returns.
       Malachi.RateLimiter.reset_bucket("127.0.0.1", :dashboard_auth)
-
-      # Give it a moment to settle
-      :timer.sleep(100)
 
       # Make 25 failed login attempts (limit is 10, so 11th+ should definitely be blocked)
       results =
@@ -944,7 +936,16 @@ defmodule Malachi.DashboardSecurityTest do
   end
 
   describe "audit logging" do
+    # An event of `type` the audit log recorded at or after `since`, by `username` when one is given.
+    defp logged_since?(type, since, username) do
+      type
+      |> Malachi.AuditLog.get_events_by_type(10)
+      |> Enum.any?(&(&1.timestamp >= since and (username == nil or &1.username == username)))
+    end
+
     test "successful dashboard access is logged", %{admin_token: token} do
+      since = System.system_time(:millisecond)
+
       # Access dashboard
       case DashboardHelper.connect() do
         {:ok, socket} ->
@@ -963,19 +964,14 @@ defmodule Malachi.DashboardSecurityTest do
           :ok
       end
 
-      # Wait for async logging
-      :timer.sleep(100)
-
-      # Check audit log
-      events = Malachi.AuditLog.get_events_by_type(:dashboard_access, 10)
-      assert events != []
-
-      recent_event = List.first(events)
-      assert recent_event.event_type == :dashboard_access
-      assert recent_event.username == "dashboard_admin"
+      # The event is cast to the audit log: wait for this request's own, newer than the request, rather than a
+      # fixed time after which an earlier test's event would pass too.
+      PollingHelper.wait_until!(fn -> logged_since?(:dashboard_access, since, "dashboard_admin") end)
     end
 
     test "failed authentication is logged" do
+      since = System.system_time(:millisecond)
+
       case DashboardHelper.connect() do
         {:ok, socket} ->
           request = """
@@ -993,12 +989,7 @@ defmodule Malachi.DashboardSecurityTest do
           :ok
       end
 
-      # Wait for async logging
-      :timer.sleep(100)
-
-      # Check audit log
-      events = Malachi.AuditLog.get_events_by_type(:dashboard_auth_failure, 10)
-      assert events != []
+      PollingHelper.wait_until!(fn -> logged_since?(:dashboard_auth_failure, since, nil) end)
     end
   end
 
