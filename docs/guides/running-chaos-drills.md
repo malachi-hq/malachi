@@ -20,6 +20,12 @@ required as well.
 Each harness builds the cluster images if they are missing, runs to completion, tears the cluster
 down, and exits non-zero if any invariant broke.
 
+The nodes run the distribution a clustered node requires: each run draws a random cookie and writes a CA and node
+certificate for `malachi1` to `malachi3` (`scripts/cluster_dist_lib.sh`, `openssl` on the host), mounted read-only
+at `/dist` on the nodes and removed when the run ends, so the drills certify TLS distribution. The compose files hold
+no cookie and refuse to start a cluster outside a harness. `DIST_TLS=0` runs a harness on plaintext distribution,
+explicitly, as the baseline `benchmark/docker-cluster.sh DIST_MODES="tls plain"` measures TLS against.
+
 Run one harness at a time. They all bring up the same compose project with the same container names
 (`malachi-cluster-1` to `-3`), as does `benchmark/docker-cluster.sh`, and each starts with
 `docker compose down -v`. A harness therefore refuses to start while any `malachi-cluster-*` container
