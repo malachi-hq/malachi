@@ -33,9 +33,16 @@ Withdrawing it does not affect the emails sent before.
 
 ## This blog
 
-The subscription form is plain HTML. The blog's pages, this note included, set no cookie, store nothing in your
-browser and run no script or tracking pixel. When you press Subscribe, your browser sends the form directly to
-our email provider.
+The subscription form is plain HTML. The blog's pages, this note included, set no cookie and run no tracking
+pixel. When you press Subscribe, your browser sends the form directly to our email provider.
+
+A post's comments are discussions on GitHub, shown by [giscus](https://giscus.app). Its script is the only one
+a blog page runs, and only on a post's page: when you scroll to the comments, your browser loads it from
+giscus.app, which, like any website, receives your IP address with the request, and which fetches the discussion
+from GitHub. To comment you sign in with your GitHub account inside giscus's frame, which keeps your session as
+a token in its own browser storage, and your comment is published on GitHub under your account. See
+[giscus's privacy policy](https://github.com/giscus/giscus/blob/main/PRIVACY-POLICY.md) and
+[GitHub's privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement).
 
 The rest of this website, its home page and its documentation, is not part of the newsletter and does run
 scripts. The home page remembers your color theme in your browser's local storage, and the documentation loads
