@@ -6,7 +6,10 @@ defmodule StorageChaosTest do
   # The drill runs for real in a throwaway tree with stubs first on the PATH: `docker` logs every call and
   # answers from STUB_* variables, and `sleep` returns at once. Portable on purpose (bash, awk, sed, jq), since
   # the drill is run by hand on macOS as well as on the Linux hosts it certifies.
-  use ExUnit.Case, async: false
+  #
+  # Async: every test has its own tree, stubs, log and result under its tmp_dir, the drill gets its environment
+  # per call, and nothing here touches the running application (#390).
+  use ExUnit.Case, async: true
 
   @moduletag :tmp_dir
   @moduletag timeout: 120_000
