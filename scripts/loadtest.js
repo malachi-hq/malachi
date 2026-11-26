@@ -42,7 +42,7 @@ const { Router } = require('./lib/router');
 const { Producer, recordBytes: framedRecordBytes } = require('./lib/producer');
 const { Fetcher } = require('./lib/fetcher');
 const { Consumer } = require('./lib/consumer');
-const { colors, config, parseArgs, fail } = require('./lib/cli');
+const { colors, config, msFromEnv, parseArgs, fail } = require('./lib/cli');
 const payload = require('./lib/payload');
 const os = require('os');
 const path = require('path');
@@ -70,9 +70,12 @@ const KNOB_REQUIRES = {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // How long the appends in flight when a run ends are waited for, as the Elixir generator waits (@drain_ms).
-const DRAIN_MS = 15000;
-// How long setting a run up may wait on the server at one step, as the Elixir generator's setup_timeout_ms.
-const SETUP_TIMEOUT_MS = 30000;
+// MALACHI_LOADTEST_DRAIN_MS exists for this generator's own tests, which wait out a broker that never answers
+// in seconds rather than this (#390); a measured run leaves it unset.
+const DRAIN_MS = msFromEnv('MALACHI_LOADTEST_DRAIN_MS', 15000);
+// How long setting a run up may wait on the server at one step, as the Elixir generator's setup_timeout_ms
+// (an option there, MALACHI_LOADTEST_SETUP_TIMEOUT_MS here, for the same tests).
+const SETUP_TIMEOUT_MS = msFromEnv('MALACHI_LOADTEST_SETUP_TIMEOUT_MS', 30000);
 
 // How long a reader waits before its next try after a dropped connection, or one it could not make, and
 // after a fetch the broker shed: the Elixir generator's @reconnect_backoff_ms and @shed_backoff_ms.
