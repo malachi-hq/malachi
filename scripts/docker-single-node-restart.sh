@@ -191,8 +191,12 @@ expect_records "after recreating the container"
 echo "ok"
 
 echo "== 3. a second node configured"
-# With an address to advertise, so the refusal is the data directory's and not the missing host's.
-run_node "$HOST" -e MALACHI_LOG_NODES="malachi@$HOST,malachi@peer273" -e MALACHI_ADVERTISED_HOST="$HOST"
+# With an address to advertise, so the refusal is the data directory's and not the missing host's. A node with
+# peers is clustered, and a clustered node also refuses a missing cookie and plaintext distribution before its VM
+# starts (#385): a random cookie and the explicit plaintext opt-out let it reach the data directory's check, which is
+# the one this step is about.
+run_node "$HOST" -e MALACHI_LOG_NODES="malachi@$HOST,malachi@peer273" -e MALACHI_ADVERTISED_HOST="$HOST" \
+  -e RELEASE_COOKIE="$(openssl rand -hex 32)" -e MALACHI_DIST_TLS=false
 expect_refusal "peers configured" "REFUSING TO START"
 docker logs "$NAME" 2>&1 | grep -cF -- "peer273" >/dev/null || fail "peers configured: the refusal does not name the new node"
 echo "ok"
