@@ -7,7 +7,8 @@ defmodule Malachi.Site do
 
   `mix docs` writes ExDoc's output to `doc/`, where `index.html` is only a redirect to the introduction. This
   module replaces that redirect with the landing page, and writes `robots.txt` and `sitemap.xml` beside the
-  pages it covers. It also merges the landing page's `llms.txt` summary with the one ExDoc already writes.
+  pages it covers. It also merges the landing page's `llms.txt` summary with the one ExDoc already writes, and
+  follows it with the blog's newest posts (`Malachi.Site.Blog.llms_section/2`) in a block it rewrites every time.
 
   The `docs` alias runs `mix malachi.docs.site` after the ExDoc build, so `mix docs` stages the landing page. CI
   runs `--check` after the docs build, and the browser checks in `site/checks` run on the staged tree.
@@ -72,6 +73,10 @@ defmodule Malachi.Site do
   @landing_marker ~s(<meta name="malachi:landing" content="1">)
   @summary_begin "<!-- malachi:summary begin -->"
   @summary_end "<!-- malachi:summary end -->"
+  # The blog's posts in llms.txt change with every post, not with the version, so they sit in a block of their own
+  # right after the summary, and staging replaces it whole every time.
+  @blog_begin "<!-- malachi:blog begin -->"
+  @blog_end "<!-- malachi:blog end -->"
   # Any `{{...}}` is a placeholder, so a misspelt or differently cased name is an error rather than text.
   @placeholder ~r/\{\{([^{}]+)\}\}/
   # A reference the landing page makes to a file: an `src`, `href` or `data` attribute, quoted or not, with spaces
@@ -197,7 +202,15 @@ defmodule Malachi.Site do
     end
 
     landing = root |> read!(@landing_source) |> fill(meta) |> stage_paths() |> with_marker()
-    llms = merge_llms(summary_block(fill(read!(root, @llms_source), meta)), Path.join(doc, "llms.txt"))
+
+    llms =
+      root
+      |> read!(@llms_source)
+      |> fill(meta)
+      |> summary_block()
+      |> merge_llms(Path.join(doc, "llms.txt"))
+      |> put_blog_block(Blog.llms_section(root, meta))
+
     pages = for rel <- @page_sources, do: {dest_of(rel), stage_asset(dest_of(rel), read!(root, rel))}
     fonts = font_files!(root)
     # Before the sitemap, which lists every page in doc/, the blog's among them. The blog refuses a post it
@@ -801,6 +814,22 @@ defmodule Malachi.Site do
   # A file with a summary from another version cannot be merged safely: ExDoc has to rewrite it first.
   defp summary_block(summary) do
     @summary_begin <> "\n" <> String.trim_trailing(summary) <> "\n" <> @summary_end <> "\n"
+  end
+
+  # The llms.txt with its blog block, after the summary, holding `section` (none when it is empty): any block an
+  # earlier staging wrote is taken out first.
+  defp put_blog_block(llms, section) do
+    without =
+      Regex.replace(~r/\n?#{Regex.escape(@blog_begin)}.*?#{Regex.escape(@blog_end)}\n/s, llms, "")
+
+    case String.trim(section) do
+      "" ->
+        without
+
+      text ->
+        block = "\n" <> @blog_begin <> "\n" <> text <> "\n" <> @blog_end <> "\n"
+        String.replace(without, @summary_end <> "\n", @summary_end <> "\n" <> block, global: false)
+    end
   end
 
   defp merge_llms(block, existing_path) do

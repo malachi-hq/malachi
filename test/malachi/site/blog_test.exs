@@ -105,6 +105,9 @@ defmodule Malachi.Site.BlogTest do
       assert page =~ ~s(<meta name="twitter:card" content="summary_large_image">)
       assert page =~ ~s(<meta property="og:image" content="https://example.test/malachi/kit/social-preview.png">)
       assert page =~ ~s(<meta name="twitter:image" content="https://example.test/malachi/kit/social-preview.png">)
+      assert page =~ ~s(<meta property="og:image:width" content="1280">)
+      assert page =~ ~s(<meta property="og:image:height" content="640">)
+      assert page =~ ~s(<meta property="og:image:alt" content="Malachi">)
       assert File.exists?(Path.join(root, "doc/kit/social-preview.png"))
       assert verify(root) == []
     end
@@ -114,7 +117,10 @@ defmodule Malachi.Site.BlogTest do
       illustrated_post(root)
       stage!(root)
       page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
-      assert page =~ ~s(<img src="2026-11-16-v1-2-3/split.png" alt="A range splits">)
+      assert page =~ ~s(<img src="2026-11-16-v1-2-3/split.png" alt="A range splits" loading="lazy" decoding="async">)
+      assert page =~ ~s(<meta property="og:image:width" content="1200">)
+      assert page =~ ~s(<meta property="og:image:height" content="675">)
+      assert page =~ ~s(<meta property="og:image:alt" content="A range splits">)
 
       assert page =~
                ~s(<meta property="og:image" content="https://example.test/malachi/blog/2026-11-16-v1-2-3/split.png">)
@@ -133,7 +139,39 @@ defmodule Malachi.Site.BlogTest do
       stage!(root)
       page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
       assert page =~ ~s(<meta property="og:image" content="https://example.test/malachi/blog/2026-11-16-v1-2-3/#{png}">)
+      {w, h} = Chart.size()
+      assert page =~ ~s(<meta property="og:image:width" content="#{w}">)
+      assert page =~ ~s(<meta property="og:image:height" content="#{h}">)
+      assert page =~ ~s(<meta property="og:image:alt" content="Produce rate">)
       assert File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/split.png"))
+      assert verify(root) == []
+    end
+
+    test "an illustration whose PNG declares its size is shown with that width and height", %{root: root} do
+      illustrated_post(root)
+      write(root, "site/blog/2026-11-16-v1-2-3/split.png", SiteFixture.png(1200, 675))
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+      assert page =~ ~s(<img width="1200" height="675" src="2026-11-16-v1-2-3/split.png" alt="A range splits")
+    end
+
+    test "carries its BlogPosting structured data, and no text of the post can close the script", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md", fields: [title: "A </script><script>x()</script> title", author: "Ana"])
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+
+      [json] = Regex.run(~r{<script type="application/ld\+json">(.*?)</script>}s, page, capture: :all_but_first)
+      refute json =~ "<"
+      data = JSON.decode!(json)
+
+      assert data["@type"] == "BlogPosting"
+      assert data["headline"] == "A </script><script>x()</script> title"
+      assert data["datePublished"] == "2026-11-16"
+      assert data["author"] == %{"@type" => "Person", "name" => "Ana"}
+      assert data["url"] == "https://example.test/malachi/blog/2026-11-16-v1-2-3.html"
+      assert data["image"]["url"] == "https://example.test/malachi/kit/social-preview.png"
+      assert data["publisher"]["name"] == "MalachiHQ"
+      assert length(Regex.scan(~r/<script\b/, page)) == 1
       assert verify(root) == []
     end
 
@@ -157,6 +195,34 @@ defmodule Malachi.Site.BlogTest do
       feed = read(root, "doc/blog/feed.xml")
       assert feed =~ "<id>tag:example.test,2026-11-16:/blog/2026-11-16-v1-2-3</id>"
       assert feed =~ ~s(<content type="html">&lt;p&gt;Body text.&lt;/p&gt;)
+    end
+  end
+
+  describe "llms.txt" do
+    test "lists the blog, its feed and each post with its summary, in a block replaced at every staging",
+         %{root: root} do
+      post(root, "2026-11-16-a.md", fields: [title: "First [one]", versions: "[1.2.2]"])
+      stage!(root)
+      llms = read(root, "doc/llms.txt")
+      assert llms =~ "<!-- malachi:blog begin -->\n## Blog\n"
+      assert llms =~ "- [Atom feed](https://example.test/malachi/blog/feed.xml)"
+
+      assert llms =~
+               "- [First (one)](https://example.test/malachi/blog/2026-11-16-a.html): What v1.2.3 delivered. (2026-11-16)"
+
+      assert verify(root) == []
+
+      post(root, "2026-11-17-b.md", fields: [title: "Second"])
+      stage!(root)
+      llms = read(root, "doc/llms.txt")
+      assert length(Regex.scan(~r/malachi:blog begin/, llms)) == 1
+      assert llms =~ "(https://example.test/malachi/blog/2026-11-17-b.html)"
+      assert llms =~ "(https://example.test/malachi/blog/2026-11-16-a.html)"
+
+      File.rm!(Path.join(root, "site/blog/2026-11-16-a.md"))
+      File.rm!(Path.join(root, "site/blog/2026-11-17-b.md"))
+      stage!(root)
+      refute read(root, "doc/llms.txt") =~ "malachi:blog"
     end
   end
 

@@ -19,7 +19,10 @@ defmodule Malachi.Site.Blog do
       `<name>.svg` beside it by `mix malachi.release.post --images`, drawn at 1200x675.
 
   Only those PNGs are published; an SVG source stays in the repository. The post's `og:image` is its first
-  chart, else its first illustration, else the kit's social preview.
+  chart, else its first illustration, else the kit's social preview, with its size and alt text. A post's page
+  also carries its `BlogPosting` structured data (JSON-LD), and an illustration whose PNG declares its size is
+  shown with that `width` and `height`, so the page does not shift as it loads. `llms_section/2` lists the
+  newest posts for `llms.txt`.
 
   `stage/4` refuses (raises) a post it cannot read or render. `errors/4` reports what keeps a post from being
   published:
@@ -66,7 +69,7 @@ defmodule Malachi.Site.Blog do
           summary: String.t(),
           html: String.t(),
           charts: [Markdown.chart()],
-          images: [String.t()],
+          images: [%{src: String.t(), alt: String.t()}],
           narratives: non_neg_integer(),
           seeds: non_neg_integer()
         }
@@ -248,7 +251,7 @@ defmodule Malachi.Site.Blog do
     File.rm_rf!(blog)
 
     for post <- posts do
-      write.(Path.join("blog", post.slug <> ".html"), page(post, meta, newsletter))
+      write.(Path.join("blog", post.slug <> ".html"), page(root, post, meta, newsletter))
       copy_images(root, blog, post)
     end
 
@@ -291,7 +294,68 @@ defmodule Malachi.Site.Blog do
   # What the post shows from its own folder, by the path under it.
   defp own_images(post) do
     prefix = post.slug <> "/"
-    for src <- post.images, String.starts_with?(src, prefix), do: String.replace_prefix(src, prefix, "")
+    for %{src: src} <- post.images, String.starts_with?(src, prefix), do: String.replace_prefix(src, prefix, "")
+  end
+
+  @doc """
+  The `## Blog` section of `llms.txt`: the blog, its feed and its #{@feed_entries} newest posts, each with its
+  summary, so an assistant that reads `llms.txt` finds them. Empty when there is no post.
+  """
+  @spec llms_section(Path.t(), map()) :: String.t()
+  def llms_section(root, meta) do
+    case for({:ok, post} <- read_all(root), do: post) do
+      [] ->
+        ""
+
+      posts ->
+        base = meta["base_url"]
+
+        entries =
+          posts
+          |> Enum.take(@feed_entries)
+          |> Enum.map_join("\n", fn post ->
+            "- [#{link_text(post.title)}](#{url(post, meta)}): #{one_line(post.summary)} (#{post.date})"
+          end)
+
+        """
+        ## Blog
+
+        - [Malachi blog](#{base}/blog/index.html): posts about each release and the engineering behind it
+        - [Atom feed](#{base}/blog/feed.xml)
+        #{entries}
+        """
+    end
+  end
+
+  defp link_text(text), do: text |> one_line() |> String.replace("[", "(") |> String.replace("]", ")")
+  defp one_line(text), do: text |> String.split() |> Enum.join(" ")
+
+  # The PNG's own size, from its IHDR chunk, or nil when the file is not a PNG that says it.
+  defp png_size(path) do
+    case File.open(path, [:read, :binary], &IO.binread(&1, 24)) do
+      {:ok, <<137, "PNG", 13, 10, 26, 10, _len::32, "IHDR", width::32, height::32>>} when width > 0 and height > 0 ->
+        {width, height}
+
+      _ ->
+        nil
+    end
+  end
+
+  # The post's HTML with each illustration given its PNG's width and height, read from the source folder.
+  defp sized_html(root, post) do
+    Enum.reduce(illustrations(post), post.html, fn name, html ->
+      case png_size(Path.join([root, @dir, post.slug, name])) do
+        {w, h} ->
+          String.replace(
+            html,
+            ~s(<img src="#{post.slug}/#{name}"),
+            ~s(<img width="#{w}" height="#{h}" src="#{post.slug}/#{name}")
+          )
+
+        nil ->
+          html
+      end
+    end)
   end
 
   # The regular files beside a post, without the ones whose name starts with a dot.
@@ -317,23 +381,68 @@ defmodule Malachi.Site.Blog do
   def image_url(post, %{chart: chart, json: json}, meta),
     do: "#{meta["base_url"]}/blog/#{post.slug}/#{Chart.png_name(chart, json)}"
 
-  # The image of the post's link previews: its first chart, else its first illustration, else the kit's.
+  # The image of the post's link previews, as {url, {width, height}, alt}: its first chart, else its first
+  # illustration (at the size it is rendered at), else the kit's social preview.
   defp og_image(post, meta) do
     case {post.charts, illustrations(post)} do
-      {[first | _], _} -> image_url(post, first, meta)
-      {[], [first | _]} -> "#{meta["base_url"]}/blog/#{post.slug}/#{first}"
-      {[], []} -> "#{meta["base_url"]}/kit/social-preview.png"
+      {[first | _], _} ->
+        {image_url(post, first, meta), Chart.size(), first.chart.title}
+
+      {[], [first | _]} ->
+        alt = Enum.find_value(post.images, "", &(&1.src == "#{post.slug}/#{first}" && &1.alt))
+        {"#{meta["base_url"]}/blog/#{post.slug}/#{first}", @illustration_size, alt}
+
+      {[], []} ->
+        {"#{meta["base_url"]}/kit/social-preview.png", {1280, 640}, "Malachi"}
     end
   end
 
-  defp page(post, meta, newsletter) do
+  # The post's BlogPosting structured data. `<` is written as its JSON escape, so no text of the post can close
+  # the script element.
+  defp json_ld(post, url, {img, {w, h}, _alt}, meta) do
+    base = meta["base_url"]
+
+    %{
+      "@context" => "https://schema.org",
+      "@type" => "BlogPosting",
+      "headline" => post.title,
+      "description" => post.summary,
+      "datePublished" => Date.to_iso8601(post.date),
+      "dateModified" => Date.to_iso8601(post.date),
+      "inLanguage" => "en",
+      "url" => url,
+      "mainEntityOfPage" => url,
+      "image" => %{"@type" => "ImageObject", "url" => img, "width" => w, "height" => h},
+      "author" => %{"@type" => "Person", "name" => post.author},
+      "publisher" => %{
+        "@type" => "Organization",
+        "name" => "MalachiHQ",
+        "url" => base <> "/",
+        "logo" => %{"@type" => "ImageObject", "url" => base <> "/assets/logo-mark.svg"}
+      },
+      "isPartOf" => %{"@type" => "Blog", "name" => "Malachi blog", "url" => base <> "/blog/index.html"},
+      "about" => %{
+        "@type" => "SoftwareSourceCode",
+        "name" => "Malachi",
+        "codeRepository" => "https://github.com/malachi-hq/malachi"
+      }
+    }
+    |> JSON.encode!()
+    |> String.replace("<", "\\u003c")
+  end
+
+  defp page(root, post, meta, newsletter) do
     url = url(post, meta)
 
-    img = og_image(post, meta)
+    {img, {w, h}, alt} = og = og_image(post, meta)
 
     image =
-      ~s(<meta property="og:image" content="#{e(img)}">\n<meta name="twitter:card" content="summary_large_image">\n) <>
-        ~s(<meta name="twitter:image" content="#{e(img)}">)
+      ~s(<meta property="og:image" content="#{e(img)}">\n) <>
+        ~s(<meta property="og:image:width" content="#{w}">\n<meta property="og:image:height" content="#{h}">\n) <>
+        ~s(<meta property="og:image:alt" content="#{e(alt)}">\n) <>
+        ~s(<meta name="twitter:card" content="summary_large_image">\n) <>
+        ~s(<meta name="twitter:image" content="#{e(img)}">\n<meta name="twitter:image:alt" content="#{e(alt)}">\n) <>
+        ~s(<script type="application/ld+json">#{json_ld(post, url, og, meta)}</script>)
 
     shell(
       feed?: true,
@@ -358,7 +467,7 @@ defmodule Malachi.Site.Blog do
       <h1>#{e(post.title)}</h1>
       <p class="lede">#{e(post.summary)}</p>
       </header>
-      #{post.html}
+      #{sized_html(root, post)}
       </article>
       #{form(newsletter)}
       """
