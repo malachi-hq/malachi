@@ -1,9 +1,11 @@
 defmodule CliJsTest do
   # The Node CLIs (scripts/producer.js, consumer.js, subscriber.js) against the test server, on the stream
   # and group keys: what one appends the others read, a group member resumes from the group's checkpoint,
-  # and two members split a topic's ranges between them and follow the rebalance a second one causes. And
-  # their cases against brokers of their own (scripts/lib/cli.selftest.js, group_member.selftest.js), for
-  # what the server cannot be made to do from here: go down and come back, refuse, or not be there.
+  # and two members split a topic's ranges between them and follow the rebalance a second one causes. Their
+  # cases against brokers of their own are CliSelftestJsTest's.
+  #
+  # Not async: the CLIs read the running application's server, and the tests clear the router topology and
+  # split its ranges.
   use ExUnit.Case, async: false
 
   alias Malachi.BrokerServer
@@ -15,7 +17,6 @@ defmodule CliJsTest do
   alias Malachi.Wire
 
   @scripts Path.expand("../../scripts", __DIR__)
-  @selftests [{"cli.selftest.js", "passed 8 cli cases"}, {"group_member.selftest.js", "passed 23 group member cases"}]
 
   setup_all do
     # A missing runtime fails loudly instead of skipping: a skipped client test reads as a passing one.
@@ -117,17 +118,6 @@ defmodule CliJsTest do
   # The values a CLI printed, one per record, from the JSON value producer.js writes.
   defp ids(output) do
     ~r/"id":(\d+)/ |> Regex.scan(output) |> Enum.map(fn [_, id] -> String.to_integer(id) end)
-  end
-
-  for {selftest, passed} <- @selftests do
-    # the cli cases wait out a cluster that does not answer, ten seconds and more a case
-    @tag timeout: 180_000
-    test "the #{selftest} cases against brokers of their own", ctx do
-      assert {output, 0} =
-               System.cmd(ctx.node, [Path.join([@scripts, "lib", unquote(selftest)])], stderr_to_stdout: true)
-
-      assert output =~ unquote(passed)
-    end
   end
 
   test "what the producer appends, a consumer reads, and a subscriber streams", ctx do
