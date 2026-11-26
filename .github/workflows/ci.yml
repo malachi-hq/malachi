@@ -401,11 +401,12 @@ jobs:
           done
           exit 1
       
-      - name: 📏 Check code complexity
-        run: |
-          mix archive.install hex ex_check --force
-          mix check
-        continue-on-error: true
+      # Hex's own advisory feed (hex.pm security advisories), which `mix deps.audit` in security.yml does not
+      # read: it reported EEF-CVE-2026-120287 in plug 1.20.3 while deps.audit found nothing (#390). This step
+      # replaced `mix check`, whose other tools all ran somewhere else already (the suite, dialyzer, credo,
+      # formatter, sobelow and the docs build), behind a continue-on-error that hid their failures.
+      - name: 🔐 Audit Hex advisories
+        run: mix hex.audit
       
       - name: 📝 Generate documentation
         run: mix docs --warnings-as-errors
