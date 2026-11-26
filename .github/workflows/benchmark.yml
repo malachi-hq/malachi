@@ -55,6 +55,14 @@ on:
         description: 'Repetitions of each data mode (the spread between them is the noise floor)'
         type: string
         default: '3'
+      dist_modes:
+        description: 'Erlang distribution of the Docker cluster benchmark: tls, plain, or both for the A/B of what TLS costs replication (issue #385). Both double the run.'
+        type: choice
+        options:
+          - tls
+          - plain
+          - tls plain
+        default: tls
       quota_flake_hunt:
         description: 'Run the whole test suite many times, counting publish quotas admitted over their limit (issue #151). About an hour.'
         type: boolean
@@ -219,8 +227,9 @@ jobs:
     name: Docker cluster, tmpfs against real disk
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.docker_cluster_durability }}
     runs-on: ubuntu-latest
-    # About 12 cases of two minutes plus the image build. Twice that is stuck, not slow.
-    timeout-minutes: 60
+    # About 12 cases of two minutes per distribution mode plus the image build, at the default 3 repetitions; the
+    # A/B of both modes at 5 repetitions is about 40 cases. Twice that is stuck, not slow.
+    timeout-minutes: 180
 
     steps:
       - name: 🛡️ Harden the runner
@@ -250,6 +259,7 @@ jobs:
       - name: Run both data modes, interleaved
         env:
           DOCKER_CLUSTER_REPS: ${{ inputs.docker_cluster_reps }}
+          DIST_MODES_INPUT: ${{ inputs.dist_modes }}
           SRV_CPUSET: '1,2,3'
           LT_CPUSET: '0'
           OUT: ${{ runner.temp }}/docker-cluster/cases.jsonl
@@ -258,12 +268,20 @@ jobs:
           case "$DOCKER_CLUSTER_REPS" in
             '' | *[!0-9]* | 0*) echo "docker_cluster_reps must be a positive integer, got '$DOCKER_CLUSTER_REPS'"; exit 2 ;;
           esac
+          # A choice input, checked again here: its value only ever reaches the harness through this allowlist.
+          case "$DIST_MODES_INPUT" in
+            tls | plain | 'tls plain') ;;
+            *) echo "dist_modes must be tls, plain or 'tls plain', got '$DIST_MODES_INPUT'"; exit 2 ;;
+          esac
           failed=0
           for rep in $(seq 1 "$DOCKER_CLUSTER_REPS"); do
             if [ $((rep % 2)) = 1 ]; then modes="0 1"; else modes="1 0"; fi
+            # With both distribution modes, their order rotates by repetition too, for the reason the data modes do.
+            dist_modes="$DIST_MODES_INPUT"
+            if [ "$dist_modes" = 'tls plain' ] && [ $((rep % 2)) = 0 ]; then dist_modes='plain tls'; fi
             for mode in $modes; do
-              echo "::group::repetition $rep, REAL_DISK=$mode"
-              REAL_DISK="$mode" benchmark/docker-cluster.sh || { echo "::error::repetition $rep with REAL_DISK=$mode failed"; failed=1; }
+              echo "::group::repetition $rep, REAL_DISK=$mode, distribution $dist_modes"
+              REAL_DISK="$mode" DIST_MODES="$dist_modes" benchmark/docker-cluster.sh || { echo "::error::repetition $rep with REAL_DISK=$mode failed"; failed=1; }
               echo "::endgroup::"
             done
           done

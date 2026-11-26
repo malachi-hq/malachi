@@ -101,6 +101,18 @@ defmodule DockerClusterTest do
       assert output =~ "RFS is empty"
     end
 
+    test "a distribution mode other than tls or plain, an empty one, or one named twice", ctx do
+      assert {output, 2} = run_script(ctx, [{"DIST_MODES", "tls ssl"}])
+      assert output =~ "DIST_MODES entries must be tls or plain, got 'ssl'"
+
+      assert {output, 2} = run_script(ctx, [], "export DIST_MODES=' ';")
+      assert output =~ "DIST_MODES is empty"
+
+      assert {output, 2} = run_script(ctx, [{"DIST_MODES", "tls plain tls"}])
+      assert output =~ "DIST_MODES names tls twice"
+      refute File.exists?(ctx.log)
+    end
+
     for knob <- ["MALACHI_SEGMENT_MAX_BYTES", "MALACHI_LOG_ROLL_MAX_BYTES"] do
       test "#{knob}, which moves the preallocation clamp", ctx do
         assert {output, 2} = run_script(ctx, [{unquote(knob), "2048"}])
@@ -156,7 +168,7 @@ defmodule DockerClusterTest do
       assert output =~ "data:    tmpfs (MALACHI_DATA_ROOT=/tmp, preallocation 0 bytes)"
 
       for call <- compose_calls(ctx, ["up", "run", "exec"]) do
-        assert call.env == %{"ROOT" => "/tmp", "PREALLOC" => "0", "RF" => call.env["RF"]}
+        assert call.env == %{"ROOT" => "/tmp", "PREALLOC" => "0", "RF" => call.env["RF"], "DIST" => "true"}
       end
 
       refute Enum.any?(exec_commands(ctx), &(&1 in ["df", "du"]))
@@ -192,6 +204,28 @@ defmodule DockerClusterTest do
     test "the caller's own data root does not leak into a case", ctx do
       assert {_output, 0} = run_script(ctx, [{"MALACHI_DATA_ROOT", "/elsewhere"}, {"RFS", "1"}])
       assert Enum.all?(compose_calls(ctx, ["up"]), &(&1.env["ROOT"] == "/tmp"))
+    end
+  end
+
+  describe "the distribution (#385)" do
+    test "runs on TLS distribution by default, every case recording it", ctx do
+      assert {output, 0} = run_script(ctx, [{"OUT", ctx.out}])
+      assert output =~ "== Erlang distribution: tls =="
+      assert Enum.all?(compose_calls(ctx, ["up"]), &(&1.env["DIST"] == "true"))
+      assert [%{"dist" => "tls", "rf" => 1}, %{"dist" => "tls", "rf" => 3}] = cases(ctx)
+    end
+
+    test "both modes run every RF, in the order given, each on fresh clusters", ctx do
+      assert {_output, 0} = run_script(ctx, [{"DIST_MODES", "plain tls"}, {"OUT", ctx.out}])
+
+      assert Enum.map(compose_calls(ctx, ["up"]), &{&1.env["DIST"], &1.env["RF"]}) == [
+               {"false", "1"},
+               {"false", "3"},
+               {"true", "1"},
+               {"true", "3"}
+             ]
+
+      assert Enum.map(cases(ctx), &{&1["dist"], &1["rf"]}) == [{"plain", 1}, {"plain", 3}, {"tls", 1}, {"tls", 3}]
     end
   end
 
@@ -766,7 +800,7 @@ defmodule DockerClusterTest do
     #!/usr/bin/env bash
     # One line per call: the awk program the script sends to a node spans several.
     args="$*"
-    echo "${args//$'\n'/ } || RF=${RF:-} ROOT=${MALACHI_DATA_ROOT:-} PREALLOC=${MALACHI_SEGMENT_PREALLOC_BYTES:-}" >> "$STUB_LOG"
+    echo "${args//$'\n'/ } || RF=${RF:-} ROOT=${MALACHI_DATA_ROOT:-} PREALLOC=${MALACHI_SEGMENT_PREALLOC_BYTES:-} DIST=${MALACHI_DIST_TLS:-}" >> "$STUB_LOG"
     [ "$1" = compose ] && shift 3
 
     case "$1" in
