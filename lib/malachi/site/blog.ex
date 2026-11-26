@@ -60,6 +60,7 @@ defmodule Malachi.Site.Blog do
   @keys ~w(title date versions author summary)
   @optional_keys ~w(cover)
   @words_per_minute 238
+  @chart_figure ~r/<figure class="chart">.*?<\/figure>/s
   @months ~w(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec)
   @version ~r/\A\d+\.\d+\.\d+\z/
   @lfs_pointer "version https://git-lfs.github.com/spec/"
@@ -706,8 +707,9 @@ defmodule Malachi.Site.Blog do
     """
   end
 
-  # A post's HTML as a feed reader or an email shows it: its cover first, and every relative src or href made
-  # absolute from the post's URL, since neither has the page's address to resolve them from.
+  # A post's HTML as a feed reader, an email or an importer (dev.to imports the feed) shows it: its cover first,
+  # each chart as its PNG rather than inline SVG, which none of them draws, and every relative src or href made
+  # absolute from the post's URL, since none of them has the page's address to resolve them from.
   defp feed_html(post, meta) do
     url = url(post, meta)
 
@@ -716,9 +718,30 @@ defmodule Malachi.Site.Blog do
         do: ~s(<p><img src="#{post.slug}/#{post.cover}" alt="#{e(post.title)}"></p>\n),
         else: ""
 
-    Regex.replace(~r/\b(src|href)="([^"]*)"/, cover <> post.html, fn _whole, attr, target ->
+    Regex.replace(~r/\b(src|href)="([^"]*)"/, cover <> charts_as_images(post), fn _whole, attr, target ->
       ~s(#{attr}="#{e(Devto.resolve(unescape_attr(target), url))}")
     end)
+  end
+
+  # The post's HTML with the SVG of each chart figure replaced by the chart's PNG, in the order the post draws
+  # them, which is the order of post.charts.
+  defp charts_as_images(post) do
+    images =
+      Enum.map(post.charts, fn %{chart: chart} = drawn ->
+        ~s(<img src="#{post.slug}/#{Chart.png_name(chart, drawn.json)}" alt="#{e(chart.title)}">\n)
+      end)
+
+    @chart_figure
+    |> Regex.split(post.html, include_captures: true)
+    |> Enum.map_reduce(images, fn
+      "<figure class=\"chart\">" <> _ = figure, [image | rest] ->
+        {Regex.replace(~r/<svg\b.*?<\/svg>\s*/s, figure, image, global: false), rest}
+
+      part, rest ->
+        {part, rest}
+    end)
+    |> elem(0)
+    |> Enum.join()
   end
 
   defp unescape_attr(text), do: String.replace(text, "&amp;", "&")

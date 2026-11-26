@@ -294,6 +294,20 @@ defmodule Malachi.Site.BlogTest do
   end
 
   describe "the feed" do
+    test "shows each chart as its PNG at an absolute URL, since no reader or importer draws the inline SVG",
+         %{root: root} do
+      png = charted_post(root)
+      stage!(root)
+      feed = read(root, "doc/blog/feed.xml")
+
+      assert feed =~
+               "&lt;img src=&quot;https://example.test/malachi/blog/2026-11-16-v1-2-3/#{png}&quot; alt=&quot;Produce rate&quot;&gt;"
+
+      assert feed =~ "&lt;figcaption&gt;Produce rate&lt;/figcaption&gt;"
+      refute feed =~ "&lt;svg"
+      assert read(root, "doc/blog/2026-11-16-v1-2-3.html") =~ "<svg"
+    end
+
     test "is well-formed Atom with the 20 newest posts, newest first", %{root: root} do
       for day <- 1..21 do
         date = Date.new!(2026, 10, day) |> Date.to_iso8601()
