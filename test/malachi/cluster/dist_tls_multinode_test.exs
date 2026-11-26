@@ -1,5 +1,6 @@
 defmodule Malachi.Cluster.DistTlsMultinodeTest do
-  # TLS distribution between real nodes (#385), with the options file scripts/generate-dist-certs.sh writes: two
+  # TLS distribution between real nodes (#385), with options files shaped as the release and
+  # scripts/generate-dist-certs.sh write them (the Docker drills run the generator's own): two
   # nodes whose certificates the shared CA signed connect, and a node whose certificate another CA signed does not,
   # whatever cookie it holds. The peers are driven over standard_io, not over the test node's own plaintext
   # distribution, so the only distribution link in each case is the one between peers.

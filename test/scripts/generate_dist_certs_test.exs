@@ -23,10 +23,10 @@ defmodule GenerateDistCertsTest do
   test "names every host it is given, plus localhost and 127.0.0.1, in one CA-signed node certificate", %{
     tmp_dir: dir
   } do
-    assert {_out, 0} = run(dir, [{"DIST_CERT_HOSTS", "malachi1, malachi2,10.0.0.7,*.malachi-headless.ns.svc"}])
+    assert {_out, 0} = run(dir, [{"DIST_CERT_HOSTS", "malachi1, malachi2,10.0.0.7,malachi-0.malachi-headless.ns.svc"}])
     cert = text(Path.join(dir, "node.crt"))
 
-    for san <- ~w(DNS:malachi1 DNS:malachi2 DNS:*.malachi-headless.ns.svc DNS:localhost),
+    for san <- ~w(DNS:malachi1 DNS:malachi2 DNS:malachi-0.malachi-headless.ns.svc DNS:localhost),
         do: assert(cert =~ san, "no #{san}")
 
     assert cert =~ "IP Address:10.0.0.7"
@@ -83,6 +83,8 @@ defmodule GenerateDistCertsTest do
   for {name, env} <- [
         {"a host name that is not one", [{"DIST_CERT_HOSTS", "bad host"}]},
         {"an injected extension", [{"DIST_CERT_HOSTS", "a,IP:1.2.3.4"}]},
+        {"a wildcard name, which OTP's exact host name check never matches",
+         [{"DIST_CERT_HOSTS", "*.malachi-headless.ns.svc"}]},
         {"an IPv4 octet over 255", [{"DIST_CERT_HOSTS", "10.0.0.256"}]},
         {"a relative prefix", [{"DIST_CONF_PREFIX", "dist"}]},
         {"a prefix with a quote", [{"DIST_CONF_PREFIX", ~s(/di"st)}]},
@@ -93,6 +95,12 @@ defmodule GenerateDistCertsTest do
       assert out =~ "generate-dist-certs:"
       assert File.ls!(dir) == []
     end
+  end
+
+  test "a wildcard name is refused saying why, not as a malformed host", %{tmp_dir: dir} do
+    assert {out, 2} = run(dir, [{"DIST_CERT_HOSTS", "malachi1,*.malachi-headless.ns.svc"}])
+    assert out =~ "a wildcard name (*.malachi-headless.ns.svc) never matches"
+    assert out =~ "list each host instead"
   end
 
   test "refuses an argument, since settings come from the environment", %{tmp_dir: dir} do

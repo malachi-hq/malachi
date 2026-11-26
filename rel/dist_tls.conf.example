@@ -6,8 +6,8 @@
 %%
 %% The connecting node checks the peer's certificate against the CA AND against the host it dialled (OTP passes
 %% the host part of the node name as the TLS server name), so the certificate must name every host the nodes
-%% reach each other by: one certificate per node, or one that names them all (or a wildcard such as
-%% *.malachi-headless.<namespace>.svc.cluster.local). Use a CA of its own for distribution, not the one that signs
+%% reach each other by: one certificate per node, or one that names them all. OTP's default check matches names
+%% exactly, so a wildcard name never matches. Use a CA of its own for distribution, not the one that signs
 %% client certificates: any certificate this CA signed can join the cluster. Generate a CA and a node certificate
 %% for given hosts with DIST_CERT_HOSTS=... scripts/generate-dist-certs.sh.
 [

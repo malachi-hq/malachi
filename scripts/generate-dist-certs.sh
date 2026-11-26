@@ -5,12 +5,13 @@
 #
 # The connecting node checks that the peer's certificate names the host it dialled (OTP passes that host as the
 # TLS server name), so the certificate must carry every host name the nodes reach each other by: the host part of
-# each node name (malachi@<host>), or a wildcard such as *.malachi-headless.default.svc.cluster.local.
+# each node name (malachi@<host>). OTP's default check matches names exactly and takes no wildcard, so a wildcard
+# name is refused here: list the hosts, or issue one certificate per node.
 #
 # Settings, from the environment:
 #   DIST_CERT_DIR     where to write ca.crt, node.crt, node.key and dist_tls.conf (default priv/dist_cert)
 #   DIST_CERT_HOSTS   comma-separated host names or IPv4 addresses the certificate names (default malachi-node);
-#                     localhost and 127.0.0.1 are always added. A name may start with "*." for a wildcard.
+#                     localhost and 127.0.0.1 are always added. A wildcard ("*.") is refused, see above.
 #   DIST_CONF_PREFIX  the directory the options file names the files under, for a file read inside a container
 #                     where DIST_CERT_DIR is mounted elsewhere (default: DIST_CERT_DIR's absolute path)
 #   DIST_CERT_DAYS    validity in days (default 825)
@@ -46,7 +47,9 @@ for host in "${requested[@]}" localhost 127.0.0.1; do
   if [[ "$host" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
     for octet in "${BASH_REMATCH[@]:1}"; do [ "$octet" -le 255 ] || fail "not an IPv4 address: $host"; done
     add_san "IP:$host"
-  elif [[ "$host" =~ ^(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$ ]]; then
+  elif [[ "$host" == \** ]]; then
+    fail "a wildcard name ($host) never matches: OTP's distribution checks host names exactly; list each host instead"
+  elif [[ "$host" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$ ]]; then
     add_san "DNS:$host"
   else
     fail "not a host name or IPv4 address: $host"
