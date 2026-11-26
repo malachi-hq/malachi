@@ -3,7 +3,7 @@ defmodule UpgradeChaosMetricsTest do
   # shell a script on stdin that logs in and reads /metrics. #180: neither the password nor the session
   # token may be a process argument there, since the host sees the container's processes too. The script
   # is taken out of the drill and run under sh with busybox-like `wget` and `nc` stubs that record their
-  # argv and their stdin apart. UpgradeChaosTest covers the drill around it.
+  # argv and their stdin apart. The modules under test/scripts/upgrade_chaos/ cover the drill around it.
   use ExUnit.Case, async: true
 
   @moduletag :tmp_dir
