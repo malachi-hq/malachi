@@ -1,7 +1,8 @@
 defmodule CookieLiteralsTest do
   # Every distribution cookie written into this repository is either taken from the environment or refused by a
-  # clustered node (Malachi.Cluster.DistGuard.denylist/0, #385). A literal added to a compose file, a script, a
-  # manifest or a doc without joining the denylist would be a cookie anyone can read that a cluster still accepts.
+  # clustered node: on Malachi.Cluster.DistGuard.denylist/0, or shorter than the guard's minimum (#385). A literal
+  # added to a compose file, a script, a manifest or a doc without joining the denylist would be a cookie anyone can
+  # read that a cluster still accepts.
   use ExUnit.Case, async: true
 
   alias Malachi.Cluster.DistGuard
@@ -35,6 +36,11 @@ defmodule CookieLiteralsTest do
         do: value
   end
 
+  # What a clustered node would take: not on the denylist, and long enough. A shorter value, a word of prose after
+  # `RELEASE_COOKIE:` included, is refused by the guard whatever it is.
+  defp accepted?(literal),
+    do: literal not in DistGuard.denylist() and byte_size(literal) >= DistGuard.min_cookie_bytes()
+
   defp tracked_files do
     {out, 0} = System.cmd("git", ["ls-files"], cd: @root)
 
@@ -56,10 +62,17 @@ defmodule CookieLiteralsTest do
           {:ok, text} <- [File.read(Path.join(@root, file))],
           String.valid?(text),
           literal <- literals(text),
-          literal not in DistGuard.denylist(),
+          accepted?(literal),
           do: "#{file}: #{literal}"
 
     assert found == [], "cookie literals a cluster would accept:\n" <> Enum.join(found, "\n")
+  end
+
+  test "a literal is accepted only off the denylist and at the guard's minimum length" do
+    refute accepted?("malachi_bench")
+    refute accepted?("a")
+    refute accepted?(String.duplicate("x", 19))
+    assert accepted?(String.duplicate("x", 20))
   end
 
   describe "the reader" do

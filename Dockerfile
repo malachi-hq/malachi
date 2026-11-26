@@ -26,8 +26,12 @@ COPY rel rel
 # (priv/dist_cert, priv/cert) and dialyzer PLTs under priv, and none of them belong in the image.
 COPY priv/static priv/static
 
+# The release bakes a cookie into releases/COOKIE when it is built without one: every container of the published image
+# would share it, and anyone who pulls the image could read it. The image ships none; rel/env.sh.eex gives a single
+# node a random one per start, and a clustered node refuses to start without its own RELEASE_COOKIE.
 RUN mix compile && \
-    mix release
+    mix release && \
+    rm _build/prod/rel/malachi/releases/COOKIE
 
 FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS runner
 
