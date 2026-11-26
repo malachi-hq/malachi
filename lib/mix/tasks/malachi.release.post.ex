@@ -1,5 +1,5 @@
 defmodule Mix.Tasks.Malachi.Release.Post do
-  @shortdoc "Writes the draft blog post of a release, renders its chart images, or sends it to dev.to"
+  @shortdoc "Writes the draft blog post of a release, renders its images, or sends it to dev.to"
 
   @moduledoc """
   #{@shortdoc} (issue #373).
@@ -16,10 +16,12 @@ defmodule Mix.Tasks.Malachi.Release.Post do
   what it holds and why). The site check refuses to publish it until every placeholder is written and the
   `malachi-seed` block of release highlights is folded into the text.
 
-  A post's charts are also published as PNG images, for the places that do not render inline SVG. The draft is
-  followed by `--images`, which renders each chart's missing image with the Playwright already pinned in
-  `site/checks` (`node site/checks/render.mjs`) and removes an image no chart names any more. Run it again after
-  editing a chart. Without Node or Playwright it says what to install and what to run then.
+  A post's charts are also published as PNG images, for the places that do not render inline SVG, and so are
+  its illustrations, drawn from the SVG source beside each (`Malachi.Site.Blog`). The draft is followed by
+  `--images`, which renders each chart's missing image and each illustration whose source is newer than its
+  image, with the Playwright already pinned in `site/checks` (`node site/checks/render.mjs`), and removes a PNG
+  the post no longer shows. Run it again after editing a chart or an illustration. Without Node or Playwright it
+  says what to install and what to run then.
 
   `--devto` sends a finished post to dev.to as a draft, through `scripts/devto-draft.sh`, which creates it once
   and updates it afterwards (`Malachi.Release.Devto` says how the Markdown is adapted). It needs DEVTO_API_KEY
@@ -121,17 +123,40 @@ defmodule Mix.Tasks.Malachi.Release.Post do
 
   defp images(root, post_path) do
     {post, _source} = read_post(root, post_path)
-    dir = Path.join(root, Path.dirname(post_path))
+    images_dir = Path.join([root, Path.dirname(post_path), post.slug])
 
-    images_dir = Path.join(dir, post.slug)
-    wanted = Enum.map(post.charts, &{&1, Chart.png_name(&1.chart, &1.json)})
-    remove_stale(images_dir, Enum.map(wanted, &elem(&1, 1)))
-    missing = Enum.reject(wanted, fn {_, name} -> File.exists?(Path.join(images_dir, name)) end)
+    remove_stale(images_dir, Blog.chart_images(post) ++ Blog.illustrations(post))
 
-    case {wanted, missing} do
-      {[], _} -> Mix.shell().info("#{post_path}: no chart, so no image to render")
-      {_, []} -> Mix.shell().info("#{post_path}: every chart image is in place")
-      _ -> render(root, post_path, images_dir, missing)
+    # A chart's image is named for its data, so one that exists is current. An illustration's is redrawn when
+    # its SVG source is newer than it.
+    charts =
+      for {chart, name} <- Enum.zip(post.charts, Blog.chart_images(post)),
+          not File.exists?(Path.join(images_dir, name)),
+          do: {{:svg, Chart.to_svg(chart.chart)}, name}
+
+    illustrations =
+      for name <- Blog.illustrations(post),
+          source = Path.join(images_dir, Path.rootname(name) <> ".svg"),
+          File.regular?(source),
+          stale?(source, Path.join(images_dir, name)),
+          do: {{:file, source}, name}
+
+    case {post.charts ++ Blog.illustrations(post), charts ++ illustrations} do
+      {[], _} ->
+        Mix.shell().info("#{post_path}: no chart or illustration, so no image to render")
+
+      {_, []} ->
+        Mix.shell().info("#{post_path}: every image is in place")
+
+      _ ->
+        render(root, post_path, images_dir, [{Chart.size(), charts}, {Blog.illustration_size(), illustrations}])
+    end
+  end
+
+  defp stale?(source, png) do
+    case {File.stat(source, time: :posix), File.stat(png, time: :posix)} do
+      {{:ok, %{mtime: svg}}, {:ok, %{mtime: image}}} -> svg > image
+      _ -> true
     end
   end
 
@@ -140,7 +165,7 @@ defmodule Mix.Tasks.Malachi.Release.Post do
       {:ok, present} ->
         for name <- present, String.ends_with?(name, ".png"), name not in names do
           File.rm!(Path.join(images_dir, name))
-          Mix.shell().info("removed #{name}, which no chart names any more")
+          Mix.shell().info("removed #{name}, which the post no longer shows")
         end
 
       {:error, _} ->
@@ -148,46 +173,59 @@ defmodule Mix.Tasks.Malachi.Release.Post do
     end
   end
 
-  defp render(root, post_path, images_dir, missing) do
+  # Each group is drawn at its own size, one renderer run per group that has something to draw.
+  defp render(root, post_path, images_dir, groups) do
     work = Path.join(System.tmp_dir!(), "malachi-release-post-#{System.unique_integer([:positive])}")
     File.mkdir_p!(work)
     File.mkdir_p!(images_dir)
 
     try do
-      pairs =
-        Enum.flat_map(missing, fn {%{chart: chart}, name} ->
-          svg = Path.join(work, Path.rootname(name) <> ".svg")
-          File.write!(svg, Chart.to_svg(chart))
-          [svg, Path.join(images_dir, name)]
-        end)
-
-      {width, height} = Chart.size()
       script = Path.join(root, "site/checks/render.mjs")
 
-      with node when is_binary(node) <- System.find_executable("node"),
-           {_, 0} <-
-             System.cmd(node, [script, "#{width}x#{height}" | pairs],
-               cd: root,
-               stderr_to_stdout: true,
-               into: IO.stream()
-             ) do
-        Mix.shell().info("rendered #{length(missing)} chart image(s) beside #{post_path}")
-      else
-        _ ->
-          # An images folder this run made and left empty is not left behind; one holding images is kept.
-          File.rmdir(images_dir)
+      rendered =
+        for {{width, height}, items} <- groups, items != [], reduce: 0 do
+          count ->
+            pairs = Enum.flat_map(items, &render_pair(&1, work, images_dir))
 
-          Mix.raise("""
-          the chart images could not be rendered. Install the renderer once:
+            with node when is_binary(node) <- System.find_executable("node"),
+                 {_, 0} <-
+                   System.cmd(node, [script, "#{width}x#{height}" | pairs],
+                     cd: root,
+                     stderr_to_stdout: true,
+                     into: IO.stream()
+                   ) do
+              count + length(items)
+            else
+              _ -> render_failed!(images_dir, post_path)
+            end
+        end
 
-              cd site/checks && npm ci && npx playwright install --only-shell chromium
-
-          then run: mix malachi.release.post --images #{post_path}
-          """)
-      end
+      Mix.shell().info("rendered #{rendered} image(s) beside #{post_path}")
     after
       File.rm_rf!(work)
     end
+  end
+
+  defp render_pair({{:svg, svg}, name}, work, images_dir) do
+    path = Path.join(work, Path.rootname(name) <> ".svg")
+    File.write!(path, svg)
+    [path, Path.join(images_dir, name)]
+  end
+
+  defp render_pair({{:file, source}, name}, _work, images_dir), do: [source, Path.join(images_dir, name)]
+
+  @spec render_failed!(Path.t(), String.t()) :: no_return()
+  defp render_failed!(images_dir, post_path) do
+    # An images folder this run made and left empty is not left behind; one holding images is kept.
+    File.rmdir(images_dir)
+
+    Mix.raise("""
+    the images could not be rendered. Install the renderer once:
+
+        cd site/checks && npm ci && npx playwright install --only-shell chromium
+
+    then run: mix malachi.release.post --images #{post_path}
+    """)
   end
 
   defp devto(root, post_path) do

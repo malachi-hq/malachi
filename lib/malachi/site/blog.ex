@@ -10,8 +10,16 @@ defmodule Malachi.Site.Blog do
     * `date`: the post's day, `YYYY-MM-DD`, the same as its file name's;
     * `versions`: the releases it covers, `[0.28.1, 0.28.2]`, at least one.
 
-  A post's images (its charts as PNG, `Malachi.Site.Chart`) are in `site/blog/<file name without .md>/`, and are
-  staged beside its page, so `blog/<slug>.html` and `blog/<slug>/` sit together.
+  A post's images are in `site/blog/<file name without .md>/`, and are staged beside its page, so
+  `blog/<slug>.html` and `blog/<slug>/` sit together. They are of two kinds, both PNG, because dev.to, Medium and
+  LinkedIn do not show SVG:
+
+    * its charts (`Malachi.Site.Chart`), drawn inline on the site and rendered to PNG for the other places;
+    * its illustrations: a diagram the post shows as `![alt](<slug>/<name>.png)`, rendered from the SVG source
+      `<name>.svg` beside it by `mix malachi.release.post --images`, drawn at 1200x675.
+
+  Only those PNGs are published; an SVG source stays in the repository. The post's `og:image` is its first
+  chart, else its first illustration, else the kit's social preview.
 
   `stage/4` refuses (raises) a post it cannot read or render. `errors/4` reports what keeps a post from being
   published:
@@ -19,8 +27,10 @@ defmodule Malachi.Site.Blog do
     * a `<!-- narrative -->` placeholder left in it (its title and summary included) or a `malachi-seed` block;
     * a file name that is not `YYYY-MM-DD-<slug>.md`, or a date that differs from the file name's;
     * a version covered by two posts;
-    * more than 3 charts, or a chart whose PNG is missing, is a Git LFS pointer (the image was not fetched),
-      exceeds 150 KB, or is not named for the chart's current data; a PNG beside a post that no chart names;
+    * more than 3 charts or 5 illustrations; a chart or an illustration whose PNG is missing, is a Git LFS
+      pointer (the image was not fetched) or exceeds 150 KB; a chart PNG not named for the chart's current data;
+      an image shown from the post's folder that is not a lowercase `<name>.png`; a file beside a post that is
+      neither one of its images nor an illustration's SVG source;
     * on the staged tree: a page, the index or the feed missing; the feed not in date order, over 20
       entries, or not holding one entry per post among the newest; a link or image on a blog page that does not
       resolve on this site, or a relative one that climbs above it; a script loaded from anywhere on a blog page;
@@ -35,6 +45,9 @@ defmodule Malachi.Site.Blog do
 
   @dir "site/blog"
   @max_charts 3
+  @max_illustrations 5
+  @illustration_size {1200, 675}
+  @illustration_name ~r/\A[a-z0-9][a-z0-9-]*\.png\z/
   @max_png_bytes 150 * 1024
   @feed_entries 20
   @file_name ~r/\A(\d{4}-\d{2}-\d{2})-([a-z0-9][a-z0-9-]*)\.md\z/
@@ -53,6 +66,7 @@ defmodule Malachi.Site.Blog do
           summary: String.t(),
           html: String.t(),
           charts: [Markdown.chart()],
+          images: [String.t()],
           narratives: non_neg_integer(),
           seeds: non_neg_integer()
         }
@@ -244,13 +258,40 @@ defmodule Malachi.Site.Blog do
     :ok
   end
 
+  # Only the PNGs the post shows are published: an SVG source, or a file nothing names, stays out of the site.
   defp copy_images(root, blog, post) do
     source = Path.join([root, @dir, post.slug])
 
-    for name <- image_files(source) do
+    for name <- chart_images(post) ++ illustrations(post), File.regular?(Path.join(source, name)) do
       File.mkdir_p!(Path.join(blog, post.slug))
       File.cp!(Path.join(source, name), Path.join([blog, post.slug, name]))
     end
+  end
+
+  @doc "The file names of a post's chart PNGs, in the order it draws them."
+  @spec chart_images(post()) :: [String.t()]
+  def chart_images(post), do: Enum.map(post.charts, &Chart.png_name(&1.chart, &1.json))
+
+  @doc """
+  The file names of the illustrations a post shows from its own folder, `![alt](<slug>/<name>.png)`, in order and
+  without repeats. An image from its folder with any other name is not one; the check reports it.
+  """
+  @spec illustrations(post()) :: [String.t()]
+  def illustrations(post) do
+    post
+    |> own_images()
+    |> Enum.filter(&Regex.match?(@illustration_name, &1))
+    |> Enum.uniq()
+  end
+
+  @doc "The size an illustration's SVG source is drawn at, as `{width, height}`."
+  @spec illustration_size() :: {pos_integer(), pos_integer()}
+  def illustration_size, do: @illustration_size
+
+  # What the post shows from its own folder, by the path under it.
+  defp own_images(post) do
+    prefix = post.slug <> "/"
+    for src <- post.images, String.starts_with?(src, prefix), do: String.replace_prefix(src, prefix, "")
   end
 
   # The regular files beside a post, without the ones whose name starts with a dot.
@@ -276,20 +317,23 @@ defmodule Malachi.Site.Blog do
   def image_url(post, %{chart: chart, json: json}, meta),
     do: "#{meta["base_url"]}/blog/#{post.slug}/#{Chart.png_name(chart, json)}"
 
+  # The image of the post's link previews: its first chart, else its first illustration, else the kit's.
+  defp og_image(post, meta) do
+    case {post.charts, illustrations(post)} do
+      {[first | _], _} -> image_url(post, first, meta)
+      {[], [first | _]} -> "#{meta["base_url"]}/blog/#{post.slug}/#{first}"
+      {[], []} -> "#{meta["base_url"]}/kit/social-preview.png"
+    end
+  end
+
   defp page(post, meta, newsletter) do
     url = url(post, meta)
 
+    img = og_image(post, meta)
+
     image =
-      case post.charts do
-        [first | _] ->
-          img = image_url(post, first, meta)
-
-          ~s(<meta property="og:image" content="#{e(img)}">\n<meta name="twitter:card" content="summary_large_image">\n) <>
-            ~s(<meta name="twitter:image" content="#{e(img)}">)
-
-        [] ->
-          ~s(<meta name="twitter:card" content="summary">)
-      end
+      ~s(<meta property="og:image" content="#{e(img)}">\n<meta name="twitter:card" content="summary_large_image">\n) <>
+        ~s(<meta name="twitter:image" content="#{e(img)}">)
 
     shell(
       feed?: true,
@@ -529,28 +573,53 @@ defmodule Malachi.Site.Blog do
   defp image_errors(root, post, pointers?) do
     where = "#{@dir}/#{post.file}"
     dir = Path.join([root, @dir, post.slug])
-    expected = Enum.map(post.charts, &Chart.png_name(&1.chart, &1.json))
-    present = image_files(dir)
+    charts = chart_images(post)
+    illustrations = illustrations(post)
+    sources = Enum.map(illustrations, &(Path.rootname(&1) <> ".svg"))
 
-    count =
-      if length(post.charts) > @max_charts,
-        do: ["#{where} has #{length(post.charts)} charts; a post has at most #{@max_charts}"],
-        else: []
+    missing_chart = fn shown ->
+      "#{where} draws a chart whose image #{shown} is missing: run node site/checks/render.mjs"
+    end
 
-    count ++
-      Enum.flat_map(expected, &png_errors(dir, post.slug, &1, where, pointers?)) ++
-      for name <- present -- expected, String.ends_with?(name, ".png") do
-        "#{@dir}/#{post.slug}/#{name} is named by no chart in #{post.file} (stale after a data change?); remove it"
+    missing_illustration = fn shown ->
+      if File.regular?(Path.rootname(Path.join(root, shown)) <> ".svg"),
+        do: "#{where} shows #{shown}, which is not rendered: run mix malachi.release.post --images #{where}",
+        else: "#{where} shows #{shown}, which is missing, and so is its SVG source"
+    end
+
+    counts(where, charts, illustrations) ++
+      Enum.flat_map(charts, &png_errors(dir, post.slug, &1, missing_chart, pointers?)) ++
+      Enum.flat_map(illustrations, &png_errors(dir, post.slug, &1, missing_illustration, pointers?)) ++
+      for name <- Enum.uniq(own_images(post)) -- illustrations do
+        "#{where} shows #{post.slug}/#{name}; an image beside a post is a lowercase <name>.png"
+      end ++
+      for name <- image_files(dir) -- (charts ++ illustrations ++ sources) do
+        "#{@dir}/#{post.slug}/#{name} is neither an image #{post.file} shows nor an illustration's SVG source " <>
+          "(stale after a change?); remove it"
       end
   end
 
-  defp png_errors(dir, slug, name, where, pointers?) do
+  defp counts(where, charts, illustrations) do
+    chart_count =
+      if length(charts) > @max_charts,
+        do: ["#{where} has #{length(charts)} charts; a post has at most #{@max_charts}"],
+        else: []
+
+    illustration_count =
+      if length(illustrations) > @max_illustrations,
+        do: ["#{where} has #{length(illustrations)} illustrations; a post has at most #{@max_illustrations}"],
+        else: []
+
+    chart_count ++ illustration_count
+  end
+
+  defp png_errors(dir, slug, name, missing, pointers?) do
     path = Path.join(dir, name)
     shown = "#{@dir}/#{slug}/#{name}"
 
     case File.stat(path) do
       {:ok, %File.Stat{type: :regular, size: size}} when size > @max_png_bytes ->
-        ["#{shown} is #{div(size, 1024)} KB; a chart image is at most #{div(@max_png_bytes, 1024)} KB"]
+        ["#{shown} is #{div(size, 1024)} KB; an image beside a post is at most #{div(@max_png_bytes, 1024)} KB"]
 
       {:ok, %File.Stat{type: :regular}} ->
         if not pointers? and lfs_pointer?(path),
@@ -558,7 +627,7 @@ defmodule Malachi.Site.Blog do
           else: []
 
       _ ->
-        ["#{where} draws a chart whose image #{shown} is missing: run node site/checks/render.mjs"]
+        [missing.(shown)]
     end
   end
 

@@ -96,6 +96,14 @@ defmodule Malachi.Site.MarkdownTest do
     assert html =~ ~s(src="chart.png")
   end
 
+  test "returns the src of every image it shows, in order and as written, and none of a refused one" do
+    {:ok, rendered} = Markdown.render("![a](x/one.png) text ![b](https://h.test/two.png)\n\n![a](x/one.png)\n")
+    assert rendered.images == ["x/one.png", "https://h.test/two.png", "x/one.png"]
+
+    assert {:ok, %{images: []}} = Markdown.render("No image.\n")
+    assert {:error, _} = Markdown.render("![a](javascript:x) ![b](ok.png)\n")
+  end
+
   test "a malachi-chart block is drawn inline as SVG with its caption, and returned with its JSON" do
     json = ~s({"name": "rate", "title": "Rate", "unit": "r/s", "points": [{"label": "v1.0.0", "value": 10}]})
     assert {:ok, result} = Markdown.render("```malachi-chart\n#{json}\n```\n")

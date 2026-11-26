@@ -30,19 +30,35 @@ defmodule Malachi.Site.Markdown do
   @typedoc "A chart drawn in the post, with the JSON text its image name is hashed from."
   @type chart :: %{chart: Chart.t(), json: String.t()}
 
-  @typedoc "What rendering a post gives."
-  @type result :: %{html: String.t(), charts: [chart()], narratives: non_neg_integer(), seeds: non_neg_integer()}
+  @typedoc """
+  What rendering a post gives: its HTML, its charts, the `src` of every image it shows (in order, as written),
+  and how many `<!-- narrative -->` placeholders and `malachi-seed` blocks it still holds.
+  """
+  @type result :: %{
+          html: String.t(),
+          charts: [chart()],
+          images: [String.t()],
+          narratives: non_neg_integer(),
+          seeds: non_neg_integer()
+        }
 
   @doc "Renders Markdown, or returns every problem found in it."
   @spec render(String.t()) :: {:ok, result()} | {:error, [String.t()]}
   def render(markdown) do
     case EarmarkParser.as_ast(markdown) do
       {:ok, ast, []} ->
-        {html, acc} = nodes(ast, %{charts: [], narratives: 0, seeds: 0, errors: []})
+        {html, acc} = nodes(ast, %{charts: [], images: [], narratives: 0, seeds: 0, errors: []})
 
         case acc.errors do
           [] ->
-            {:ok, %{html: html, charts: Enum.reverse(acc.charts), narratives: acc.narratives, seeds: acc.seeds}}
+            {:ok,
+             %{
+               html: html,
+               charts: Enum.reverse(acc.charts),
+               images: Enum.reverse(acc.images),
+               narratives: acc.narratives,
+               seeds: acc.seeds
+             }}
 
           errors ->
             {:error, errors |> Enum.reverse() |> Enum.uniq()}
@@ -108,8 +124,12 @@ defmodule Malachi.Site.Markdown do
     src = attr(attrs, "src") || ""
 
     case link_error(src, ["https"]) do
-      nil -> {~s(<img src="#{escape(src)}" alt="#{escape(attr(attrs, "alt") || "")}"#{title(attrs)}>), acc}
-      reason -> {"", error(acc, "the image #{inspect(src)} #{reason}")}
+      nil ->
+        {~s(<img src="#{escape(src)}" alt="#{escape(attr(attrs, "alt") || "")}"#{title(attrs)}>),
+         %{acc | images: [src | acc.images]}}
+
+      reason ->
+        {"", error(acc, "the image #{inspect(src)} #{reason}")}
     end
   end
 

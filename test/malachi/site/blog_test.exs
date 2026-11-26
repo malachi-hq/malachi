@@ -47,6 +47,13 @@ defmodule Malachi.Site.BlogTest do
     Chart.png_name(chart, @chart)
   end
 
+  # A post that shows an illustration, with its SVG source and the PNG the renderer drew from it.
+  defp illustrated_post(root, body \\ "Text.\n\n![A range splits](2026-11-16-v1-2-3/split.png)\n") do
+    post(root, "2026-11-16-v1-2-3.md", body: body)
+    write(root, "site/blog/2026-11-16-v1-2-3/split.svg", "<svg/>")
+    write(root, "site/blog/2026-11-16-v1-2-3/split.png", <<137, "PNG", 0::size(64)>>)
+  end
+
   defp stage!(root), do: :ok = Site.stage(root, @config)
   defp verify(root), do: Site.verify(root, @config)
   defp read(root, path), do: File.read!(Path.join(root, path))
@@ -91,12 +98,42 @@ defmodule Malachi.Site.BlogTest do
       assert verify(root) == []
     end
 
-    test "without a chart takes a summary card and no image", %{root: root} do
+    test "without a chart or an illustration takes the kit's social preview for its link previews", %{root: root} do
       post(root, "2026-11-16-v1-2-3.md")
       stage!(root)
       page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
-      assert page =~ ~s(<meta name="twitter:card" content="summary">)
-      refute page =~ "og:image"
+      assert page =~ ~s(<meta name="twitter:card" content="summary_large_image">)
+      assert page =~ ~s(<meta property="og:image" content="https://example.test/malachi/kit/social-preview.png">)
+      assert page =~ ~s(<meta name="twitter:image" content="https://example.test/malachi/kit/social-preview.png">)
+      assert File.exists?(Path.join(root, "doc/kit/social-preview.png"))
+      assert verify(root) == []
+    end
+
+    test "an illustration is published as its PNG beside the page, its SVG source is not, and it is the og:image",
+         %{root: root} do
+      illustrated_post(root)
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+      assert page =~ ~s(<img src="2026-11-16-v1-2-3/split.png" alt="A range splits">)
+
+      assert page =~
+               ~s(<meta property="og:image" content="https://example.test/malachi/blog/2026-11-16-v1-2-3/split.png">)
+
+      assert File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/split.png"))
+      refute File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/split.svg"))
+      assert verify(root) == []
+    end
+
+    test "a chart comes before an illustration as the og:image", %{root: root} do
+      png = charted_post(root)
+      body = "![A range splits](2026-11-16-v1-2-3/split.png)\n\n```malachi-chart\n#{@chart}\n```\n"
+      post(root, "2026-11-16-v1-2-3.md", body: body)
+      write(root, "site/blog/2026-11-16-v1-2-3/split.png", <<137, "PNG", 0::size(64)>>)
+      write(root, "site/blog/2026-11-16-v1-2-3/split.svg", "<svg/>")
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+      assert page =~ ~s(<meta property="og:image" content="https://example.test/malachi/blog/2026-11-16-v1-2-3/#{png}">)
+      assert File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/split.png"))
       assert verify(root) == []
     end
 
@@ -197,14 +234,19 @@ defmodule Malachi.Site.BlogTest do
       assert "site/blog/2026-11-16-v1-2-3/#{png} is a Git LFS pointer, not the image: run git lfs pull" in verify(root)
 
       File.write!(Path.join(dir, png), :binary.copy(<<0>>, 150 * 1024 + 1))
-      assert "site/blog/2026-11-16-v1-2-3/#{png} is 150 KB; a chart image is at most 150 KB" in verify(root)
+      assert "site/blog/2026-11-16-v1-2-3/#{png} is 150 KB; an image beside a post is at most 150 KB" in verify(root)
 
       File.rm!(Path.join(dir, png))
       File.write!(Path.join(dir, "rate-00000000.png"), "old")
       errors = verify(root)
 
       assert Enum.any?(errors, &(&1 =~ "draws a chart whose image site/blog/2026-11-16-v1-2-3/#{png} is missing"))
-      assert Enum.any?(errors, &(&1 =~ "rate-00000000.png is named by no chart in 2026-11-16-v1-2-3.md"))
+
+      assert Enum.any?(
+               errors,
+               &(&1 =~
+                   "rate-00000000.png is neither an image 2026-11-16-v1-2-3.md shows nor an illustration's SVG source")
+             )
     end
 
     test "a Git LFS pointer is accepted with lfs_pointers, as on a fork's pull request, and nothing else is",
@@ -219,6 +261,62 @@ defmodule Malachi.Site.BlogTest do
 
       File.rm!(Path.join(dir, png))
       assert Enum.any?(Site.verify(root, @config, lfs_pointers: true), &(&1 =~ "is missing"))
+    end
+
+    test "an illustration not rendered, missing with its source, a Git LFS pointer, or too large", %{root: root} do
+      illustrated_post(root)
+      dir = Path.join(root, "site/blog/2026-11-16-v1-2-3")
+      stage!(root)
+
+      File.rm!(Path.join(dir, "split.png"))
+
+      assert ("site/blog/2026-11-16-v1-2-3.md shows site/blog/2026-11-16-v1-2-3/split.png, which is not rendered: " <>
+                "run mix malachi.release.post --images site/blog/2026-11-16-v1-2-3.md") in verify(root)
+
+      File.rm!(Path.join(dir, "split.svg"))
+
+      assert ("site/blog/2026-11-16-v1-2-3.md shows site/blog/2026-11-16-v1-2-3/split.png, which is missing, " <>
+                "and so is its SVG source") in verify(root)
+
+      File.write!(Path.join(dir, "split.png"), "version https://git-lfs.github.com/spec/v1\noid sha256:00\nsize 9\n")
+
+      assert "site/blog/2026-11-16-v1-2-3/split.png is a Git LFS pointer, not the image: run git lfs pull" in verify(
+               root
+             )
+
+      assert Site.verify(root, @config, lfs_pointers: true) == []
+
+      File.write!(Path.join(dir, "split.png"), :binary.copy(<<0>>, 150 * 1024 + 1))
+      assert "site/blog/2026-11-16-v1-2-3/split.png is 150 KB; an image beside a post is at most 150 KB" in verify(root)
+    end
+
+    test "an image from the post's folder that is not a lowercase <name>.png, and a file nothing shows",
+         %{root: root} do
+      illustrated_post(root, "![a](2026-11-16-v1-2-3/split.png) ![b](2026-11-16-v1-2-3/Split.PNG)\n")
+      write(root, "site/blog/2026-11-16-v1-2-3/notes.txt", "draft")
+      write(root, "site/blog/2026-11-16-v1-2-3/orphan.svg", "<svg/>")
+      stage!(root)
+      errors = verify(root)
+
+      assert ("site/blog/2026-11-16-v1-2-3.md shows 2026-11-16-v1-2-3/Split.PNG; an image beside a post is a " <>
+                "lowercase <name>.png") in errors
+
+      for name <- ["notes.txt", "orphan.svg"] do
+        assert ("site/blog/2026-11-16-v1-2-3/#{name} is neither an image 2026-11-16-v1-2-3.md shows nor an " <>
+                  "illustration's SVG source (stale after a change?); remove it") in errors
+      end
+
+      refute File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/notes.txt"))
+      refute File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/orphan.svg"))
+    end
+
+    test "more than five illustrations; one shown twice counts once", %{root: root} do
+      names = for i <- 1..6, do: "d#{i}.png"
+      body = Enum.map_join(names ++ ["d1.png"], "\n\n", &"![x](2026-11-16-v1-2-3/#{&1})") <> "\n"
+      post(root, "2026-11-16-v1-2-3.md", body: body)
+      for name <- names, do: write(root, "site/blog/2026-11-16-v1-2-3/#{name}", <<137, "PNG", 0::size(64)>>)
+      stage!(root)
+      assert "site/blog/2026-11-16-v1-2-3.md has 6 illustrations; a post has at most 5" in verify(root)
     end
 
     test "more than three charts", %{root: root} do
