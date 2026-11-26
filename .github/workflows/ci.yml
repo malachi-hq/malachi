@@ -20,14 +20,10 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - lint: true
-            coverage: true
-    
+
+    # The suite and its coverage only. The checks that read the source rather than run it (formatting,
+    # warnings, credo, design tokens, unused dependencies) are Code Quality's, so this job is the suite's
+    # time and nothing else (#390).
     steps:
       - name: 🛡️ Harden the runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -77,42 +73,11 @@ jobs:
           done
           exit 1
       
-      - name: 🔍 Check unused dependencies
-        run: mix deps.unlock --check-unused
-        if: matrix.lint
-      
-      - name: ⚙️ Compile (warnings as errors)
-        run: mix compile --warnings-as-errors
-        if: matrix.lint
-      
-      - name: ⚙️ Compile (dev)
-        run: mix compile
-        if: ${{ !matrix.lint }}
-      
-      - name: 🎨 Check formatting
-        run: mix format --check-formatted
-        if: matrix.lint
-
-      # docs/design/design-tokens.json generates the web stylesheet, the terminal palette, the Elixir
-      # module and the snapshot (#227). This fails on an output that was not regenerated and committed,
-      # on a committed output that breaks the cross language contract, and on a raw color literal in
-      # assets/src or tui/src. Its own step, so the message is the first thing in the log.
-      - name: 🎨 Check design tokens
-        run: mix malachi.tokens --check
-        if: matrix.lint
-      
-      - name: 🔎 Run Credo (static analysis)
-        run: mix credo --strict
-        if: matrix.lint
-        continue-on-error: true  # Don't fail build on credo warnings
-      
       - name: 📊 Run tests with coverage
         run: mix coveralls.json
-        if: matrix.coverage
-      
+
       - name: 📈 Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-        if: matrix.coverage
         with:
           files: ./cover/excoveralls.json
           flags: unittests
@@ -401,6 +366,28 @@ jobs:
           done
           exit 1
       
+      # The checks that read the source rather than run it, moved here from Test so the suite's job runs the
+      # suite alone (#390). Every one blocks: credo used to run behind continue-on-error, so a green run proved
+      # nothing about it.
+      - name: 🔍 Check unused dependencies
+        run: mix deps.unlock --check-unused
+
+      - name: ⚙️ Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: 🎨 Check formatting
+        run: mix format --check-formatted
+
+      # docs/design/design-tokens.json generates the web stylesheet, the terminal palette, the Elixir
+      # module and the snapshot (#227). This fails on an output that was not regenerated and committed,
+      # on a committed output that breaks the cross language contract, and on a raw color literal in
+      # assets/src or tui/src. Its own step, so the message is the first thing in the log.
+      - name: 🎨 Check design tokens
+        run: mix malachi.tokens --check
+
+      - name: 🔎 Run Credo (static analysis)
+        run: mix credo --strict
+
       # Hex's own advisory feed (hex.pm security advisories), which `mix deps.audit` in security.yml does not
       # read: it reported EEF-CVE-2026-120287 in plug 1.20.3 while deps.audit found nothing (#390). This step
       # replaced `mix check`, whose other tools all ran somewhere else already (the suite, dialyzer, credo,
@@ -429,12 +416,6 @@ jobs:
           name: landing-page-doc
           path: doc/
           retention-days: 1
-      
-      - name: 🔍 Check for TODO/FIXME comments
-        run: |
-          echo "📝 Checking for TODO/FIXME comments..."
-          grep -r "TODO\|FIXME" lib/ || echo "✅ No TODO/FIXME found"
-        continue-on-error: true
 
   # The tests tagged :multinode start peer BEAM nodes, which is why `mix test` excludes them by default. They
   # are the only proof of the cross-node paths (replication, failover, sealing on another node's failure),
@@ -565,6 +546,12 @@ jobs:
 
           if [ "${{ needs.test.result }}" != "success" ]; then
             echo "❌ Tests failed!"
+            exit 1
+          fi
+
+          # Code Quality was listed in needs but never read, so its failures never reached this check (#390).
+          if [ "${{ needs.quality.result }}" != "success" ]; then
+            echo "❌ Code quality checks failed!"
             exit 1
           fi
 
