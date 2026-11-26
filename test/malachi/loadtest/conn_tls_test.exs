@@ -5,6 +5,7 @@ defmodule Malachi.Loadtest.ConnTLSTest do
   use ExUnit.Case, async: false
 
   alias Malachi.Loadtest.Conn
+  alias Malachi.Test.CertFixtures
   alias Malachi.Test.TmpDir
 
   @host ~c"localhost"
@@ -50,61 +51,9 @@ defmodule Malachi.Loadtest.ConnTLSTest do
   # hostname verification actually reads.
   defp ca_signed(cn \\ "localhost") do
     dir = TmpDir.path("malachi_conn_ca")
-    File.mkdir_p!(dir)
-    path = &Path.join(dir, &1)
-    openssl = &({_out, 0} = System.cmd("openssl", &1, stderr_to_stdout: true))
-
-    openssl.([
-      "req",
-      "-x509",
-      "-newkey",
-      "rsa:2048",
-      "-nodes",
-      "-keyout",
-      path.("ca-key.pem"),
-      "-out",
-      path.("ca.pem"),
-      "-days",
-      "1",
-      "-subj",
-      "/CN=Malachi Test CA"
-    ])
-
-    openssl.([
-      "req",
-      "-newkey",
-      "rsa:2048",
-      "-nodes",
-      "-keyout",
-      path.("key.pem"),
-      "-out",
-      path.("csr.pem"),
-      "-subj",
-      "/CN=#{cn}"
-    ])
-
-    File.write!(path.("ext.cnf"), "subjectAltName=DNS:#{cn}\n")
-
-    openssl.([
-      "x509",
-      "-req",
-      "-in",
-      path.("csr.pem"),
-      "-CA",
-      path.("ca.pem"),
-      "-CAkey",
-      path.("ca-key.pem"),
-      "-CAcreateserial",
-      "-out",
-      path.("cert.pem"),
-      "-days",
-      "1",
-      "-extfile",
-      path.("ext.cnf")
-    ])
-
     on_exit(fn -> File.rm_rf!(dir) end)
-    {path.("ca.pem"), path.("cert.pem"), path.("key.pem")}
+    %{ca: ca, cert: cert, key: key} = CertFixtures.ca_signed!(dir, cn)
+    {ca, cert, key}
   end
 
   # A TLS listener that accepts one connection, runs `after_handshake` on it (by default, just holds it:

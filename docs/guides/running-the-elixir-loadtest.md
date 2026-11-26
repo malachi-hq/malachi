@@ -126,6 +126,12 @@ recorded command names no token, so unset it before a certificate or password ru
 A `--cert` without a `--key` (or the reverse) is rejected before a connection is opened, rather than
 failing later inside the handshake.
 
+The TLS settings can also come from the environment, under the names the Node client reads, so one
+exported setting serves both generators: `MALACHI_CLIENT_TLS` and `MALACHI_CLIENT_TLS_INSECURE` (`true` or
+`false`; any other value is refused), and the paths `MALACHI_CLIENT_TLS_CACERT`, `MALACHI_CLIENT_TLS_CERT`
+and `MALACHI_CLIENT_TLS_KEY`. A flag wins over its variable (`--no-tls` over `MALACHI_CLIENT_TLS=true`), an
+empty variable counts as unset, and the recorded command holds them as flags.
+
 `--tls` authenticates the server as well as encrypting the connection: the certificate is checked
 against `--cacert` when you name a CA, and against the operating system's trust store when you do not,
 and either way the hostname you connected to has to match the certificate. A broker using a private CA

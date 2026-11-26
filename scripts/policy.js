@@ -87,7 +87,7 @@ function parseValue(name, raw) {
 const show = (value) => (value === null ? 'off' : String(value));
 
 async function run(cmd, rest, fields, force) {
-  const client = new MalachiClient({ host: cfg.host, port: cfg.port });
+  const client = new MalachiClient({ host: cfg.host, port: cfg.port, tls: cfg.tls });
   await client.connect(cfg.username, cfg.password);
   try {
     switch (cmd) {

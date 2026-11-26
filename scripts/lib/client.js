@@ -13,7 +13,9 @@
  */
 
 const net = require('net');
+const tls = require('tls');
 const wire = require('./wire');
+const { connectOptions, explainTlsError } = require('./tls');
 
 const DEFAULT_PORT = 4040;
 const DEFAULT_HOST = 'localhost';
@@ -47,6 +49,10 @@ class MalachiClient {
     this.connectTimeout = options.connectTimeout || DEFAULT_CONNECT_TIMEOUT;
     // how the socket is made: net.createConnection, or a test's stand-in
     this.createConnection = options.createConnection || net.createConnection;
+    // TLS settings from ./tls.js resolveTls, or null for plaintext; with them the socket is made by
+    // tls.connect (or a test's stand-in), verified, and nothing is sent before the handshake completes
+    this.tls = options.tls || null;
+    this.createTlsConnection = options.createTlsConnection || tls.connect;
 
     this.socket = null;
     this.token = null;
@@ -60,21 +66,28 @@ class MalachiClient {
 
   // Opens the socket and authenticates; resolves once a token is held. Each within `connectTimeout`, as
   // Malachi.Loadtest.Conn bounds its connect and then its authentication: a host that takes the connection
-  // and never answers is a connect that failed, as one that drops it is.
+  // and never answers is a connect that failed, as one that drops it is. A client certificate authenticates
+  // the connection by itself (mtls_auth), as it does in Malachi.Loadtest.Conn, whatever user is given.
   async connect(username, password) {
     await this._openSocket();
-    if (username !== undefined) await this.authenticate(username, password, this.connectTimeout);
+    if (this.tls && this.tls.cert) await this.authenticateMtls(this.connectTimeout);
+    else if (username !== undefined) await this.authenticate(username, password, this.connectTimeout);
     return this;
   }
 
+  // Resolves once the socket can carry a request: on 'connect' in plaintext, and under TLS only on
+  // 'secureConnect', after the server's certificate was verified, so no frame (the credentials first) is
+  // written to a server that was not. A verification failure rejects explained (./tls.js explainTlsError).
   _openSocket() {
     return new Promise((resolve, reject) => {
-      const socket = this.createConnection(this.port, this.host);
+      const socket = this.tls
+        ? this.createTlsConnection(connectOptions(this.tls, this.host, this.port))
+        : this.createConnection(this.port, this.host);
       const timer = setTimeout(() => {
         socket.destroy();
         reject(transportError(`connect timed out after ${this.connectTimeout}ms`));
       }, this.connectTimeout);
-      socket.once('connect', () => {
+      socket.once(this.tls ? 'secureConnect' : 'connect', () => {
         clearTimeout(timer);
         socket.on('data', (chunk) => this._onData(chunk));
         socket.on('close', () => this._onClose());
@@ -86,7 +99,7 @@ class MalachiClient {
       });
       socket.once('error', (err) => {
         clearTimeout(timer);
-        reject(err);
+        reject(this.tls ? explainTlsError(err, this.host) : err);
       });
       this.socket = socket;
     });
@@ -204,6 +217,14 @@ class MalachiClient {
 
   async authenticate(username, password, timeout = this.timeout) {
     const payload = await this._request(wire.API.auth, wire.encodeAuthReq(username, password), timeout);
+    this.token = wire.decodeString(payload);
+    return this.token;
+  }
+
+  // Authenticates by the client certificate presented at the TLS handshake (mtls_auth, an empty request):
+  // the server maps the verified certificate to a user, when its policy allows certificate logins.
+  async authenticateMtls(timeout = this.timeout) {
+    const payload = await this._request(wire.API.mtlsAuth, Buffer.alloc(0), timeout);
     this.token = wire.decodeString(payload);
     return this.token;
   }

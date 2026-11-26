@@ -442,22 +442,29 @@ docker run \
 
 #### 3. Connect with TLS Client (Node.js)
 
-```javascript
-const tls = require('tls');
+The reference Node client (`scripts/`) verifies the server's certificate and host name, and sends
+nothing, credentials included, before that verification succeeds. Name the CA that signed the server's
+certificate, or leave it out to trust Node's bundled CAs:
 
-const client = tls.connect({
-  host: 'localhost',
-  port: 4040,
-  rejectUnauthorized: false  // For self-signed certs (dev only)
-}, () => {
-  console.log('TLS connected');
-  client.write(JSON.stringify({
-    action: 'auth',
-    username: 'producer',
-    password: 'producer123'
-  }) + '\n');
-});
+```bash
+cd scripts
+MALACHI_CLIENT_TLS=true MALACHI_CLIENT_TLS_CACERT=/certs/ca.crt node producer.js
 ```
+
+From code, resolve the same settings and pass them to the client:
+
+```javascript
+const { MalachiClient } = require('./lib/client');
+const { resolveTls } = require('./lib/tls');
+
+const tls = resolveTls({ tls: true, cacert: '/certs/ca.crt' });
+const client = await new MalachiClient({ host: 'localhost', port: 4040, tls }).connect('producer', 'producer123');
+```
+
+`MALACHI_CLIENT_TLS_CERT` and `MALACHI_CLIENT_TLS_KEY` (`--cert`/`--key` in `loadtest.js`) present a client
+certificate, which then authenticates the connection by mTLS in place of the password.
+`MALACHI_CLIENT_TLS_INSECURE=true` skips verifying the server: for a development server only, since the
+connection is then encrypted but anyone on the path can read and rewrite it.
 
 ### Production TLS Setup
 

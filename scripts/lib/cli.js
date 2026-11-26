@@ -6,6 +6,7 @@
  */
 
 const os = require('os');
+const { resolveTls, TlsConfigError } = require('./tls');
 
 const colors = {
   green: (s) => `\x1b[32m${s}\x1b[0m`,
@@ -16,7 +17,9 @@ const colors = {
   bold: (s) => `\x1b[1m${s}\x1b[0m`,
 };
 
-// Connection config shared by every CLI. A script overrides user/pass with its role default.
+// Connection config shared by every CLI. A script overrides user/pass with its role default. `tls` is what
+// the MALACHI_CLIENT_TLS* variables ask for (./tls.js), null for plaintext; a CLI that takes TLS flags too
+// resolves it again with them (`tlsFrom`). A setting that cannot be honoured exits before anything connects.
 function config(defaults = {}) {
   return {
     host: process.env.MALACHI_HOST || 'localhost',
@@ -24,13 +27,26 @@ function config(defaults = {}) {
     topic: process.env.MALACHI_TOPIC || defaults.topic || 'events',
     username: process.env.MALACHI_USER || defaults.username,
     password: process.env.MALACHI_PASS || defaults.password,
+    tls: tlsFrom({}),
   };
 }
 
-// What a routing client connects with (./links.js): the config's credentials, and how long a request may
-// wait for its answer.
+// The TLS settings `flags` and the environment ask for, flags first; exits non-zero on one that cannot be
+// honoured, naming it.
+function tlsFrom(flags, env = process.env) {
+  try {
+    return resolveTls(flags, env);
+  } catch (err) {
+    if (!(err instanceof TlsConfigError)) throw err;
+    console.error(colors.red(`TLS: ${err.message}`));
+    process.exit(1);
+  }
+}
+
+// What a routing client connects with (./links.js): the config's credentials and TLS settings, and how long
+// a request may wait for its answer.
 function connOptions(cfg, timeout) {
-  return { user: cfg.username, pass: cfg.password, timeout };
+  return { user: cfg.username, pass: cfg.password, tls: cfg.tls, timeout };
 }
 
 // Splits argv into positional args and a flag map. `--group g`/`--max 10` take the next token as a value;
@@ -59,10 +75,11 @@ function parseArgs(argv, valueFlags = []) {
 // Prints the error and exits non-zero. The "is the server up?" hint only helps for a connection failure:
 // a Node network/system error carries an `err.code` (ECONNREFUSED, ETIMEDOUT, ...); an error the server sent
 // back (a MalachiError like permission_denied / invalid_operation) has none, meaning the server is reachable,
-// so the hint is suppressed there.
+// so the hint is suppressed there. A TLS verification failure carries a code too, but its server answered:
+// its own message already says what to change.
 function fail(err, cfg) {
   console.error(colors.red(`\nError: ${err.message}`));
-  if (cfg && err.code) console.error(colors.gray(`   Is the server running at ${cfg.host}:${cfg.port}?`));
+  if (cfg && err.code && !err.tlsVerification) console.error(colors.gray(`   Is the server running at ${cfg.host}:${cfg.port}?`));
   process.exit(1);
 }
 
@@ -118,4 +135,4 @@ function printAssignment({ generation, ranges }) {
   console.log(colors.gray(`   generation ${generation % 2 ** 32}: ranges ${JSON.stringify([...ranges].sort((a, b) => a - b))}`));
 }
 
-module.exports = { colors, config, connOptions, parseArgs, fail, sleep, groupMemberOf, joinGroupAs };
+module.exports = { colors, config, tlsFrom, connOptions, parseArgs, fail, sleep, groupMemberOf, joinGroupAs };
