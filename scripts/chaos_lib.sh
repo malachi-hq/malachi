@@ -11,6 +11,8 @@
 # read by a human still leaves a record.
 
 COMPOSE="docker compose -f docker-compose.cluster.yml"
+# shellcheck source=scripts/cluster_dist_lib.sh
+. scripts/cluster_dist_lib.sh
 # The scratch dir is bind-mounted into the checker container (`-v "$WORK:/chaos"`), so it must live where the
 # Docker host can see it. A bare `mktemp -d` does not guarantee that: on macOS it ignores TMPDIR and picks
 # /var/folders, which Docker Desktop need not share with its VM. The checker then wrote acked.log inside the
@@ -21,6 +23,8 @@ CHAOS_WORK_ROOT="${CHAOS_WORK_ROOT:-$PWD/tmp/chaos}"
 mkdir -p "$CHAOS_WORK_ROOT" || { echo "cannot create $CHAOS_WORK_ROOT"; exit 1; }
 WORK="$(mktemp -d "$CHAOS_WORK_ROOT/work.XXXXXX")" || { echo "cannot create a scratch dir under $CHAOS_WORK_ROOT"; exit 1; }
 trap 'rm -rf "$WORK"' EXIT
+# This run's cookie and distribution certificates, inside WORK so the trap removes them (#385).
+cluster_dist_setup "$WORK/dist" || exit 1
 # Where a failed check keeps what it saw. Beside WORK rather than inside it, so the EXIT trap leaves it, and
 # named by time and commit so runs never overwrite each other. Created only when something is kept.
 EVIDENCE_DIR="$CHAOS_WORK_ROOT/evidence/$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
@@ -207,7 +211,7 @@ node_task() {
   idx=$1
   shift
   docker exec "malachi-cluster-$idx" sh -c \
-    "cd /app && elixir --sname chaoscli --cookie malachi_bench -S mix $* --node malachi@malachi$idx" 2>&1
+    "cd /app && elixir --sname chaoscli --cookie \"\$MALACHI_COOKIE\" -S mix $* --node malachi@malachi$idx" 2>&1
 }
 
 # Switches the producer_streams cluster flag on through node 1. A build of this tree serves the stream keys
@@ -366,11 +370,13 @@ check_convergence() {
 }
 
 # Runs the checker's control-plane mode from a VM short-named with the cluster's cookie, the only kind of
-# VM a short-named cluster accepts a connection from. --no-deps: the cluster is already up, and a
-# dependency check must not restart a node the drill stopped on purpose.
+# VM a short-named cluster accepts a connection from, over the cluster's distribution (the certificates mounted,
+# TLS on unless DIST_TLS=0). --no-deps: the cluster is already up, and a dependency check must not restart a node
+# the drill stopped on purpose.
 control_plane_run() {
-  $COMPOSE run --rm --no-deps -v "$PWD/scripts:/chaos_scripts" --entrypoint sh loadtest \
-    -c "cd /app && elixir --sname chaoschk --cookie malachi_bench -S mix run --no-start /chaos_scripts/chaos_checker.exs control-plane $*"
+  $COMPOSE run --rm --no-deps -v "$PWD/scripts:/chaos_scripts" -v "$MALACHI_DIST_DIR:/dist:ro" \
+    -e MALACHI_COOKIE -e ELIXIR_ERL_OPTIONS="$MALACHI_DIST_ERL_OPTIONS" --entrypoint sh loadtest \
+    -c "cd /app && elixir --sname chaoschk --cookie \"\$MALACHI_COOKIE\" -S mix run --no-start /chaos_scripts/chaos_checker.exs control-plane $*"
 }
 
 # Invariant: every Raft group holds the same state on every member, compared at equal applied indexes

@@ -21,7 +21,13 @@ set -uo pipefail
 cd "$(cd "$(dirname "$0")/.." && pwd)" || exit 1
 COMPOSE="docker compose -f docker-compose.cluster.yml"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# This run's cookie and distribution certificates (#385), under the repository so the Docker host can mount them.
+# shellcheck source=scripts/cluster_dist_lib.sh
+. scripts/cluster_dist_lib.sh
+mkdir -p tmp/dist || exit 1
+DIST_DIR="$(mktemp -d "$PWD/tmp/dist/run.XXXXXX")" || exit 1
+trap 'rm -rf "$WORK" "$DIST_DIR"' EXIT
+cluster_dist_setup "$DIST_DIR" || exit 1
 DUR="${DUR:-8}"
 WARM="${WARM:-5}"
 CONNS="${CONNS:-48}"

@@ -68,7 +68,7 @@ defmodule UpgradeChaosTest do
     root = Path.join(dir, "repo")
     File.mkdir_p!(Path.join(root, "scripts"))
 
-    for name <- ~w(docker-upgrade-chaos.sh chaos_lib.sh) do
+    for name <- ~w(docker-upgrade-chaos.sh chaos_lib.sh cluster_dist_lib.sh generate-dist-certs.sh) do
       File.cp!(Path.join(@scripts, name), Path.join([root, "scripts", name]))
     end
 

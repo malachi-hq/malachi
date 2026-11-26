@@ -151,7 +151,13 @@ fi
 
 # Private scratch dir (not a predictable /tmp path a local attacker could pre-create as a symlink).
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# This run's cookie and distribution certificates (#385), under the repository so the Docker host can mount them.
+# shellcheck source=scripts/cluster_dist_lib.sh
+. scripts/cluster_dist_lib.sh
+mkdir -p tmp/dist || exit 1
+DIST_DIR="$(mktemp -d "$PWD/tmp/dist/run.XXXXXX")" || exit 1
+trap 'rm -rf "$WORK" "$DIST_DIR"' EXIT
+cluster_dist_setup "$DIST_DIR" || exit 1
 NODES="malachi1 malachi2 malachi3"
 LOADTEST_CONTAINER="malachi-cluster-loadtest-$$"
 # Created by the generator, inside its own container, the moment the measured window opens.

@@ -18,6 +18,7 @@ defmodule DockerClusterTest do
   @moduletag timeout: 120_000
 
   @script Path.expand("../../benchmark/docker-cluster.sh", __DIR__)
+  @scripts_dir Path.expand("../../scripts", __DIR__)
   @project Path.expand("../..", __DIR__)
   @prealloc 67_108_864
   @scrape_lib Path.expand("../../scripts/metrics_scrape_lib.sh", __DIR__)
@@ -38,6 +39,9 @@ defmodule DockerClusterTest do
     File.cp!(@script, Path.join([root, "benchmark", "docker-cluster.sh"]))
     File.mkdir_p!(Path.join(root, "scripts"))
     File.cp!(@scrape_lib, Path.join([root, "scripts", "metrics_scrape_lib.sh"]))
+
+    for script <- ~w(cluster_dist_lib.sh generate-dist-certs.sh),
+        do: File.cp!(Path.join(@scripts_dir, script), Path.join([root, "scripts", script]))
 
     stubs = Path.join(dir, "stubs")
     File.mkdir_p!(stubs)

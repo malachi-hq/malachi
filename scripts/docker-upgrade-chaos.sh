@@ -398,7 +398,7 @@ end_phase() {
 
 # Evaluates Elixir expression $2 in a VM beside node $1, short-named with the cluster's cookie.
 node_eval() {
-  docker exec "malachi-cluster-$1" sh -c "cd /app && elixir --sname chaoseval --cookie malachi_bench -e '$2'" 2>&1
+  docker exec "malachi-cluster-$1" sh -c "cd /app && elixir --sname chaoseval --cookie \"\$MALACHI_COOKIE\" -e '$2'" 2>&1
 }
 
 node_atom() { echo "String.to_atom(~s(malachi@malachi$1))"; }
