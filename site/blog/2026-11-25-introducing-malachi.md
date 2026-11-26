@@ -3,6 +3,7 @@ title: Introducing Malachi, an open source log broker in Elixir
 date: 2026-11-25
 versions: [0.28.4]
 author: Hector Cardoso
+cover: cover.png
 summary: Malachi is an open source log broker in Elixir whose topics change shape without breaking their clients, and every release publishes the evidence behind it.
 ---
 Some systems cannot afford to lose a [record](https://en.wikipedia.org/wiki/Record_(computer_science)), or to deliver one twice: a payment, an order,
