@@ -3,12 +3,13 @@
 #
 #   scripts/site-images-pull.sh [--check-only]
 #
-# The images are the blog's chart PNGs (site/blog/**/*.png) and the kit's (site/kit/**/*.png). They live in Git
-# LFS, whose free quota counts every download, a fork's pushes included, and blocks the account once it is
-# spent. So nothing is downloaded before every image tracked in those folders is checked from its pointer:
+# The images are the blog's PNGs, charts and illustrations (site/blog/**/*.png), and the kit's
+# (site/kit/**/*.png). They live in Git LFS, whose free quota counts every download, a fork's pushes included,
+# and blocks the account once it is spent. So nothing is downloaded before every image tracked in those folders
+# is checked from its pointer:
 #
 #   * it is a Git LFS pointer, not the image itself committed outside LFS;
-#   * the size the pointer declares is within budget: 150 KB for a blog chart, 300 KB for a kit image.
+#   * the size the pointer declares is within budget: 150 KB for a blog image, 300 KB for a kit image.
 #
 # Each pointer is read from the index, which holds the pointer whether or not the checkout replaced the file
 # with its image (`git lfs install` does), so the check gives the same answer in CI and on a contributor's

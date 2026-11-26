@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" role="img" aria-label="When a write is acknowledged">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#00d9ff"/></marker>
+<marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8b96c4"/></marker>
+<marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3ddc97"/></marker></defs>
+<rect width="1200" height="675" fill="#0a0e27"/>
+<g font-family="'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif">
+<text x="60" y="78" font-size="38" font-weight="600" fill="#ffffff" text-anchor="start">When a write is acknowledged</text>
+<text x="60" y="118" font-size="22" font-weight="400" fill="#8b96c4" text-anchor="start">A segment is replicated across nodes. The producer hears back once a majority has the write on disk.</text>
+<rect x="60" y="250" width="220" height="130" rx="14" fill="#121a3d" stroke="#2a3566" stroke-width="2"/>
+<text x="170" y="308" font-size="26" font-weight="600" fill="#ffffff" text-anchor="middle">producer</text>
+<text x="170" y="342" font-size="19" font-weight="400" fill="#8b96c4" text-anchor="middle">sends a batch</text>
+<rect x="560" y="160" width="340" height="100" rx="14" fill="#121a3d" stroke="#3ddc97" stroke-width="2"/>
+<text x="590" y="200" font-size="24" font-weight="600" fill="#ffffff" text-anchor="start">node 1</text>
+<text x="700" y="200" font-size="20" font-weight="400" fill="#8b96c4" text-anchor="start">primary</text>
+<rect x="590" y="216" width="26" height="26" rx="5" fill="#00d9ff" fill-opacity="0.85"/><rect x="622" y="216" width="26" height="26" rx="5" fill="#00d9ff" fill-opacity="0.85"/><rect x="654" y="216" width="26" height="26" rx="5" fill="#00d9ff" fill-opacity="0.85"/><rect x="686" y="216" width="26" height="26" rx="5" fill="#00d9ff" fill-opacity="0.85"/>
+<text x="880" y="238" font-size="20" font-weight="600" fill="#3ddc97" text-anchor="end">fsynced</text>
+<rect x="560" y="295" width="340" height="100" rx="14" fill="#121a3d" stroke="#3ddc97" stroke-width="2"/>
+<text x="590" y="335" font-size="24" font-weight="600" fill="#ffffff" text-anchor="start">node 2</text>
+<text x="700" y="335" font-size="20" font-weight="400" fill="#8b96c4" text-anchor="start">replica</text>
+<rect x="590" y="351" width="26" height="26" rx="5" fill="#00d9ff" fill-opacity="0.85"/><rect x="622" y="351" width="26" height="26" rx="5" fill="#00d9ff" fill-opacity="0.85"/><rect x="654" y="351" width="26" height="26" rx="5" fill="#00d9ff" fill-opacity="0.85"/><rect x="686" y="351" width="26" height="26" rx="5" fill="#00d9ff" fill-opacity="0.85"/>
+<text x="880" y="373" font-size="20" font-weight="600" fill="#3ddc97" text-anchor="end">fsynced</text>
+<rect x="560" y="430" width="340" height="100" rx="14" fill="#121a3d" stroke="#2a3566" stroke-width="2"/>
+<text x="590" y="470" font-size="24" font-weight="600" fill="#ffffff" text-anchor="start">node 3</text>
+<text x="700" y="470" font-size="20" font-weight="400" fill="#8b96c4" text-anchor="start">replica</text>
+<rect x="590" y="486" width="26" height="26" rx="5" fill="#00d9ff" fill-opacity="0.85"/><rect x="622" y="486" width="26" height="26" rx="5" fill="#00d9ff" fill-opacity="0.85"/><rect x="654" y="486" width="26" height="26" rx="5" fill="#00d9ff" fill-opacity="0.85"/><rect x="686" y="486" width="26" height="26" rx="5" fill="#00d9ff" fill-opacity="0.85"/>
+<text x="880" y="508" font-size="20" font-weight="600" fill="#ffb454" text-anchor="end">still writing</text>
+<line x1="282" y1="290" x2="555" y2="220" stroke="#00d9ff" stroke-width="3" marker-end="url(#a)"/>
+<text x="400" y="232" font-size="20" font-weight="600" fill="#00d9ff" text-anchor="middle">1  write</text>
+<path d="M900 210 Q1000 210 1000 260 L1000 345 Q1000 345 905 345" fill="none" stroke="#8b96c4" stroke-width="3" marker-end="url(#m)"/>
+<path d="M1000 300 L1000 450 Q1000 480 905 480" fill="none" stroke="#8b96c4" stroke-width="3" marker-end="url(#m)"/>
+<text x="1015" y="330" font-size="20" font-weight="600" fill="#8b96c4" text-anchor="start">2  replicate</text>
+<line x1="555" y1="250" x2="286" y2="345" stroke="#3ddc97" stroke-width="3" marker-end="url(#g)"/>
+<text x="410" y="330" font-size="20" font-weight="600" fill="#3ddc97" text-anchor="middle">3  ack</text>
+<text x="60" y="440" font-size="22" font-weight="600" fill="#3ddc97" text-anchor="start">2 of 3 replicas have fsynced:</text>
+<text x="60" y="470" font-size="22" font-weight="600" fill="#3ddc97" text-anchor="start">a majority, so the write</text>
+<text x="60" y="500" font-size="22" font-weight="600" fill="#3ddc97" text-anchor="start">is acknowledged</text>
+<rect x="60" y="565" width="1080" height="64" rx="14" fill="#121a3d" stroke="#2a3566" stroke-width="2"/>
+<text x="90" y="604" font-size="20" font-weight="400" fill="#ffffff" text-anchor="start">Metadata (which topics and ranges exist, where each segment lives) is replicated by Raft.</text>
+</g>
+</svg>

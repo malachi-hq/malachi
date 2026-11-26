@@ -30,19 +30,35 @@ defmodule Malachi.Site.Markdown do
   @typedoc "A chart drawn in the post, with the JSON text its image name is hashed from."
   @type chart :: %{chart: Chart.t(), json: String.t()}
 
-  @typedoc "What rendering a post gives."
-  @type result :: %{html: String.t(), charts: [chart()], narratives: non_neg_integer(), seeds: non_neg_integer()}
+  @typedoc """
+  What rendering a post gives: its HTML, its charts, every image it shows (its `src` as written and its `alt`
+  text, in order), and how many `<!-- narrative -->` placeholders and `malachi-seed` blocks it still holds.
+  """
+  @type result :: %{
+          html: String.t(),
+          charts: [chart()],
+          images: [%{src: String.t(), alt: String.t()}],
+          narratives: non_neg_integer(),
+          seeds: non_neg_integer()
+        }
 
   @doc "Renders Markdown, or returns every problem found in it."
   @spec render(String.t()) :: {:ok, result()} | {:error, [String.t()]}
   def render(markdown) do
     case EarmarkParser.as_ast(markdown) do
       {:ok, ast, []} ->
-        {html, acc} = nodes(ast, %{charts: [], narratives: 0, seeds: 0, errors: []})
+        {html, acc} = nodes(ast, %{charts: [], images: [], narratives: 0, seeds: 0, errors: []})
 
         case acc.errors do
           [] ->
-            {:ok, %{html: html, charts: Enum.reverse(acc.charts), narratives: acc.narratives, seeds: acc.seeds}}
+            {:ok,
+             %{
+               html: html,
+               charts: Enum.reverse(acc.charts),
+               images: Enum.reverse(acc.images),
+               narratives: acc.narratives,
+               seeds: acc.seeds
+             }}
 
           errors ->
             {:error, errors |> Enum.reverse() |> Enum.uniq()}
@@ -106,10 +122,17 @@ defmodule Malachi.Site.Markdown do
 
   defp node({"img", attrs, _children, _}, acc) do
     src = attr(attrs, "src") || ""
+    # EarmarkParser hands the alt text over already HTML-escaped (and only that attribute), so it is decoded
+    # before it is escaped once, as every other attribute is.
+    alt = unescape(attr(attrs, "alt") || "")
 
     case link_error(src, ["https"]) do
-      nil -> {~s(<img src="#{escape(src)}" alt="#{escape(attr(attrs, "alt") || "")}"#{title(attrs)}>), acc}
-      reason -> {"", error(acc, "the image #{inspect(src)} #{reason}")}
+      nil ->
+        {~s(<img src="#{escape(src)}" alt="#{escape(alt)}"#{title(attrs)} loading="lazy" decoding="async">),
+         %{acc | images: [%{src: src, alt: alt} | acc.images]}}
+
+      reason ->
+        {"", error(acc, "the image #{inspect(src)} #{reason}")}
     end
   end
 
@@ -205,4 +228,15 @@ defmodule Malachi.Site.Markdown do
   end
 
   defp escape(text), do: Chart.escape(text)
+
+  # The inverse of the escaping EarmarkParser applies to an image's alt text: `&amp;` last, so an escaped
+  # entity in the source (`&amp;lt;`) comes back as the text it was (`&lt;`), not as `<`.
+  defp unescape(text) do
+    text
+    |> String.replace("&#39;", "'")
+    |> String.replace("&quot;", "\"")
+    |> String.replace("&lt;", "<")
+    |> String.replace("&gt;", ">")
+    |> String.replace("&amp;", "&")
+  end
 end

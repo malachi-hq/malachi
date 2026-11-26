@@ -1,5 +1,5 @@
 defmodule Mix.Tasks.Malachi.Release.PostTest do
-  # mix malachi.release.post (#373): writes a release's draft into site/blog and renders its chart images with
+  # mix malachi.release.post (#373): writes a release's draft into site/blog and renders its images with
   # site/checks/render.mjs. Here `node` is a stub on the PATH that records its arguments and writes each PNG it
   # is asked for, since the real renderer needs a browser. Mix.shell/1 and the PATH are global state, so this
   # file is not async.
@@ -107,7 +107,7 @@ defmodule Mix.Tasks.Malachi.Release.PostTest do
     assert length(pngs) == 2
     assert Enum.all?(pngs, &(Path.basename(&1) =~ ~r/\A(node|elixir)-produce-rate-[0-9a-f]{8}\.png\z/))
 
-    assert Enum.any?(messages(), &(&1 =~ "rendered 2 chart image(s)"))
+    assert Enum.any?(messages(), &(&1 =~ "rendered 2 image(s)"))
   end
 
   test "a patch draft has no chart and renders nothing; --author names the author", %{root: root, repo: repo} do
@@ -119,7 +119,7 @@ defmodule Mix.Tasks.Malachi.Release.PostTest do
     Task.run(["v0.2.1", "--root", repo, "--author", "Someone"])
     assert File.read!(Path.join(repo, "site/blog/2026-11-16-v0-2-1.md")) =~ "author: Someone"
     assert node_calls(root) == []
-    assert "site/blog/2026-11-16-v0-2-1.md: no chart, so no image to render" in messages()
+    assert "site/blog/2026-11-16-v0-2-1.md: no chart or illustration, so no image to render" in messages()
   end
 
   test "refuses to write over a draft without --force, and another post covering the release always",
@@ -172,7 +172,7 @@ defmodule Mix.Tasks.Malachi.Release.PostTest do
     end
   end
 
-  test "--images renders only what is missing and removes an image no chart names", %{root: root, repo: repo} do
+  test "--images renders only what is missing and removes an image the post no longer shows", %{root: root, repo: repo} do
     Task.run(["v0.2.0", "--root", repo])
     dir = Path.join(repo, "site/blog/2026-11-16-v0-2-0")
     File.write!(Path.join(dir, "node-produce-rate-00000000.png"), "stale")
@@ -188,10 +188,81 @@ defmodule Mix.Tasks.Malachi.Release.PostTest do
     assert [call] = node_calls(root)
     assert call =~ Path.basename(first)
     refute File.exists?(Path.join(dir, "node-produce-rate-00000000.png"))
-    assert "removed node-produce-rate-00000000.png, which no chart names any more" in messages()
+    assert "removed node-produce-rate-00000000.png, which the post no longer shows" in messages()
 
     Task.run(["--images", "site/blog/2026-11-16-v0-2-0.md", "--root", repo])
-    assert "site/blog/2026-11-16-v0-2-0.md: every chart image is in place" in messages()
+    assert "site/blog/2026-11-16-v0-2-0.md: every image is in place" in messages()
+  end
+
+  test "--images draws an illustration from its SVG at its own size, again only when the SVG is newer, and keeps it",
+       %{root: root, repo: repo} do
+    post = "site/blog/2026-11-16-intro.md"
+    dir = Path.join(repo, "site/blog/2026-11-16-intro")
+
+    write(
+      repo,
+      post,
+      "---\ntitle: T\ndate: 2026-11-16\nversions: [0.2.0]\nauthor: A\nsummary: S\n---\n\n" <>
+        "![Split](2026-11-16-intro/split.png)\n\n![Other](../kit/x.png)\n"
+    )
+
+    write(repo, "site/blog/2026-11-16-intro/split.svg", "<svg/>")
+    write(repo, "site/blog/2026-11-16-intro/gone.png", "old")
+
+    Task.run(["--images", post, "--root", repo])
+    {width, height} = Blog.illustration_size()
+    assert [call] = node_calls(root)
+    assert call =~ "#{width}x#{height} #{Path.join(dir, "split.svg")} #{Path.join(dir, "split.png")}"
+    assert File.read!(Path.join(dir, "split.png")) == "PNG"
+    refute File.exists?(Path.join(dir, "gone.png"))
+    assert Enum.any?(messages(), &(&1 =~ "rendered 1 image(s)"))
+
+    # The image is not older than its source: nothing to draw, and the illustration is not removed as stale.
+    File.touch!(Path.join(dir, "split.svg"), System.os_time(:second) - 60)
+    Task.run(["--images", post, "--root", repo])
+    assert length(node_calls(root)) == 1
+    assert File.exists?(Path.join(dir, "split.png"))
+    assert "#{post}: every image is in place" in messages()
+
+    File.touch!(Path.join(dir, "split.svg"), System.os_time(:second) + 60)
+    Task.run(["--images", post, "--root", repo])
+    assert length(node_calls(root)) == 2
+  end
+
+  test "--images draws charts and illustrations in separate runs, each at its own size", %{root: root, repo: repo} do
+    Task.run(["v0.2.0", "--root", repo])
+    post = "site/blog/2026-11-16-v0-2-0.md"
+    dir = Path.join(repo, "site/blog/2026-11-16-v0-2-0")
+    File.write!(Path.join(repo, post), File.read!(Path.join(repo, post)) <> "\n![D](2026-11-16-v0-2-0/d.png)\n")
+    File.write!(Path.join(dir, "d.svg"), "<svg/>")
+    Enum.each(Path.wildcard(Path.join(dir, "*-produce-rate-*.png")), &File.rm!/1)
+    File.rm!(Path.join(root, "calls"))
+
+    Task.run(["--images", post, "--root", repo])
+    {cw, ch} = Chart.size()
+    {iw, ih} = Blog.illustration_size()
+    assert [charts, illustration] = node_calls(root)
+    assert charts =~ " #{cw}x#{ch} "
+    assert illustration =~ " #{iw}x#{ih} #{Path.join(dir, "d.svg")}"
+  end
+
+  test "--images when the illustrations' run fails says what to install, and keeps what it drew", %{
+    root: root,
+    repo: repo
+  } do
+    post = "site/blog/2026-11-16-intro.md"
+
+    write(
+      repo,
+      post,
+      "---\ntitle: T\ndate: 2026-11-16\nversions: [0.2.0]\nauthor: A\nsummary: S\n---\n\n![S](2026-11-16-intro/s.png)\n"
+    )
+
+    write(repo, "site/blog/2026-11-16-intro/s.svg", "<svg/>")
+    File.write!(Path.join(root, "fail"), "")
+    error = assert_raise Mix.Error, fn -> Task.run(["--images", post, "--root", repo]) end
+    assert error.message =~ "npx playwright install --only-shell chromium"
+    assert File.exists?(Path.join(repo, "site/blog/2026-11-16-intro/s.svg"))
   end
 
   test "--images on a post that cannot be read says why", %{repo: repo} do

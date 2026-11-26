@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" role="img" aria-label="Evidence with every release">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#00d9ff"/></marker>
+<marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8b96c4"/></marker>
+<marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3ddc97"/></marker></defs>
+<rect width="1200" height="675" fill="#0a0e27"/>
+<g font-family="'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif">
+<text x="60" y="78" font-size="38" font-weight="600" fill="#ffffff">Evidence with every release</text>
+<text x="60" y="118" font-size="22" fill="#8b96c4">Each release is measured and drilled on its exact code, and the results are published with it.</text>
+<rect x="60" y="250" width="230" height="150" rx="14" fill="#121a3d" stroke="#2a3566" stroke-width="2"/>
+<text x="175" y="315" font-size="26" font-weight="600" fill="#ffffff" text-anchor="middle">a release</text>
+<text x="175" y="350" font-size="19" font-weight="400" fill="#8b96c4" text-anchor="middle">its exact code</text>
+<rect x="390" y="170" width="520" height="130" rx="14" fill="#121a3d" stroke="#2a3566" stroke-width="2"/>
+<text x="420" y="215" font-size="26" font-weight="600" fill="#00d9ff" text-anchor="start">chaos drills</text>
+<text x="420" y="250" font-size="19" font-weight="400" fill="#8b96c4" text-anchor="start">kill nodes, break storage, roll out bad configs,</text>
+<text x="420" y="276" font-size="19" font-weight="400" fill="#8b96c4" text-anchor="start">then check every acknowledged write</text>
+<line x1="292" y1="325" x2="386" y2="235" stroke="#00d9ff" stroke-width="3" marker-end="url(#a)"/>
+<line x1="912" y1="235" x2="986" y2="325" stroke="#00d9ff" stroke-width="3" marker-end="url(#a)"/>
+<rect x="390" y="330" width="520" height="130" rx="14" fill="#121a3d" stroke="#2a3566" stroke-width="2"/>
+<text x="420" y="375" font-size="26" font-weight="600" fill="#00d9ff" text-anchor="start">load tests</text>
+<text x="420" y="410" font-size="19" font-weight="400" fill="#8b96c4" text-anchor="start">run on the release's code, published with</text>
+<text x="420" y="436" font-size="19" font-weight="400" fill="#8b96c4" text-anchor="start">the hardware and the noise between runs</text>
+<line x1="292" y1="325" x2="386" y2="395" stroke="#00d9ff" stroke-width="3" marker-end="url(#a)"/>
+<line x1="912" y1="395" x2="986" y2="325" stroke="#00d9ff" stroke-width="3" marker-end="url(#a)"/>
+<rect x="390" y="490" width="520" height="130" rx="14" fill="#121a3d" stroke="#2a3566" stroke-width="2"/>
+<text x="420" y="535" font-size="26" font-weight="600" fill="#00d9ff" text-anchor="start">changelog</text>
+<text x="420" y="570" font-size="19" font-weight="400" fill="#8b96c4" text-anchor="start">what changed, grouped, with</text>
+<text x="420" y="596" font-size="19" font-weight="400" fill="#8b96c4" text-anchor="start">the upgrade notes an operator needs</text>
+<line x1="292" y1="325" x2="386" y2="555" stroke="#00d9ff" stroke-width="3" marker-end="url(#a)"/>
+<line x1="912" y1="555" x2="986" y2="325" stroke="#00d9ff" stroke-width="3" marker-end="url(#a)"/>
+<rect x="990" y="250" width="170" height="150" rx="14" fill="#121a3d" stroke="#00d9ff" stroke-width="2"/>
+<text x="1075" y="315" font-size="24" font-weight="600" fill="#ffffff" text-anchor="middle">published</text>
+<text x="1075" y="348" font-size="19" font-weight="400" fill="#8b96c4" text-anchor="middle">for anyone</text>
+<text x="1075" y="372" font-size="19" font-weight="400" fill="#8b96c4" text-anchor="middle">to check</text>
+</g>
+</svg>

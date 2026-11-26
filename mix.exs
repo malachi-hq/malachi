@@ -15,6 +15,15 @@ defmodule Malachi.MixProject do
     consent_field: "subscriber[subscribed_with_acceptance]",
     hidden: [{"anotheremail", ""}]
   ]
+  # The comments under each blog post (Malachi.Site.Comments): giscus, installed on this repository only, with the
+  # node IDs GitHub gives the repository and the Blog comments discussion category (an Announcement category, so
+  # only giscus and maintainers open its discussions and anyone with a GitHub account comments).
+  @blog_comments [
+    repo: "malachi-hq/malachi",
+    repo_id: "R_kgDORVzmEg",
+    category: "Blog comments",
+    category_id: "DIC_kwDORVzmEs4DL_XH"
+  ]
 
   def project do
     [
@@ -29,6 +38,7 @@ defmodule Malachi.MixProject do
       source_url: @source_url,
       site_url: @site_url,
       newsletter: @newsletter,
+      blog_comments: @blog_comments,
       docs: docs(),
       aliases: aliases(),
       test_coverage: [tool: ExCoveralls, threshold: 85],

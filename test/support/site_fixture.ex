@@ -39,8 +39,25 @@ defmodule Malachi.Test.SiteFixture do
     do: write(root, "site/newsletter/privacy.md", text)
 
   @doc """
+  The blog's `site/blog/authors.json` listing `names`, each with a square PNG photo and a LinkedIn Follow link,
+  as `Malachi.Site.Authors` reads them. The photo of `Some Name` is `some-name.png`.
+  """
+  @spec write_authors(Path.t(), [String.t()]) :: :ok
+  def write_authors(root, names) do
+    entries =
+      Map.new(names, fn name ->
+        slug = name |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "-")
+        write(root, "site/blog/authors/#{slug}.png", png(96, 96))
+        {name, %{"photo" => "#{slug}.png", "follow" => "https://www.linkedin.com/in/#{slug}"}}
+      end)
+
+    write(root, "site/blog/authors.json", JSON.encode!(entries))
+  end
+
+  @doc """
   The smallest checkout that stages and verifies: a landing page and llms.txt with placeholders, one font, the
-  page kit, the social preview, the newsletter's privacy note, and the ExDoc pages they link to.
+  page kit, the social preview, the newsletter's privacy note, the blog's authors the tests' posts name, and the
+  ExDoc pages they link to.
   """
   @spec minimal(Path.t()) :: :ok
   def minimal(root) do
@@ -55,6 +72,7 @@ defmodule Malachi.Test.SiteFixture do
     write_page_kit(root)
     write_social_preview(root)
     write_privacy_note(root)
+    write_authors(root, ["Maintainer", "Ana", "A"])
     write(root, "doc/introduction.html", "<h1>Introduction</h1>")
     write(root, "doc/index.html", ~s(<meta http-equiv="refresh" content="0; url=introduction.html">))
   end

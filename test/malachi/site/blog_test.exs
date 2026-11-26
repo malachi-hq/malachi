@@ -47,6 +47,13 @@ defmodule Malachi.Site.BlogTest do
     Chart.png_name(chart, @chart)
   end
 
+  # A post that shows an illustration, with its SVG source and the PNG the renderer drew from it.
+  defp illustrated_post(root, body \\ "Text.\n\n![A range splits](2026-11-16-v1-2-3/split.png)\n") do
+    post(root, "2026-11-16-v1-2-3.md", body: body)
+    write(root, "site/blog/2026-11-16-v1-2-3/split.svg", "<svg/>")
+    write(root, "site/blog/2026-11-16-v1-2-3/split.png", <<137, "PNG", 0::size(64)>>)
+  end
+
   defp stage!(root), do: :ok = Site.stage(root, @config)
   defp verify(root), do: Site.verify(root, @config)
   defp read(root, path), do: File.read!(Path.join(root, path))
@@ -91,13 +98,148 @@ defmodule Malachi.Site.BlogTest do
       assert verify(root) == []
     end
 
-    test "without a chart takes a summary card and no image", %{root: root} do
+    test "without a chart or an illustration takes the kit's social preview for its link previews", %{root: root} do
       post(root, "2026-11-16-v1-2-3.md")
       stage!(root)
       page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
-      assert page =~ ~s(<meta name="twitter:card" content="summary">)
-      refute page =~ "og:image"
+      assert page =~ ~s(<meta name="twitter:card" content="summary_large_image">)
+      assert page =~ ~s(<meta property="og:image" content="https://example.test/malachi/kit/social-preview.png">)
+      assert page =~ ~s(<meta name="twitter:image" content="https://example.test/malachi/kit/social-preview.png">)
+      assert page =~ ~s(<meta property="og:image:width" content="1280">)
+      assert page =~ ~s(<meta property="og:image:height" content="640">)
+      assert page =~ ~s(<meta property="og:image:alt" content="Malachi">)
+      assert File.exists?(Path.join(root, "doc/kit/social-preview.png"))
       assert verify(root) == []
+    end
+
+    test "an illustration is published as its PNG beside the page, its SVG source is not, and it is the og:image",
+         %{root: root} do
+      illustrated_post(root)
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+      assert page =~ ~s(<img src="2026-11-16-v1-2-3/split.png" alt="A range splits" loading="lazy" decoding="async">)
+      assert page =~ ~s(<meta property="og:image:width" content="1200">)
+      assert page =~ ~s(<meta property="og:image:height" content="675">)
+      assert page =~ ~s(<meta property="og:image:alt" content="A range splits">)
+
+      assert page =~
+               ~s(<meta property="og:image" content="https://example.test/malachi/blog/2026-11-16-v1-2-3/split.png">)
+
+      assert File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/split.png"))
+      refute File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/split.svg"))
+      assert verify(root) == []
+    end
+
+    test "a chart comes before an illustration as the og:image", %{root: root} do
+      png = charted_post(root)
+      body = "![A range splits](2026-11-16-v1-2-3/split.png)\n\n```malachi-chart\n#{@chart}\n```\n"
+      post(root, "2026-11-16-v1-2-3.md", body: body)
+      write(root, "site/blog/2026-11-16-v1-2-3/split.png", <<137, "PNG", 0::size(64)>>)
+      write(root, "site/blog/2026-11-16-v1-2-3/split.svg", "<svg/>")
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+      assert page =~ ~s(<meta property="og:image" content="https://example.test/malachi/blog/2026-11-16-v1-2-3/#{png}">)
+      {w, h} = Chart.size()
+      assert page =~ ~s(<meta property="og:image:width" content="#{w}">)
+      assert page =~ ~s(<meta property="og:image:height" content="#{h}">)
+      assert page =~ ~s(<meta property="og:image:alt" content="Produce rate">)
+      assert File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/split.png"))
+      assert verify(root) == []
+    end
+
+    test "an illustration whose PNG declares its size is shown with that width and height", %{root: root} do
+      illustrated_post(root)
+      write(root, "site/blog/2026-11-16-v1-2-3/split.png", SiteFixture.png(1200, 675))
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+      assert page =~ ~s(<img width="1200" height="675" src="2026-11-16-v1-2-3/split.png" alt="A range splits")
+    end
+
+    test "carries its BlogPosting structured data, and no text of the post can close the script", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md", fields: [title: "A </script><script>x()</script> title", author: "Ana"])
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+
+      [json] = Regex.run(~r{<script type="application/ld\+json">(.*?)</script>}s, page, capture: :all_but_first)
+      refute json =~ "<"
+      data = JSON.decode!(json)
+
+      assert data["@type"] == "BlogPosting"
+      assert data["headline"] == "A </script><script>x()</script> title"
+      assert data["datePublished"] == "2026-11-16"
+      assert data["author"] == %{"@type" => "Person", "name" => "Ana"}
+      assert data["url"] == "https://example.test/malachi/blog/2026-11-16-v1-2-3.html"
+      assert data["image"]["url"] == "https://example.test/malachi/kit/social-preview.png"
+      assert data["publisher"]["name"] == "MalachiHQ"
+      assert length(Regex.scan(~r/<script\b/, page)) == 1
+      assert verify(root) == []
+    end
+
+    test "opens as Medium does: headline, sub headline, the author's photo and Follow, reading time, US date",
+         %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md", body: String.duplicate("word ", 500) <> "\n")
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+
+      [head] = Regex.run(~r{<header class="post-head">.*?</header>}s, page)
+      assert head =~ ~r{<h1>Release v1.2.3</h1>\s*<p class="lede">What v1.2.3 delivered.</p>\s*<div class="byline">}
+      assert head =~ ~s(<img class="avatar" src="authors/maintainer.png" width="44" height="44" alt="Maintainer">)
+
+      assert head =~
+               ~s(<span class="author">Maintainer</span> <a class="follow" href="https://www.linkedin.com/in/maintainer" rel="author noopener">Follow</a>)
+
+      assert head =~ ~s(3 min read · <time datetime="2026-11-16">Nov 16, 2026</time> · v1.2.3)
+      assert File.exists?(Path.join(root, "doc/blog/authors/maintainer.png"))
+
+      index = read(root, "doc/blog/index.html")
+      assert index =~ ~s(<time datetime="2026-11-16">Nov 16, 2026</time> · 3 min read · v1.2.3)
+      assert verify(root) == []
+    end
+
+    test "an author missing from authors.json gets the name alone, and the check reports it", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md", fields: [author: "Nobody"])
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+      assert page =~ ~s(<span class="author">Nobody</span></p>)
+      refute page =~ ~s(class="avatar")
+
+      assert ~s(site/blog/2026-11-16-v1-2-3.md names the author "Nobody", who is not in site/blog/authors.json) in verify(
+               root
+             )
+    end
+
+    test "a cover is the large image under the byline, the og:image and the feed's first image", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md", fields: [cover: "cover.png"], body: "[docs](../introduction.html)\n")
+      write(root, "site/blog/2026-11-16-v1-2-3/cover.svg", "<svg/>")
+      write(root, "site/blog/2026-11-16-v1-2-3/cover.png", SiteFixture.png(1200, 675))
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+
+      assert page =~
+               ~s(</header>\n<figure class="cover"><img src="2026-11-16-v1-2-3/cover.png" width="1200" height="675" alt="Release v1.2.3" fetchpriority="high" decoding="async"></figure>)
+
+      assert page =~
+               ~s(<meta property="og:image" content="https://example.test/malachi/blog/2026-11-16-v1-2-3/cover.png">)
+
+      assert page =~ ~s(<meta property="og:image:alt" content="Release v1.2.3">)
+      assert File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/cover.png"))
+      refute File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/cover.svg"))
+
+      feed = read(root, "doc/blog/feed.xml")
+      assert feed =~ "&lt;img src=&quot;https://example.test/malachi/blog/2026-11-16-v1-2-3/cover.png&quot;"
+      assert feed =~ "href=&quot;https://example.test/malachi/introduction.html&quot;"
+      assert verify(root) == []
+    end
+
+    test "a cover that is not a lowercase <name>.png, or that is not rendered", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md", fields: [cover: "Cover.jpg"])
+      stage_error = assert_raise Mix.Error, fn -> stage!(root) end
+      assert stage_error.message =~ ~s(its cover "Cover.jpg" is a lowercase <name>.png beside the post)
+
+      post(root, "2026-11-16-v1-2-3.md", fields: [cover: "cover.png"])
+      write(root, "site/blog/2026-11-16-v1-2-3/cover.svg", "<svg/>")
+      stage!(root)
+      assert Enum.any?(verify(root), &(&1 =~ "shows site/blog/2026-11-16-v1-2-3/cover.png, which is not rendered"))
     end
 
     test "escapes its front matter in every attribute and text", %{root: root} do
@@ -120,6 +262,34 @@ defmodule Malachi.Site.BlogTest do
       feed = read(root, "doc/blog/feed.xml")
       assert feed =~ "<id>tag:example.test,2026-11-16:/blog/2026-11-16-v1-2-3</id>"
       assert feed =~ ~s(<content type="html">&lt;p&gt;Body text.&lt;/p&gt;)
+    end
+  end
+
+  describe "llms.txt" do
+    test "lists the blog, its feed and each post with its summary, in a block replaced at every staging",
+         %{root: root} do
+      post(root, "2026-11-16-a.md", fields: [title: "First [one]", versions: "[1.2.2]"])
+      stage!(root)
+      llms = read(root, "doc/llms.txt")
+      assert llms =~ "<!-- malachi:blog begin -->\n## Blog\n"
+      assert llms =~ "- [Atom feed](https://example.test/malachi/blog/feed.xml)"
+
+      assert llms =~
+               "- [First (one)](https://example.test/malachi/blog/2026-11-16-a.html): What v1.2.3 delivered. (2026-11-16)"
+
+      assert verify(root) == []
+
+      post(root, "2026-11-17-b.md", fields: [title: "Second"])
+      stage!(root)
+      llms = read(root, "doc/llms.txt")
+      assert length(Regex.scan(~r/malachi:blog begin/, llms)) == 1
+      assert llms =~ "(https://example.test/malachi/blog/2026-11-17-b.html)"
+      assert llms =~ "(https://example.test/malachi/blog/2026-11-16-a.html)"
+
+      File.rm!(Path.join(root, "site/blog/2026-11-16-a.md"))
+      File.rm!(Path.join(root, "site/blog/2026-11-17-b.md"))
+      stage!(root)
+      refute read(root, "doc/llms.txt") =~ "malachi:blog"
     end
   end
 
@@ -197,14 +367,19 @@ defmodule Malachi.Site.BlogTest do
       assert "site/blog/2026-11-16-v1-2-3/#{png} is a Git LFS pointer, not the image: run git lfs pull" in verify(root)
 
       File.write!(Path.join(dir, png), :binary.copy(<<0>>, 150 * 1024 + 1))
-      assert "site/blog/2026-11-16-v1-2-3/#{png} is 150 KB; a chart image is at most 150 KB" in verify(root)
+      assert "site/blog/2026-11-16-v1-2-3/#{png} is 150 KB; an image beside a post is at most 150 KB" in verify(root)
 
       File.rm!(Path.join(dir, png))
       File.write!(Path.join(dir, "rate-00000000.png"), "old")
       errors = verify(root)
 
       assert Enum.any?(errors, &(&1 =~ "draws a chart whose image site/blog/2026-11-16-v1-2-3/#{png} is missing"))
-      assert Enum.any?(errors, &(&1 =~ "rate-00000000.png is named by no chart in 2026-11-16-v1-2-3.md"))
+
+      assert Enum.any?(
+               errors,
+               &(&1 =~
+                   "rate-00000000.png is neither an image 2026-11-16-v1-2-3.md shows nor an illustration's SVG source")
+             )
     end
 
     test "a Git LFS pointer is accepted with lfs_pointers, as on a fork's pull request, and nothing else is",
@@ -219,6 +394,62 @@ defmodule Malachi.Site.BlogTest do
 
       File.rm!(Path.join(dir, png))
       assert Enum.any?(Site.verify(root, @config, lfs_pointers: true), &(&1 =~ "is missing"))
+    end
+
+    test "an illustration not rendered, missing with its source, a Git LFS pointer, or too large", %{root: root} do
+      illustrated_post(root)
+      dir = Path.join(root, "site/blog/2026-11-16-v1-2-3")
+      stage!(root)
+
+      File.rm!(Path.join(dir, "split.png"))
+
+      assert ("site/blog/2026-11-16-v1-2-3.md shows site/blog/2026-11-16-v1-2-3/split.png, which is not rendered: " <>
+                "run mix malachi.release.post --images site/blog/2026-11-16-v1-2-3.md") in verify(root)
+
+      File.rm!(Path.join(dir, "split.svg"))
+
+      assert ("site/blog/2026-11-16-v1-2-3.md shows site/blog/2026-11-16-v1-2-3/split.png, which is missing, " <>
+                "and so is its SVG source") in verify(root)
+
+      File.write!(Path.join(dir, "split.png"), "version https://git-lfs.github.com/spec/v1\noid sha256:00\nsize 9\n")
+
+      assert "site/blog/2026-11-16-v1-2-3/split.png is a Git LFS pointer, not the image: run git lfs pull" in verify(
+               root
+             )
+
+      assert Site.verify(root, @config, lfs_pointers: true) == []
+
+      File.write!(Path.join(dir, "split.png"), :binary.copy(<<0>>, 150 * 1024 + 1))
+      assert "site/blog/2026-11-16-v1-2-3/split.png is 150 KB; an image beside a post is at most 150 KB" in verify(root)
+    end
+
+    test "an image from the post's folder that is not a lowercase <name>.png, and a file nothing shows",
+         %{root: root} do
+      illustrated_post(root, "![a](2026-11-16-v1-2-3/split.png) ![b](2026-11-16-v1-2-3/Split.PNG)\n")
+      write(root, "site/blog/2026-11-16-v1-2-3/notes.txt", "draft")
+      write(root, "site/blog/2026-11-16-v1-2-3/orphan.svg", "<svg/>")
+      stage!(root)
+      errors = verify(root)
+
+      assert ("site/blog/2026-11-16-v1-2-3.md shows 2026-11-16-v1-2-3/Split.PNG; an image beside a post is a " <>
+                "lowercase <name>.png") in errors
+
+      for name <- ["notes.txt", "orphan.svg"] do
+        assert ("site/blog/2026-11-16-v1-2-3/#{name} is neither an image 2026-11-16-v1-2-3.md shows nor an " <>
+                  "illustration's SVG source (stale after a change?); remove it") in errors
+      end
+
+      refute File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/notes.txt"))
+      refute File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/orphan.svg"))
+    end
+
+    test "more than five illustrations; one shown twice counts once", %{root: root} do
+      names = for i <- 1..6, do: "d#{i}.png"
+      body = Enum.map_join(names ++ ["d1.png"], "\n\n", &"![x](2026-11-16-v1-2-3/#{&1})") <> "\n"
+      post(root, "2026-11-16-v1-2-3.md", body: body)
+      for name <- names, do: write(root, "site/blog/2026-11-16-v1-2-3/#{name}", <<137, "PNG", 0::size(64)>>)
+      stage!(root)
+      assert "site/blog/2026-11-16-v1-2-3.md has 6 illustrations; a post has at most 5" in verify(root)
     end
 
     test "more than three charts", %{root: root} do
@@ -259,7 +490,7 @@ defmodule Malachi.Site.BlogTest do
       stage!(root)
       page = Path.join(root, "doc/blog/2026-11-16-v1-2-3.html")
       File.write!(page, File.read!(page) <> ~s(<script src="https://cdn.test/x.js"></script>))
-      assert "doc/blog/2026-11-16-v1-2-3.html loads a script; blog pages load none" in verify(root)
+      assert "doc/blog/2026-11-16-v1-2-3.html loads a script; this blog page loads none" in verify(root)
     end
 
     test "a staged page or index gone", %{root: root} do
@@ -332,6 +563,7 @@ defmodule Malachi.Site.BlogTest do
   end
 
   test "a site/blog that is not a folder cannot be listed, and says so", %{root: root} do
+    File.rm_rf!(Path.join(root, "site/blog"))
     write(root, "site/blog", "a file where the folder should be")
     error = assert_raise Mix.Error, fn -> Blog.read_all(root) end
     assert error.message =~ "site/blog: cannot be listed"

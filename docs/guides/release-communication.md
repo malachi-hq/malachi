@@ -56,6 +56,21 @@ mix malachi.release.post --images site/blog/<post>.md   # again after editing a 
 
 The images are stored in Git LFS: run `git lfs install` once.
 
+A post opens as Medium lays one out: the headline, the summary as its sub headline, the byline, a large cover,
+then the text. The rest of what a post can carry:
+
+- **The author.** The byline shows the author's photo, name and a Follow link from `site/blog/authors.json`
+  (`Malachi.Site.Authors`), with the reading time and the date. The draft's `author` is git's `user.name`:
+  set it to a name listed there, or add the author, whose photo goes in `site/blog/authors/`.
+- **A cover.** `cover: cover.png` in the front matter names a PNG beside the post, drawn from `cover.svg` at
+  1200x675. It is the large image under the byline, the link previews' image, the feed's first image and the
+  dev.to article's main image.
+- **Illustrations.** A diagram is shown as `![alt](<post>/<name>.png)` and drawn from `<name>.svg` beside it.
+  `mix malachi.release.post --images` renders every chart, cover and illustration whose PNG is missing or
+  older than its source.
+- **Comments.** With `blog_comments` set in `mix.exs` (`Malachi.Site.Comments`), each post ends with its
+  discussion on GitHub, through giscus.
+
 ### 2. The pull request
 
 A `docs:` pull request with the post and its images. Merging it publishes the post within minutes: a push to
