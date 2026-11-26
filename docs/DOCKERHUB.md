@@ -159,7 +159,7 @@ throughput, authentication, replication and the integrity scrub.
 For three nodes at replication factor 3 on durable volumes, with the same two:
 
 ```bash
-. scripts/cluster_dist_lib.sh && cluster_dist_setup tmp/dist/durable   # a cookie and TLS certificates for this cluster
+. scripts/cluster_dist_lib.sh && cluster_dist_setup "$PWD/tmp/dist/durable"   # a cookie and TLS certificates for this cluster
 docker compose -f docker-compose.cluster-durable.yml up -d
 ```
 

@@ -25,8 +25,8 @@ x-malachi-node: &malachi-node
     # pair per setup (#385); DIST_TLS=0 there sets the explicit plaintext opt-out instead.
     RELEASE_DISTRIBUTION: sname
     RELEASE_NODE: malachi
-    RELEASE_COOKIE: "${MALACHI_COOKIE:?set up this run first: . scripts/cluster_dist_lib.sh && cluster_dist_setup tmp/dist/durable}"
-    MALACHI_DIST_TLS: "${MALACHI_DIST_TLS:?set up this run first: . scripts/cluster_dist_lib.sh && cluster_dist_setup tmp/dist/durable}"
+    RELEASE_COOKIE: "${MALACHI_COOKIE:?set up this run first: . scripts/cluster_dist_lib.sh && cluster_dist_setup $$PWD/tmp/dist/durable}"
+    MALACHI_DIST_TLS: "${MALACHI_DIST_TLS:?set up this run first: . scripts/cluster_dist_lib.sh && cluster_dist_setup $$PWD/tmp/dist/durable}"
     MALACHI_DIST_TLS_OPTFILE: /dist/dist_tls.conf
     MALACHI_TCP_PORT: "4040"
     MALACHI_DASHBOARD_PORT: "4041"
@@ -108,7 +108,7 @@ services:
       - "127.0.0.1:4041:4041"
     volumes:
       - malachi-durable-1:/app/data
-      - "${MALACHI_DIST_DIR:?set up this run first: . scripts/cluster_dist_lib.sh && cluster_dist_setup tmp/dist/durable}:/dist:ro"
+      - "${MALACHI_DIST_DIR:?set up this run first: . scripts/cluster_dist_lib.sh && cluster_dist_setup $$PWD/tmp/dist/durable}:/dist:ro"
 
   malachi2:
     <<: *malachi-node
@@ -120,7 +120,7 @@ services:
       MALACHI_ADVERTISED_HOST: malachi2
     volumes:
       - malachi-durable-2:/app/data
-      - "${MALACHI_DIST_DIR:?set up this run first: . scripts/cluster_dist_lib.sh && cluster_dist_setup tmp/dist/durable}:/dist:ro"
+      - "${MALACHI_DIST_DIR:?set up this run first: . scripts/cluster_dist_lib.sh && cluster_dist_setup $$PWD/tmp/dist/durable}:/dist:ro"
 
   malachi3:
     <<: *malachi-node
@@ -132,7 +132,7 @@ services:
       MALACHI_ADVERTISED_HOST: malachi3
     volumes:
       - malachi-durable-3:/app/data
-      - "${MALACHI_DIST_DIR:?set up this run first: . scripts/cluster_dist_lib.sh && cluster_dist_setup tmp/dist/durable}:/dist:ro"
+      - "${MALACHI_DIST_DIR:?set up this run first: . scripts/cluster_dist_lib.sh && cluster_dist_setup $$PWD/tmp/dist/durable}:/dist:ro"
 
   jaeger:
     image: jaegertracing/all-in-one:1.60

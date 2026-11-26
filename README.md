@@ -398,11 +398,11 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | `MALACHI_AUTO_REBALANCE_STABILIZATION` | 3 | Consecutive stable reconciles before an auto-commit (absorbs flaps) |
 | `MALACHI_SHUTDOWN_GRACE_MS` | 5000 | Drain window on shutdown after the acceptor quiesces, before closing connections |
 | `MALACHI_CLUSTER_STRATEGY` | _(unset)_ | Node discovery: `gossip`, `kubernetes`, or `epmd` (see below) |
-| `RELEASE_COOKIE` | _(per start on a single node)_ | Erlang distribution cookie; required on a clustered node, a random secret of at least 20 bytes |
+| `RELEASE_COOKIE` | _(drawn once per node on a single node)_ | Erlang distribution cookie; required on a clustered node, a random secret of at least 20 bytes |
 | `MALACHI_DIST_TLS` | _(unset)_ | `true` runs Erlang distribution over mutual TLS (required on a clustered node); `false` accepts plaintext explicitly |
 | `MALACHI_DIST_TLS_OPTFILE` | _(unset)_ | The `ssl_dist` options file TLS distribution reads ([example](rel/dist_tls.conf.example)) |
 | `MALACHI_DIST_INTERFACE` | _(unset)_ | IPv4 address epmd and the distribution port bind to (loopback stays open for epmd) |
-| `MALACHI_COOKIE_DIR` | `/tmp/malachi-cookie-<uid>` | Where a single node keeps the cookie it draws on every start, for `rpc`, `remote` and `stop` |
+| `MALACHI_COOKIE_DIR` | `${TMPDIR:-/tmp}/malachi-cookie-<uid>` | Where a single node keeps its cookie (`COOKIE-<node name>`), drawn on its first start and kept after, for `rpc`, `remote` and `stop`; delete the file to draw a new one |
 | `MALACHI_CLUSTER_KUBERNETES_SELECTOR` | _(unset)_ | k8s pod selector, e.g. `app=malachi` (kubernetes strategy) |
 | `MALACHI_CLUSTER_KUBERNETES_NODE_BASENAME` | _(unset)_ | k8s node basename, e.g. `malachi` (kubernetes strategy) |
 | `MALACHI_MAX_FRAME_SIZE` | 16777216 | Max request frame bytes (also `:max_frame_size` app env) |
@@ -465,8 +465,14 @@ From code, resolve the same settings and pass them to the client:
 const { MalachiClient } = require('./lib/client');
 const { resolveTls } = require('./lib/tls');
 
-const tls = resolveTls({ tls: true, cacert: '/certs/ca.crt' });
-const client = await new MalachiClient({ host: 'localhost', port: 4040, tls }).connect('producer', 'producer123');
+async function main() {
+  const tls = resolveTls({ tls: true, cacert: '/certs/ca.crt' });
+  const client = await new MalachiClient({ host: 'localhost', port: 4040, tls }).connect('producer', 'producer123');
+  // ... use the client, then:
+  client.close();
+}
+
+main();
 ```
 
 `MALACHI_CLIENT_TLS_CERT` and `MALACHI_CLIENT_TLS_KEY` (`--cert`/`--key` in `loadtest.js`) present a client
@@ -511,8 +517,7 @@ MALACHI_DIST_TLS_OPTFILE=$PWD/priv/dist_cert/dist_tls.conf \
 
 `MALACHI_DIST_TLS_OPTFILE` points at an [`ssl_dist` options file](rel/dist_tls.conf.example) (server + client
 cert/key/CA, `verify_peer` both ways, `fail_if_no_peer_cert` on the server); the release's `rel/env.sh.eex`
-translates the flag into `-proto_dist inet_tls`. What a clustered node checks before it starts, in the release
-before its VM listens and again once it runs:
+translates the flag into `-proto_dist inet_tls`. What a clustered node checks before it starts:
 
 - `RELEASE_COOKIE` is set, is not a value committed to this repository, is not the release's baked one (the
   published image ships none), and has at least 20 bytes. All the nodes of a cluster share it.
@@ -520,12 +525,17 @@ before its VM listens and again once it runs:
   not `MALACHI_TLS_CACERTFILE`: give distribution a CA of its own, since any certificate it signs can join.
 - `MALACHI_DIST_TLS=false` is the only way to run plaintext distribution, and every boot warns about it.
 
+The release checks the cookie, that TLS is on and the terms of the options file before its VM starts, so those
+refusals happen before the node listens. Reading the options file whole and comparing its CA with
+`MALACHI_TLS_CACERTFILE` happen once the VM runs, after its distribution port has opened, and refuse the node then.
+
 A refused node exits with status 78 and one line saying what to set; under systemd, `RestartPreventExitStatus=78`
 keeps it from restarting into the same refusal. The cookie still reaches the VM as a process argument, so it shows
 in `ps` on the host.
 
-A single node needs none of this: without `RELEASE_COOKIE` it draws a random cookie on every start, kept where
-`bin/malachi rpc`, `remote` and `stop` read it (`MALACHI_COOKIE_DIR`). `MALACHI_DIST_INTERFACE` binds epmd and the
+A single node needs none of this: without `RELEASE_COOKIE` it draws a random cookie on its first start and keeps it
+where `bin/malachi rpc`, `remote` and `stop` read it (`MALACHI_COOKIE_DIR`, one file per node name); delete that file
+to draw a new one. In the image `/tmp` is a tmpfs, so a recreated container draws a new one anyway. `MALACHI_DIST_INTERFACE` binds epmd and the
 distribution port to one IPv4 address, for a host whose other interfaces are public; the
 [Kubernetes example](deploy/kubernetes/README.md) binds them to the pod IP and lets only its own pods reach them.
 
@@ -536,6 +546,11 @@ distribution too: run them with `MALACHI_DIST_TLS=true` and
 **Upgrading a plaintext cluster.** A node without TLS cannot join a TLS cluster, nor the reverse, so the move takes
 a full stop and start: set the same `RELEASE_COOKIE`, `MALACHI_DIST_TLS=true` and options file on every node, stop
 them all, and start them all. `MALACHI_DIST_TLS=false` keeps a cluster on plaintext meanwhile.
+
+**Changing a refused cookie.** A cluster running on a cookie this release refuses (the Kubernetes example's
+placeholder, a value from this repository, or one under 20 bytes) has to change it on every node at once, since
+nodes on different cookies cannot talk: set the new `RELEASE_COOKIE` everywhere, stop them all, and start them all.
+That holds whether the cluster moves to TLS at the same time or stays on plaintext with `MALACHI_DIST_TLS=false`.
 
 ## 🔐 Dashboard Security
 

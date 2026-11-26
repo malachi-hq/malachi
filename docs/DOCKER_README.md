@@ -233,7 +233,7 @@ Prometheus's network namespace on purpose: sessions are bound to the IP that cre
 ### Durable cluster, observable
 
 ```bash
-. scripts/cluster_dist_lib.sh && cluster_dist_setup tmp/dist/durable   # a cookie and TLS certificates for this cluster
+. scripts/cluster_dist_lib.sh && cluster_dist_setup "$PWD/tmp/dist/durable"   # a cookie and TLS certificates for this cluster
 docker compose -f docker-compose.cluster-durable.yml up -d
 ```
 
