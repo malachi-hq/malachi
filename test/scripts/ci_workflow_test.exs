@@ -227,16 +227,22 @@ defmodule Malachi.CiWorkflowTest do
     test "the matrix and the suite step agree on the number of partitions" do
       assert partition_problems(@ci) == []
 
-      assert partition_problems(String.replace(@ci, "partition: [1, 2, 3, 4]", "partition: [1, 2, 3]")) == [
+      # Built from the file's own count, so changing the count touches ci.yml alone.
+      n = workflow_env(@ci)["TEST_PARTITIONS"]
+      matrix = "partition: [#{Enum.join(1..n, ", ")}]"
+      count = "  TEST_PARTITIONS: #{n}\n"
+      assert @ci =~ matrix and @ci =~ count
+
+      assert partition_problems(String.replace(@ci, matrix, "partition: [#{Enum.join(1..(n - 1)//1, ", ")}]")) == [
                :matrix_mismatch
              ]
 
-      assert partition_problems(String.replace(@ci, "  TEST_PARTITIONS: 4\n", "  TEST_PARTITIONS: 5\n")) == [
-               :matrix_mismatch
-             ]
+      assert partition_problems(String.replace(@ci, count, "  TEST_PARTITIONS: #{n + 1}\n")) == [:matrix_mismatch]
+      assert partition_problems(String.replace(@ci, count, "  TEST_PARTITIONS: four\n")) == [:not_a_count]
 
-      assert partition_problems(String.replace(@ci, "  TEST_PARTITIONS: 4\n", "  TEST_PARTITIONS: four\n")) == [
-               :not_a_count
+      assert partition_problems(String.replace(@ci, count, "  TEST_PARTITIONS: 0\n")) == [
+               :not_a_count,
+               :matrix_mismatch
              ]
 
       assert partition_problems(in_job(@ci, "test", ~s/--partitions "$TEST_PARTITIONS" /, "")) == [:not_partitioned]
