@@ -106,11 +106,13 @@ defmodule OciDailyRunScriptTest do
         echo "| malachi-nodes | TERMINATING | Subnet |" ;;
       # After the destroy, FAKE_LEFTOVERS_AFTER is the sequence of counts the search answers, one per count, the
       # last one repeated: "2 0" is an index that has not caught up with the destroy at first, then has. A "fail"
-      # in the sequence is a search that fails at that count.
+      # in the sequence is a search that fails at that count. FAKE_FIRST_COUNT_DELAY makes the first of them take
+      # that many seconds, as a slow search would.
       *"structured-search"*)
         if grep -q "create-destroy-job" "$FAKE_LOG"; then
           [ "${FAKE_SEARCH_AFTER:-ok}" = "fail" ] && exit 1
           n=$(sed -n '/create-destroy-job/,$p' "$FAKE_LOG" | grep -c 'structured-search.*length')
+          [ "$n" -eq 1 ] && [ -n "${FAKE_FIRST_COUNT_DELAY:-}" ] && /bin/sleep "$FAKE_FIRST_COUNT_DELAY"
           read -r -a counts <<<"${FAKE_LEFTOVERS_AFTER:-0}"
           i=$((n - 1)); [ "$i" -lt "${#counts[@]}" ] || i=$((${#counts[@]} - 1))
           [ "${counts[$i]}" = "fail" ] && exit 1
@@ -170,8 +172,10 @@ defmodule OciDailyRunScriptTest do
         {"REPO_URL", "file://" <> ctx.repo},
         {"WORK", work},
         {"DOCKER", "docker"},
-        # The real limit is 10 minutes; with the 0.05 s sleep stub, one second still allows about 20 recounts.
-        {"SWEEP_SETTLE_LIMIT", "1"}
+        # The real limit is 10 minutes. Bash's SECONDS counts whole seconds, so a limit of 1 can end at the next
+        # second boundary, milliseconds away, and a loaded runner then made no recount at all (#390). Three
+        # leave at least two whole seconds, about 40 recounts with the 0.05 s sleep stub.
+        {"SWEEP_SETTLE_LIMIT", "3"}
       ] ++ @config_vars
 
     {out, status} =
@@ -491,7 +495,7 @@ defmodule OciDailyRunScriptTest do
   @tag :tmp_dir
   test "a leak lists each resource left, with its type, name and state", ctx do
     r = run(ctx, FAKE_LEFTOVERS_AFTER: "2")
-    assert report(r) =~ "sweep after destroy: 2 resource(s) still left after 1 s:"
+    assert report(r) =~ "sweep after destroy: 2 resource(s) still left after 3 s:"
     assert report(r) =~ "| malachi-nodes | TERMINATING | Subnet |"
     assert index_of(r.calls, "--output table") > index_of(r.calls, "create-destroy-job")
   end
@@ -515,6 +519,16 @@ defmodule OciDailyRunScriptTest do
     assert count(after_destroy, "length(data.items)") == 3
     assert count(after_destroy, "sleep 30") == 2
     assert count(after_destroy, "--output table") == 0
+  end
+
+  @tag :tmp_dir
+  test "the wait for the index starts after the first count, so a slow first count leaves it whole", ctx do
+    # The first count takes longer than the whole limit (3 s). Started before it, the limit was spent when the
+    # count returned and the run reported a leak without counting again (#390).
+    r = run(ctx, FAKE_LEFTOVERS_AFTER: "2 0", FAKE_FIRST_COUNT_DELAY: "3.5")
+    assert r.status == 0, r.out
+    assert report(r) =~ "sweep after destroy: 0 resource(s) left once the index caught up"
+    refute report(r) =~ "LEAK"
   end
 
   @tag :tmp_dir
