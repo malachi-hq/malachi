@@ -72,6 +72,25 @@ defmodule LoadtestCeilingTest do
       refute File.exists?(ctx.log)
     end
 
+    for {knob, value} <- [
+          {"BOOT_POLL_S", "soon"},
+          {"BOOT_POLL_S", "0"},
+          {"BOOT_SETTLE_S", "-1"},
+          {"BOOT_SETTLE_S", "1s"}
+        ] do
+      test "#{knob}=#{inspect(value)}, which is not a wait the boot can use", ctx do
+        assert {output, 2} = run_script(ctx, [{unquote(knob), unquote(value)}])
+        assert output =~ "#{unquote(knob)} must be"
+        refute File.exists?(ctx.log)
+      end
+    end
+
+    test "a sweep boots with the waits it always had, which only the script's tests shorten" do
+      script = File.read!(@script)
+      assert script =~ ~s[BOOT_POLL_S="${BOOT_POLL_S:-1}"]
+      assert script =~ ~s[BOOT_SETTLE_S="${BOOT_SETTLE_S:-1.5}"]
+    end
+
     test "an unknown generator", ctx do
       assert {output, 2} = run_script(ctx, [{"GENERATOR", "python"}])
       assert output =~ "GENERATOR must be node or elixir"
@@ -386,6 +405,10 @@ defmodule LoadtestCeilingTest do
       {"RUN_DIR", ctx.run_dir},
       {"DUR", "1"},
       {"WARM", "0"},
+      # The server here is a bare listener, ready once its port opens: tried every tenth of a second, and no
+      # wait after, instead of a sweep's 1 s and 1.5 s at every point (#390).
+      {"BOOT_POLL_S", "0.1"},
+      {"BOOT_SETTLE_S", "0"},
       {"SRV_CPUSET", "0"},
       {"LT_CPUSET", "0"},
       {"MALACHI_PORT", Integer.to_string(free_port())},
