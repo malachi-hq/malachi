@@ -6,6 +6,12 @@
 # `mix test` on the same host (another worktree) does not fight this one for it in epmd.
 :ok = Malachi.Test.Distribution.ensure_started()
 
+# The multinode tests boot clusters of `:peer` nodes over plaintext distribution, and a clustered node refuses
+# plaintext unless MALACHI_DIST_TLS=false says so (Malachi.Cluster.DistGuard). Set here, before any peer starts,
+# because peers inherit this environment. TLS distribution between peers has its own test
+# (test/malachi/cluster/dist_tls_multinode_test.exs).
+System.put_env("MALACHI_DIST_TLS", "false")
+
 # Record every message a long-lived server drops (Malachi.UnexpectedMessage) from here on, the application's
 # own servers included, so the run can fail on any drop no test asked for (see the check at the end).
 {:ok, _} = Application.ensure_all_started(:telemetry)

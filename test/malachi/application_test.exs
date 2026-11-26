@@ -1070,3 +1070,68 @@ defmodule Malachi.ApplicationAdvertisedAddressTest do
     end
   end
 end
+
+defmodule Malachi.ApplicationDistributionSafeTest do
+  @moduledoc """
+  `Malachi.Application.ensure_distribution_safe/2`, the startup gate on Erlang distribution (#385): each refusal of
+  `Malachi.Cluster.DistGuard` stops the node with the startup refusal's status and a message that says what to set.
+
+  `async: false` for the reason `Malachi.ApplicationAdvertisedAddressTest` gives: the refusal goes to standard error.
+  """
+  use ExUnit.Case, async: false
+
+  import ExUnit.CaptureIO
+  import ExUnit.CaptureLog
+
+  alias Malachi.Application, as: App
+
+  defp gate(checked) do
+    test = self()
+    halt = fn status -> send(test, {:halted, status}) end
+
+    output =
+      capture_io(:stderr, fn ->
+        capture_log(fn -> send(test, {:result, App.ensure_distribution_safe(checked, halt)}) end)
+      end)
+
+    {output, receive(do: ({:result, result} -> result))}
+  end
+
+  test "a safe distribution lets the node start" do
+    assert {"", :ok} = gate(:ok)
+    refute_received {:halted, _status}
+  end
+
+  for {reason, text} <- [
+        cookie_baked: "baked into the release",
+        cookie_committed: "committed to the Malachi repository",
+        cookie_short: "shorter than 20 bytes",
+        dist_tls_invalid: "MALACHI_DIST_TLS must be true, false or unset",
+        dist_plaintext: "set MALACHI_DIST_TLS=false to accept plaintext distribution",
+        dist_tls_no_optfile: "has no options file",
+        dist_tls_unreadable: "could not be read",
+        dist_tls_unverified: "does not verify its peers",
+        dist_ca_shared: "give distribution a CA of its own"
+      ] do
+    test "#{reason} refuses the start with status 78 and says what to change" do
+      {output, _} = gate({:error, unquote(reason)})
+      assert_received {:halted, 78}
+      assert output =~ "REFUSING TO START"
+      assert output =~ unquote(text)
+    end
+  end
+
+  test "no refusal prints the cookie in effect" do
+    cookie = Atom.to_string(Node.get_cookie())
+
+    for reason <- ~w(cookie_baked cookie_committed cookie_short)a do
+      {output, _} = gate({:error, reason})
+      refute output =~ cookie
+    end
+  end
+
+  test "the suite's own node is not clustered, so the gate passes it" do
+    refute App.clustered?()
+    assert App.ensure_distribution_safe() == :ok
+  end
+end
