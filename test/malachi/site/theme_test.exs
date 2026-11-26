@@ -14,7 +14,7 @@ defmodule Malachi.Site.ThemeTest do
 
   describe "the real theme.js" do
     test "is a self-contained script: no file to load, no placeholder left, no closing tag inside", %{script: script} do
-      refute script =~ ~r/\bsrc\s*=/i
+      refute script =~ ~r/createElement|\.src\s*=|import\(|importScripts|\beval\b/
       refute script =~ "{{"
       refute script =~ ~r{</script}i
       assert script == String.trim(script)
@@ -29,6 +29,13 @@ defmodule Malachi.Site.ThemeTest do
     test "only ever compares the stored value with the theme names, never writes it into the page", %{script: script} do
       for theme <- Theme.themes(), do: assert(script =~ ~s("#{theme}"))
       refute script =~ ~r/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|Function\(/
+    end
+
+    test "tells the comments' frame the theme, giscus's origin only, and nothing but the theme", %{script: script} do
+      assert script =~ ~s(G="https://giscus.app")
+      assert [_] = Regex.scan(~r/postMessage\(/, script)
+      assert script =~ "postMessage({giscus:{setConfig:{theme:t}}},G)"
+      refute script =~ ~r/postMessage\([^)]*,\s*"\*"\)/
     end
 
     test "sets the dark class on the root element, which the dark palette of the tokens selects", %{script: script} do

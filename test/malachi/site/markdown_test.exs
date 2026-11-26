@@ -41,7 +41,7 @@ defmodule Malachi.Site.MarkdownTest do
     assert html =~ "<h2>Section</h2>"
     assert html =~ "<em>b</em> <strong>c</strong> <del>d</del> <code>e</code>"
     assert html =~ ~s(<a href="https://example.test/f" title="T">f</a>)
-    assert html =~ ~s(<img src="https://example.test/g.png" alt="g">)
+    assert html =~ ~s(<img src="https://example.test/g.png" alt="g" loading="lazy" decoding="async">)
     assert html =~ ~s(<a href="../introduction.html">h</a>)
     assert html =~ ~s(<a href="#top">i</a>)
     assert html =~ "<ul><li>one</li>\n<li>two</li>\n</ul>"
@@ -94,6 +94,28 @@ defmodule Malachi.Site.MarkdownTest do
     html = html!("[m](mailto:a@example.test) ![r](chart.png)\n")
     assert html =~ ~s(href="mailto:a@example.test")
     assert html =~ ~s(src="chart.png")
+  end
+
+  test "returns every image it shows, its src as written and its alt, in order, and none of a refused one" do
+    {:ok, rendered} = Markdown.render("![a](x/one.png) text ![b](https://h.test/two.png)\n\n![a](x/one.png)\n")
+
+    assert rendered.images == [
+             %{src: "x/one.png", alt: "a"},
+             %{src: "https://h.test/two.png", alt: "b"},
+             %{src: "x/one.png", alt: "a"}
+           ]
+
+    assert {:ok, %{images: []}} = Markdown.render("No image.\n")
+    assert {:error, _} = Markdown.render("![a](javascript:x) ![b](ok.png)\n")
+  end
+
+  test "an image's alt text is escaped once, quotes, ampersands and brackets included, and loads lazily" do
+    {:ok, rendered} = Markdown.render(~s|![a producer's "x" & <y> &amp;lt;](p.png "t's & u")\n|)
+
+    assert rendered.html =~
+             ~s|<img src="p.png" alt="a producer&#39;s &quot;x&quot; &amp; &lt;y&gt; &amp;lt;" title="t&#39;s &amp; u" loading="lazy" decoding="async">|
+
+    assert [%{alt: ~s(a producer's "x" & <y> &lt;)}] = rendered.images
   end
 
   test "a malachi-chart block is drawn inline as SVG with its caption, and returned with its JSON" do

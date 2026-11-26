@@ -5,7 +5,7 @@
 [![Docker Image Size](https://img.shields.io/docker/image-size/hectorcardoso/malachi/latest)](https://hub.docker.com/r/hectorcardoso/malachi)
 [![License](https://img.shields.io/github/license/HectorIFC/malachi)](https://github.com/malachi-hq/malachi/blob/main/LICENSE)
 
-**Malachi** is an open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-storage architecture: a CP, horizontally-scalable **log broker**. Clients speak topics, keys, and positions in a range's history, never a fixed partition count, so the broker can split and restripe its storage underneath without breaking them. The control plane is replicated by quorum (Raft via `ra`).
+**Malachi** is an open-source, 100% Elixir independent implementation inspired by the public design of LinkedIn's **NorthGuard** log storage: a CP, horizontally-scalable **log broker**. Malachi is not affiliated with or endorsed by LinkedIn. Clients speak topics, keys, and positions in a range's history, never a fixed partition count, so the broker can split and restripe its storage underneath without breaking them. The control plane is replicated by quorum (Raft via `ra`).
 
 ## Features
 

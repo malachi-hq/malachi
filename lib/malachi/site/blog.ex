@@ -10,8 +10,19 @@ defmodule Malachi.Site.Blog do
     * `date`: the post's day, `YYYY-MM-DD`, the same as its file name's;
     * `versions`: the releases it covers, `[0.28.1, 0.28.2]`, at least one.
 
-  A post's images (its charts as PNG, `Malachi.Site.Chart`) are in `site/blog/<file name without .md>/`, and are
-  staged beside its page, so `blog/<slug>.html` and `blog/<slug>/` sit together.
+  A post's images are in `site/blog/<file name without .md>/`, and are staged beside its page, so
+  `blog/<slug>.html` and `blog/<slug>/` sit together. They are of two kinds, both PNG, because dev.to, Medium and
+  LinkedIn do not show SVG:
+
+    * its charts (`Malachi.Site.Chart`), drawn inline on the site and rendered to PNG for the other places;
+    * its illustrations: a diagram the post shows as `![alt](<slug>/<name>.png)`, rendered from the SVG source
+      `<name>.svg` beside it by `mix malachi.release.post --images`, drawn at 1200x675.
+
+  Only those PNGs are published; an SVG source stays in the repository. The post's `og:image` is its first
+  chart, else its first illustration, else the kit's social preview, with its size and alt text. A post's page
+  also carries its `BlogPosting` structured data (JSON-LD), and an illustration whose PNG declares its size is
+  shown with that `width` and `height`, so the page does not shift as it loads. `llms_section/2` lists the
+  newest posts for `llms.txt`.
 
   `stage/4` refuses (raises) a post it cannot read or render. `errors/4` reports what keeps a post from being
   published:
@@ -19,8 +30,10 @@ defmodule Malachi.Site.Blog do
     * a `<!-- narrative -->` placeholder left in it (its title and summary included) or a `malachi-seed` block;
     * a file name that is not `YYYY-MM-DD-<slug>.md`, or a date that differs from the file name's;
     * a version covered by two posts;
-    * more than 3 charts, or a chart whose PNG is missing, is a Git LFS pointer (the image was not fetched),
-      exceeds 150 KB, or is not named for the chart's current data; a PNG beside a post that no chart names;
+    * more than 3 charts or 5 illustrations; a chart or an illustration whose PNG is missing, is a Git LFS
+      pointer (the image was not fetched) or exceeds 150 KB; a chart PNG not named for the chart's current data;
+      an image shown from the post's folder that is not a lowercase `<name>.png`; a file beside a post that is
+      neither one of its images nor an illustration's SVG source;
     * on the staged tree: a page, the index or the feed missing; the feed not in date order, over 20
       entries, or not holding one entry per post among the newest; a link or image on a blog page that does not
       resolve on this site, or a relative one that climbs above it; a script on a blog page other than the inline theme switch (`Malachi.Site.Theme`), which every page carries
@@ -30,17 +43,26 @@ defmodule Malachi.Site.Blog do
       missing, unfinished (a placeholder or a `malachi-seed` block) or draws a chart.
   """
 
+  alias Malachi.Release.Devto
+  alias Malachi.Site.Authors
   alias Malachi.Site.Chart
+  alias Malachi.Site.Comments
   alias Malachi.Site.Markdown
   alias Malachi.Site.Newsletter
   alias Malachi.Site.Theme
 
   @dir "site/blog"
   @max_charts 3
+  @max_illustrations 5
+  @illustration_size {1200, 675}
+  @illustration_name ~r/\A[a-z0-9][a-z0-9-]*\.png\z/
   @max_png_bytes 150 * 1024
   @feed_entries 20
   @file_name ~r/\A(\d{4}-\d{2}-\d{2})-([a-z0-9][a-z0-9-]*)\.md\z/
   @keys ~w(title date versions author summary)
+  @optional_keys ~w(cover)
+  @words_per_minute 238
+  @months ~w(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec)
   @version ~r/\A\d+\.\d+\.\d+\z/
   @lfs_pointer "version https://git-lfs.github.com/spec/"
 
@@ -53,8 +75,10 @@ defmodule Malachi.Site.Blog do
           versions: [String.t()],
           author: String.t(),
           summary: String.t(),
+          cover: String.t() | nil,
           html: String.t(),
           charts: [Markdown.chart()],
+          images: [%{src: String.t(), alt: String.t()}],
           narratives: non_neg_integer(),
           seeds: non_neg_integer()
         }
@@ -139,13 +163,15 @@ defmodule Malachi.Site.Blog do
     |> Enum.reject(&(String.trim(&1) == ""))
     |> Enum.reduce_while({:ok, %{}}, fn line, {:ok, acc} ->
       case Regex.run(~r/\A([a-z]+):[ \t]*(.*?)[ \t]*\z/, line) do
-        [_, key, value] when key in @keys ->
+        [_, key, value] when key in @keys or key in @optional_keys ->
           if Map.has_key?(acc, key),
             do: {:halt, {:error, "its front matter has #{key} twice"}},
             else: {:cont, {:ok, Map.put(acc, key, value)}}
 
         [_, key, _] ->
-          {:halt, {:error, "its front matter has an unknown key #{key}; the keys are #{Enum.join(@keys, ", ")}"}}
+          {:halt,
+           {:error,
+            "its front matter has an unknown key #{key}; the keys are #{Enum.join(@keys ++ @optional_keys, ", ")}"}}
 
         nil ->
           {:halt, {:error, "its front matter line #{inspect(line)} is not key: value"}}
@@ -160,16 +186,26 @@ defmodule Malachi.Site.Blog do
   defp typed(map) do
     with :ok <- required(map),
          {:ok, date} <- date(map["date"]),
-         {:ok, versions} <- versions(map["versions"]) do
+         {:ok, versions} <- versions(map["versions"]),
+         {:ok, cover} <- cover(map["cover"]) do
       {:ok,
        %{
          title: map["title"],
          author: map["author"],
          summary: map["summary"],
          date: date,
-         versions: versions
+         versions: versions,
+         cover: cover
        }}
     end
+  end
+
+  defp cover(nil), do: {:ok, nil}
+
+  defp cover(name) do
+    if Regex.match?(@illustration_name, name),
+      do: {:ok, name},
+      else: {:error, "its cover #{inspect(name)} is a lowercase <name>.png beside the post"}
   end
 
   defp required(map) do
@@ -216,15 +252,27 @@ defmodule Malachi.Site.Blog do
   Raises when a post or the privacy note cannot be read or rendered: staging part of the blog would publish the
   rest without it.
   """
-  @spec stage(Path.t(), Path.t(), %{String.t() => String.t()}, (Path.t(), String.t() -> :ok), Newsletter.t() | nil) ::
-          :ok
-  def stage(root, doc, meta, write, newsletter \\ nil) do
+  @spec stage(
+          Path.t(),
+          Path.t(),
+          %{String.t() => String.t()},
+          (Path.t(), String.t() -> :ok),
+          Newsletter.t() | nil,
+          Comments.t() | nil
+        ) :: :ok
+  def stage(root, doc, meta, write, newsletter \\ nil, comments \\ nil) do
     theme = Theme.script!(root)
 
     posts =
       case Enum.split_with(read_all(root), &match?({:ok, _}, &1)) do
         {ok, []} -> Enum.map(ok, fn {:ok, post} -> post end)
         {_, failed} -> Mix.raise("the blog cannot be staged:\n" <> Enum.map_join(failed, "\n", &elem(&1, 1)))
+      end
+
+    authors =
+      case Authors.read(root) do
+        {:ok, authors} -> authors
+        {:error, message} -> Mix.raise("the blog cannot be staged:\n" <> message)
       end
 
     privacy =
@@ -238,9 +286,11 @@ defmodule Malachi.Site.Blog do
     File.rm_rf!(blog)
 
     for post <- posts do
-      write.(Path.join("blog", post.slug <> ".html"), page(post, meta, newsletter, theme))
+      write.(Path.join("blog", post.slug <> ".html"), page(root, post, meta, newsletter, authors, comments, theme))
       copy_images(root, blog, post)
     end
+
+    :ok = Authors.stage(root, doc, posts, authors)
 
     write.("blog/index.html", index(posts, meta, newsletter, theme))
     if posts != [], do: write.("blog/feed.xml", feed(posts, meta))
@@ -248,13 +298,101 @@ defmodule Malachi.Site.Blog do
     :ok
   end
 
+  # Only the PNGs the post shows are published: an SVG source, or a file nothing names, stays out of the site.
   defp copy_images(root, blog, post) do
     source = Path.join([root, @dir, post.slug])
 
-    for name <- image_files(source) do
+    for name <- chart_images(post) ++ illustrations(post), File.regular?(Path.join(source, name)) do
       File.mkdir_p!(Path.join(blog, post.slug))
       File.cp!(Path.join(source, name), Path.join([blog, post.slug, name]))
     end
+  end
+
+  @doc "The file names of a post's chart PNGs, in the order it draws them."
+  @spec chart_images(post()) :: [String.t()]
+  def chart_images(post), do: Enum.map(post.charts, &Chart.png_name(&1.chart, &1.json))
+
+  @doc """
+  The file names of the illustrations a post shows from its own folder, `![alt](<slug>/<name>.png)`, in order and
+  without repeats. An image from its folder with any other name is not one; the check reports it.
+  """
+  @spec illustrations(post()) :: [String.t()]
+  def illustrations(post) do
+    [Map.get(post, :cover) | own_images(post)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.filter(&Regex.match?(@illustration_name, &1))
+    |> Enum.uniq()
+  end
+
+  @doc "The size an illustration's SVG source is drawn at, as `{width, height}`."
+  @spec illustration_size() :: {pos_integer(), pos_integer()}
+  def illustration_size, do: @illustration_size
+
+  # What the post shows from its own folder, by the path under it.
+  defp own_images(post) do
+    prefix = post.slug <> "/"
+    for %{src: src} <- post.images, String.starts_with?(src, prefix), do: String.replace_prefix(src, prefix, "")
+  end
+
+  @doc """
+  The `## Blog` section of `llms.txt`: the blog, its feed and its #{@feed_entries} newest posts, each with its
+  summary, so an assistant that reads `llms.txt` finds them. Empty when there is no post.
+  """
+  @spec llms_section(Path.t(), map()) :: String.t()
+  def llms_section(root, meta) do
+    case for({:ok, post} <- read_all(root), do: post) do
+      [] ->
+        ""
+
+      posts ->
+        base = meta["base_url"]
+
+        entries =
+          posts
+          |> Enum.take(@feed_entries)
+          |> Enum.map_join("\n", fn post ->
+            "- [#{link_text(post.title)}](#{url(post, meta)}): #{one_line(post.summary)} (#{post.date})"
+          end)
+
+        """
+        ## Blog
+
+        - [Malachi blog](#{base}/blog/index.html): posts about each release and the engineering behind it
+        - [Atom feed](#{base}/blog/feed.xml)
+        #{entries}
+        """
+    end
+  end
+
+  defp link_text(text), do: text |> one_line() |> String.replace("[", "(") |> String.replace("]", ")")
+  defp one_line(text), do: text |> String.split() |> Enum.join(" ")
+
+  # The PNG's own size, from its IHDR chunk, or nil when the file is not a PNG that says it.
+  defp png_size(path) do
+    case File.open(path, [:read, :binary], &IO.binread(&1, 24)) do
+      {:ok, <<137, "PNG", 13, 10, 26, 10, _len::32, "IHDR", width::32, height::32>>} when width > 0 and height > 0 ->
+        {width, height}
+
+      _ ->
+        nil
+    end
+  end
+
+  # The post's HTML with each illustration given its PNG's width and height, read from the source folder.
+  defp sized_html(root, post) do
+    Enum.reduce(illustrations(post), post.html, fn name, html ->
+      case png_size(Path.join([root, @dir, post.slug, name])) do
+        {w, h} ->
+          String.replace(
+            html,
+            ~s(<img src="#{post.slug}/#{name}"),
+            ~s(<img width="#{w}" height="#{h}" src="#{post.slug}/#{name}")
+          )
+
+        nil ->
+          html
+      end
+    end)
   end
 
   # The regular files beside a post, without the ones whose name starts with a dot.
@@ -280,20 +418,71 @@ defmodule Malachi.Site.Blog do
   def image_url(post, %{chart: chart, json: json}, meta),
     do: "#{meta["base_url"]}/blog/#{post.slug}/#{Chart.png_name(chart, json)}"
 
-  defp page(post, meta, newsletter, theme) do
+  # The image of the post's link previews, as {url, {width, height}, alt}: its cover, else its first chart, else
+  # its first illustration (at the size it is rendered at), else the kit's social preview.
+  defp og_image(%{cover: cover} = post, meta) when is_binary(cover),
+    do: {"#{meta["base_url"]}/blog/#{post.slug}/#{cover}", @illustration_size, post.title}
+
+  defp og_image(post, meta) do
+    case {post.charts, illustrations(post)} do
+      {[first | _], _} ->
+        {image_url(post, first, meta), Chart.size(), first.chart.title}
+
+      {[], [first | _]} ->
+        alt = Enum.find_value(post.images, "", &(&1.src == "#{post.slug}/#{first}" && &1.alt))
+        {"#{meta["base_url"]}/blog/#{post.slug}/#{first}", @illustration_size, alt}
+
+      {[], []} ->
+        {"#{meta["base_url"]}/kit/social-preview.png", {1280, 640}, "Malachi"}
+    end
+  end
+
+  # The post's BlogPosting structured data. `<` is written as its JSON escape, so no text of the post can close
+  # the script element.
+  defp json_ld(post, url, {img, {w, h}, _alt}, meta) do
+    base = meta["base_url"]
+
+    %{
+      "@context" => "https://schema.org",
+      "@type" => "BlogPosting",
+      "headline" => post.title,
+      "description" => post.summary,
+      "datePublished" => Date.to_iso8601(post.date),
+      "dateModified" => Date.to_iso8601(post.date),
+      "inLanguage" => "en",
+      "url" => url,
+      "mainEntityOfPage" => url,
+      "image" => %{"@type" => "ImageObject", "url" => img, "width" => w, "height" => h},
+      "author" => %{"@type" => "Person", "name" => post.author},
+      "publisher" => %{
+        "@type" => "Organization",
+        "name" => "MalachiHQ",
+        "url" => base <> "/",
+        "logo" => %{"@type" => "ImageObject", "url" => base <> "/assets/logo-mark.svg"}
+      },
+      "isPartOf" => %{"@type" => "Blog", "name" => "Malachi blog", "url" => base <> "/blog/index.html"},
+      "about" => %{
+        "@type" => "SoftwareSourceCode",
+        "name" => "Malachi",
+        "codeRepository" => "https://github.com/malachi-hq/malachi"
+      }
+    }
+    |> JSON.encode!()
+    |> String.replace("<", "\\u003c")
+  end
+
+  defp page(root, post, meta, newsletter, authors, comments, theme) do
     url = url(post, meta)
 
+    {img, {w, h}, alt} = og = og_image(post, meta)
+
     image =
-      case post.charts do
-        [first | _] ->
-          img = image_url(post, first, meta)
-
-          ~s(<meta property="og:image" content="#{e(img)}">\n<meta name="twitter:card" content="summary_large_image">\n) <>
-            ~s(<meta name="twitter:image" content="#{e(img)}">)
-
-        [] ->
-          ~s(<meta name="twitter:card" content="summary">)
-      end
+      ~s(<meta property="og:image" content="#{e(img)}">\n) <>
+        ~s(<meta property="og:image:width" content="#{w}">\n<meta property="og:image:height" content="#{h}">\n) <>
+        ~s(<meta property="og:image:alt" content="#{e(alt)}">\n) <>
+        ~s(<meta name="twitter:card" content="summary_large_image">\n) <>
+        ~s(<meta name="twitter:image" content="#{e(img)}">\n<meta name="twitter:image:alt" content="#{e(alt)}">\n) <>
+        ~s(<script type="application/ld+json">#{json_ld(post, url, og, meta)}</script>)
 
     shell(
       theme: theme,
@@ -315,18 +504,63 @@ defmodule Malachi.Site.Blog do
       main: """
       <article class="post">
       <header class="post-head">
-      <p class="post-meta"><time datetime="#{post.date}">#{post.date}</time> · #{versions_text(post.versions)} · #{e(post.author)}</p>
       <h1>#{e(post.title)}</h1>
       <p class="lede">#{e(post.summary)}</p>
+      #{byline(post, Map.get(authors, post.author))}
       </header>
-      #{post.html}
+      #{cover_figure(root, post)}
+      #{sized_html(root, post)}
       </article>
+      #{if comments, do: Comments.section(comments), else: ""}
       #{form(newsletter)}
       """
     )
   end
 
   defp versions_text(versions), do: Enum.map_join(versions, ", ", &"v#{&1}")
+
+  # As Medium shows it: the author's photo and name with a Follow link, then the reading time, the date and the
+  # releases. An author missing from authors.json gets the name alone; the check reports it.
+  defp byline(post, author) do
+    {photo, follow} =
+      case author do
+        %{photo: photo, follow: follow} ->
+          {~s(<img class="avatar" src="authors/#{e(photo)}" width="44" height="44" alt="#{e(post.author)}">\n),
+           ~s( <a class="follow" href="#{e(follow)}" rel="author noopener">Follow</a>)}
+
+        nil ->
+          {"", ""}
+      end
+
+    """
+    <div class="byline">
+    #{photo}<div class="byline-text">
+    <p class="byline-name"><span class="author">#{e(post.author)}</span>#{follow}</p>
+    <p class="post-meta">#{reading_minutes(post.html)} min read · <time datetime="#{post.date}">#{us_date(post.date)}</time> · #{versions_text(post.versions)}</p>
+    </div>
+    </div>
+    """
+  end
+
+  # The cover, the large image under the byline, at its PNG's size when the PNG says it.
+  defp cover_figure(_root, %{cover: nil}), do: ""
+
+  defp cover_figure(root, post) do
+    {w, h} = png_size(Path.join([root, @dir, post.slug, post.cover])) || @illustration_size
+
+    ~s(<figure class="cover"><img src="#{post.slug}/#{post.cover}" width="#{w}" height="#{h}" alt="#{e(post.title)}" fetchpriority="high" decoding="async"></figure>)
+  end
+
+  @doc "Minutes to read a post's HTML at #{@words_per_minute} words a minute, rounded up, at least 1."
+  @spec reading_minutes(String.t()) :: pos_integer()
+  def reading_minutes(html) do
+    words = html |> String.replace(~r/<[^>]*>/, " ") |> String.split() |> length()
+    max(1, ceil(words / @words_per_minute))
+  end
+
+  @doc "A date as US readers write it: `Nov 25, 2026`."
+  @spec us_date(Date.t()) :: String.t()
+  def us_date(date), do: "#{Enum.at(@months, date.month - 1)} #{date.day}, #{date.year}"
 
   defp index(posts, meta, newsletter, theme) do
     items =
@@ -339,7 +573,7 @@ defmodule Malachi.Site.Blog do
             Enum.map_join(posts, "\n", fn post ->
               """
               <li><a href="#{post.slug}.html">#{e(post.title)}</a>
-              <p class="post-meta"><time datetime="#{post.date}">#{post.date}</time> · #{versions_text(post.versions)}</p>
+              <p class="post-meta"><time datetime="#{post.date}">#{us_date(post.date)}</time> · #{reading_minutes(post.html)} min read · #{versions_text(post.versions)}</p>
               <p>#{e(post.summary)}</p></li>
               """
             end)
@@ -463,7 +697,7 @@ defmodule Malachi.Site.Blog do
         <updated>#{post.date}T00:00:00Z</updated>
         <author><name>#{e(post.author)}</name></author>
         <summary>#{e(post.summary)}</summary>
-        <content type="html">#{e(post.html)}</content>
+        <content type="html">#{e(feed_html(post, meta))}</content>
         </entry>
         """
       end)
@@ -481,6 +715,23 @@ defmodule Malachi.Site.Blog do
     """
   end
 
+  # A post's HTML as a feed reader or an email shows it: its cover first, and every relative src or href made
+  # absolute from the post's URL, since neither has the page's address to resolve them from.
+  defp feed_html(post, meta) do
+    url = url(post, meta)
+
+    cover =
+      if post.cover,
+        do: ~s(<p><img src="#{post.slug}/#{post.cover}" alt="#{e(post.title)}"></p>\n),
+        else: ""
+
+    Regex.replace(~r/\b(src|href)="([^"]*)"/, cover <> post.html, fn _whole, attr, target ->
+      ~s(#{attr}="#{e(Devto.resolve(unescape_attr(target), url))}")
+    end)
+  end
+
+  defp unescape_attr(text), do: String.replace(text, "&amp;", "&")
+
   defp entry_id(post, host), do: "tag:#{host},#{post.date}:/blog/#{post.slug}"
 
   @doc """
@@ -494,6 +745,7 @@ defmodule Malachi.Site.Blog do
   def errors(root, doc, meta, opts \\ []) do
     pointers? = Keyword.get(opts, :lfs_pointers, false)
     newsletter = Keyword.get(opts, :newsletter)
+    comments = Keyword.get(opts, :comments)
     read = read_all(root)
     posts = for {:ok, post} <- read, do: post
 
@@ -507,9 +759,10 @@ defmodule Malachi.Site.Blog do
       Enum.flat_map(posts, &unfinished/1) ++
       duplicate_versions(posts) ++
       Enum.flat_map(posts, &image_errors(root, &1, pointers?)) ++
+      Authors.errors(root, posts, pointers?) ++
       Newsletter.source_errors(root, newsletter) ++
       theme_errors ++
-      staged_errors(doc, posts, meta, newsletter, theme)
+      staged_errors(doc, posts, meta, newsletter, comments, theme)
   end
 
   defp unfinished(post) do
@@ -545,28 +798,53 @@ defmodule Malachi.Site.Blog do
   defp image_errors(root, post, pointers?) do
     where = "#{@dir}/#{post.file}"
     dir = Path.join([root, @dir, post.slug])
-    expected = Enum.map(post.charts, &Chart.png_name(&1.chart, &1.json))
-    present = image_files(dir)
+    charts = chart_images(post)
+    illustrations = illustrations(post)
+    sources = Enum.map(illustrations, &(Path.rootname(&1) <> ".svg"))
 
-    count =
-      if length(post.charts) > @max_charts,
-        do: ["#{where} has #{length(post.charts)} charts; a post has at most #{@max_charts}"],
-        else: []
+    missing_chart = fn shown ->
+      "#{where} draws a chart whose image #{shown} is missing: run node site/checks/render.mjs"
+    end
 
-    count ++
-      Enum.flat_map(expected, &png_errors(dir, post.slug, &1, where, pointers?)) ++
-      for name <- present -- expected, String.ends_with?(name, ".png") do
-        "#{@dir}/#{post.slug}/#{name} is named by no chart in #{post.file} (stale after a data change?); remove it"
+    missing_illustration = fn shown ->
+      if File.regular?(Path.rootname(Path.join(root, shown)) <> ".svg"),
+        do: "#{where} shows #{shown}, which is not rendered: run mix malachi.release.post --images #{where}",
+        else: "#{where} shows #{shown}, which is missing, and so is its SVG source"
+    end
+
+    counts(where, charts, illustrations) ++
+      Enum.flat_map(charts, &png_errors(dir, post.slug, &1, missing_chart, pointers?)) ++
+      Enum.flat_map(illustrations, &png_errors(dir, post.slug, &1, missing_illustration, pointers?)) ++
+      for name <- Enum.uniq(own_images(post)) -- illustrations do
+        "#{where} shows #{post.slug}/#{name}; an image beside a post is a lowercase <name>.png"
+      end ++
+      for name <- image_files(dir) -- (charts ++ illustrations ++ sources) do
+        "#{@dir}/#{post.slug}/#{name} is neither an image #{post.file} shows nor an illustration's SVG source " <>
+          "(stale after a change?); remove it"
       end
   end
 
-  defp png_errors(dir, slug, name, where, pointers?) do
+  defp counts(where, charts, illustrations) do
+    chart_count =
+      if length(charts) > @max_charts,
+        do: ["#{where} has #{length(charts)} charts; a post has at most #{@max_charts}"],
+        else: []
+
+    illustration_count =
+      if length(illustrations) > @max_illustrations,
+        do: ["#{where} has #{length(illustrations)} illustrations; a post has at most #{@max_illustrations}"],
+        else: []
+
+    chart_count ++ illustration_count
+  end
+
+  defp png_errors(dir, slug, name, missing, pointers?) do
     path = Path.join(dir, name)
     shown = "#{@dir}/#{slug}/#{name}"
 
     case File.stat(path) do
       {:ok, %File.Stat{type: :regular, size: size}} when size > @max_png_bytes ->
-        ["#{shown} is #{div(size, 1024)} KB; a chart image is at most #{div(@max_png_bytes, 1024)} KB"]
+        ["#{shown} is #{div(size, 1024)} KB; an image beside a post is at most #{div(@max_png_bytes, 1024)} KB"]
 
       {:ok, %File.Stat{type: :regular}} ->
         if not pointers? and lfs_pointer?(path),
@@ -574,7 +852,7 @@ defmodule Malachi.Site.Blog do
           else: []
 
       _ ->
-        ["#{where} draws a chart whose image #{shown} is missing: run node site/checks/render.mjs"]
+        [missing.(shown)]
     end
   end
 
@@ -588,28 +866,34 @@ defmodule Malachi.Site.Blog do
     end
   end
 
-  defp staged_errors(doc, posts, meta, newsletter, theme) do
-    # Each page, its URL, and whether it carries the newsletter's form: every page but the privacy note.
+  defp staged_errors(doc, posts, meta, newsletter, comments, theme) do
+    # Each page, its URL, whether it carries the newsletter's form (every page but the privacy note) and whether
+    # it is a post's (the only pages with comments).
     pages =
-      for post <- posts, do: {"blog/#{post.slug}.html", url(post, meta), true}
+      for post <- posts, do: {"blog/#{post.slug}.html", url(post, meta), true, true}
 
     privacy =
       if newsletter,
-        do: [{"blog/privacy.html", "#{meta["base_url"]}/blog/privacy.html", false}],
+        do: [{"blog/privacy.html", "#{meta["base_url"]}/blog/privacy.html", false, false}],
         else: []
 
-    pages = [{"blog/index.html", "#{meta["base_url"]}/blog/index.html", true} | pages] ++ privacy
+    pages = [{"blog/index.html", "#{meta["base_url"]}/blog/index.html", true, false} | pages] ++ privacy
 
-    Enum.flat_map(pages, fn {rel, page_url, form?} ->
-      page_errors(doc, rel, page_url, meta, theme, &Newsletter.form_errors(rel, &1, newsletter, form?))
+    Enum.flat_map(pages, fn {rel, page_url, form?, post?} ->
+      checks = fn html ->
+        Comments.script_errors(rel, html, comments, post?) ++
+          inline_script_errors(rel, html, theme) ++ Newsletter.form_errors(rel, html, newsletter, form?)
+      end
+
+      page_errors(doc, rel, page_url, meta, checks)
     end) ++
       feed_errors(doc, posts)
   end
 
-  defp page_errors(doc, rel, page_url, meta, theme, form_errors) do
+  defp page_errors(doc, rel, page_url, meta, checks) do
     case File.read(Path.join(doc, rel)) do
       {:ok, html} ->
-        script_errors(rel, html, theme) ++ form_errors.(html) ++ link_errors(doc, rel, html, page_url, meta)
+        checks.(html) ++ link_errors(doc, rel, html, page_url, meta)
 
       {:error, _} ->
         ["doc/#{rel} is missing; stage the site again"]
@@ -621,24 +905,25 @@ defmodule Malachi.Site.Blog do
   @event_handler ~r/<[a-z][^>]*?\son[a-z]+\s*=/i
   @javascript_url ~r/\b(?:href|src|action|formaction|xlink:href)\s*=\s*["']?\s*javascript:/i
 
-  # A blog page runs one script, the theme switch, inline and byte for byte the source's (`Malachi.Site.Theme`), and
-  # nothing else: no script loaded by `src`, no other inline script (an inline SVG's included), no event handler
-  # attribute and no `javascript:` URL. `theme` is nil when the source cannot be read, which errors/4 reports once.
-  defp script_errors(rel, html, theme) do
+  # The scripts a blog page runs in place (#385): the theme switch, inline and byte for byte the source's
+  # (`Malachi.Site.Theme`), exactly once, and nothing else inline (an inline SVG's included); structured data
+  # (`type="application/ld+json"`) is data, not code, and passes. No event handler attribute and no `javascript:`
+  # URL either. A script loaded by `src` is `Malachi.Site.Comments.script_errors/4`'s to judge. `theme` is nil when
+  # the source cannot be read, which errors/4 reports once.
+  defp inline_script_errors(rel, html, theme) do
     elements = Regex.scan(@script_element, html, capture: :all_but_first)
     opened = @script_open |> Regex.scan(html) |> length()
-
-    loaded = for [attrs, _] <- elements, attrs =~ ~r/\bsrc\s*=/i, do: "doc/#{rel} loads a script; blog pages load none"
+    inline = for [attrs, body] <- elements, not (attrs =~ ~r/\bsrc\s*=/i), not json_ld?(attrs), do: {attrs, body}
 
     others =
-      for [attrs, body] <- elements, not (attrs =~ ~r/\bsrc\s*=/i), theme != nil, body != theme do
+      for {_attrs, body} <- inline, theme != nil, body != theme do
         "doc/#{rel} runs an inline script other than the theme switch"
       end
 
     switch =
       cond do
         theme == nil -> []
-        Enum.count(elements, fn [attrs, body] -> String.trim(attrs) == "" and body == theme end) == 1 -> []
+        Enum.count(inline, fn {attrs, body} -> String.trim(attrs) == "" and body == theme end) == 1 -> []
         true -> ["doc/#{rel} does not carry the theme switch exactly once"]
       end
 
@@ -646,8 +931,10 @@ defmodule Malachi.Site.Blog do
     handlers = if html =~ @event_handler, do: ["doc/#{rel} has an event handler attribute (on...=)"], else: []
     urls = if html =~ @javascript_url, do: ["doc/#{rel} has a javascript: URL"], else: []
 
-    loaded ++ others ++ switch ++ unclosed ++ handlers ++ urls
+    others ++ switch ++ unclosed ++ handlers ++ urls
   end
+
+  defp json_ld?(attrs), do: attrs =~ ~r/\btype\s*=\s*"application\/ld\+json"/i
 
   @href ~r/\b(?:href|src)="([^"]*)"/
 

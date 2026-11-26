@@ -1,7 +1,8 @@
 # Architecture
 
 Malachi is a CP (consistent, partition-tolerant), horizontally scalable **log broker**, written entirely
-in Elixir on the BEAM. It follows LinkedIn's NorthGuard log-storage design: clients speak topics, keys, and
+in Elixir on the BEAM. It follows the public design of LinkedIn's NorthGuard log storage, implemented independently and with no
+affiliation with LinkedIn: clients speak topics, keys, and
 positions in a range's history, never a fixed partition count, so the broker can split, merge, and
 restripe its storage underneath without breaking them. The control plane (metadata) is replicated by quorum through Raft (the
 `ra` library); the data plane (records) uses its own quorum replication; cluster membership uses SWIM.

@@ -4,11 +4,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Malachi: open source reimplementation of LinkedIn's NorthGuard</title>
-<meta name="description" content="Malachi is an open source reimplementation of LinkedIn's NorthGuard, written in Elixir on OTP 28 and {{license}} licensed. Ranges split and merge; writes are acknowledged by a majority of copies. In active development and not production-ready; the quickstart is plaintext on localhost only, so configure TLS before serving real traffic.">
+<title>Malachi: open source log broker inspired by LinkedIn's NorthGuard</title>
+<meta name="description" content="Malachi is an independent open source log broker inspired by the public design of LinkedIn's NorthGuard, written in Elixir on OTP 28 and {{license}} licensed. Ranges split and merge; writes are acknowledged by a majority of copies. In active development and not production-ready; the quickstart is plaintext on localhost only, so configure TLS before serving real traffic.">
 <link rel="canonical" href="{{base_url}}/">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Malachi: open source reimplementation of LinkedIn's NorthGuard">
+<meta property="og:title" content="Malachi: open source log broker inspired by LinkedIn's NorthGuard">
 <meta property="og:description" content="Ranges split and merge; writes are acknowledged by a majority of copies. In active development and not production-ready.">
 <meta property="og:url" content="{{base_url}}/">
 <meta property="og:image" content="{{base_url}}/kit/social-preview.png">
@@ -18,7 +18,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="{{base_url}}/kit/social-preview.png">
 <link rel="alternate" type="text/plain" href="llms.txt" title="llms.txt">
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"Malachi","version":"{{version}}","description":"Open source reimplementation of LinkedIn's NorthGuard, written in Elixir on OTP 28. In active development and not production-ready. The quickstart runs plaintext on localhost only; configure TLS before serving real traffic.","codeRepository":"https://github.com/malachi-hq/malachi","license":"https://spdx.org/licenses/{{license}}.html","programmingLanguage":"Elixir (Erlang/OTP 28)","runtimePlatform":"Erlang/OTP 28","author":{"@type":"Organization","name":"MalachiHQ","url":"{{base_url}}/","sameAs":["https://www.linkedin.com/company/malachi-hq","https://github.com/malachi-hq"]}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"Malachi","version":"{{version}}","description":"Independent open source log broker inspired by the public design of LinkedIn's NorthGuard, not affiliated with LinkedIn, written in Elixir on OTP 28. In active development and not production-ready. The quickstart runs plaintext on localhost only; configure TLS before serving real traffic.","codeRepository":"https://github.com/malachi-hq/malachi","license":"https://spdx.org/licenses/{{license}}.html","programmingLanguage":"Elixir (Erlang/OTP 28)","runtimePlatform":"Erlang/OTP 28","author":{"@type":"Organization","name":"MalachiHQ","url":"{{base_url}}/","sameAs":["https://www.linkedin.com/company/malachi-hq","https://github.com/malachi-hq"]}}</script>
 {{theme_head}}
 <link rel="preload" href="../../assets/fonts/bricolage-grotesque-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="../../styles.css">
@@ -61,7 +61,7 @@
 </div>
 </div>
 <div class="hero-copy">
-<h1 id="hero-title">Open source reimplementation of LinkedIn's NorthGuard</h1>
+<h1 id="hero-title">Open source log broker inspired by LinkedIn's NorthGuard</h1>
 <p class="lead">Clients speak topics, keys and opaque cursors, never partitions or offsets, so Malachi can split, merge and restripe its storage underneath without breaking them.</p>
 <div class="actions">
 <a class="btn btn-primary" href="introduction.html">Read the docs</a>
@@ -255,7 +255,7 @@ docker run \
 </main>
 <footer class="foot">
 <div class="wrap foot-in">
-<div class="foot-brand"><span class="brand"><img src="../../assets/logo-mark.svg" width="28" height="28" alt=""><span>malachi</span></span><p class="muted small">MIT license. Not production-ready.</p></div>
+<div class="foot-brand"><span class="brand"><img src="../../assets/logo-mark.svg" width="28" height="28" alt=""><span>malachi</span></span><p class="muted small">MIT license. Not production-ready. Not affiliated with or endorsed by LinkedIn.</p></div>
 <nav class="foot-nav" aria-label="Footer">
 <a href="introduction.html">Docs</a>
 <a href="blog/">Blog</a>
