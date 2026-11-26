@@ -294,6 +294,44 @@ defmodule Malachi.Site.BlogTest do
   end
 
   describe "the feed" do
+    test "puts each chart's PNG in that chart's own figure, in the order the post draws them", %{root: root} do
+      latency = String.replace(String.replace(@chart, ~s("rate"), ~s("lat")), "Produce rate", "Latency")
+      body = "```malachi-chart\n#{@chart}\n```\n\nBetween.\n\n```malachi-chart\n#{latency}\n```\n"
+      post(root, "2026-11-16-v1-2-3.md", body: body)
+
+      pngs =
+        for json <- [@chart, latency] do
+          {:ok, chart} = Chart.parse(json)
+          name = Chart.png_name(chart, json)
+          write(root, "site/blog/2026-11-16-v1-2-3/#{name}", <<137, "PNG", 0::size(64)>>)
+          name
+        end
+
+      stage!(root)
+      feed = read(root, "doc/blog/feed.xml")
+
+      for {png, title} <- Enum.zip(pngs, ["Produce rate", "Latency"]) do
+        assert feed =~
+                 "#{png}&quot; alt=&quot;#{title}&quot;&gt;\n&lt;figcaption&gt;#{title}&lt;/figcaption&gt;"
+      end
+
+      assert verify(root) == []
+    end
+
+    test "shows each chart as its PNG at an absolute URL, since no reader or importer draws the inline SVG",
+         %{root: root} do
+      png = charted_post(root)
+      stage!(root)
+      feed = read(root, "doc/blog/feed.xml")
+
+      assert feed =~
+               "&lt;img src=&quot;https://example.test/malachi/blog/2026-11-16-v1-2-3/#{png}&quot; alt=&quot;Produce rate&quot;&gt;"
+
+      assert feed =~ "&lt;figcaption&gt;Produce rate&lt;/figcaption&gt;"
+      refute feed =~ "&lt;svg"
+      assert read(root, "doc/blog/2026-11-16-v1-2-3.html") =~ "<svg"
+    end
+
     test "is well-formed Atom with the 20 newest posts, newest first", %{root: root} do
       for day <- 1..21 do
         date = Date.new!(2026, 10, day) |> Date.to_iso8601()

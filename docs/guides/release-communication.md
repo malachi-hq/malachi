@@ -22,7 +22,7 @@ A pull request contributes to the release text through two optional sections of 
 1. Generate the post with `mix malachi.release.post vX.Y.Z` and write its narrative.
 2. Open the post's pull request and merge it.
 3. Comment the post's link on the release's Announcements discussion.
-4. Send the dev.to draft with `mix malachi.release.post --devto site/blog/<post>.md`, then review and publish it on dev.to.
+4. Review the dev.to draft the feed import made from the post, add its tags, and publish it on dev.to.
 
 The checklist issue holds the same steps, and a test keeps the two lists identical.
 
@@ -46,7 +46,7 @@ count (the Elixir load test records only the architecture, so it never shows one
 called a gain or a regression: on shared CI runners the published ceiling moves by more than 30% between runs
 of unchanged code.
 
-The charts are drawn inline on the site and published as PNG images for dev.to, Medium and LinkedIn. The task
+The charts are drawn inline on the site and published as PNG images for the feed, dev.to, Medium and LinkedIn. The task
 renders them with the Playwright pinned in `site/checks`; the first time, install it:
 
 ```bash
@@ -63,8 +63,8 @@ then the text. The rest of what a post can carry:
   (`Malachi.Site.Authors`), with the reading time and the date. The draft's `author` is git's `user.name`:
   set it to a name listed there, or add the author, whose photo goes in `site/blog/authors/`.
 - **A cover.** `cover: cover.png` in the front matter names a PNG beside the post, drawn from `cover.svg` at
-  1200x675. It is the large image under the byline, the link previews' image, the feed's first image and the
-  dev.to article's main image.
+  1200x675. It is the large image under the byline, the link previews' image, the feed's first image and, when the task sends
+  the draft to dev.to, the article's main image.
 - **Illustrations.** A diagram is shown as `![alt](<post>/<name>.png)` and drawn from `<name>.svg` beside it.
   `mix malachi.release.post --images` renders every chart, cover and illustration whose PNG is missing or
   older than its source.
@@ -82,14 +82,24 @@ Comment the post's URL on the release's discussion in Announcements, so watchers
 
 ### 4. dev.to
 
+dev.to imports `blog/feed.xml` (its RSS import, set up once in the dashboard with the feed marked as the
+canonical URL): a post that reaches the feed becomes a draft on dev.to within its next fetch, with its
+`canonical_url` set to the post on this site, the cover and the illustrations, and each chart as its PNG
+image, since the feed carries charts as images. Review the draft, add up to four tags (`tags:` in its front
+matter) and publish it there by setting `published: true`.
+
+Without the import, the task sends the draft through dev.to's API instead, with the cover as the article's
+main image:
+
 ```bash
 DEVTO_API_KEY=... mix malachi.release.post --devto site/blog/<post>.md
 ```
 
-It sends the post as a draft (`published: false`) with its `canonical_url` set to the post on this site, the
-charts as their PNG images and every relative link made absolute. A second run updates the same draft while it
-is a draft; once it is published on dev.to the script refuses it, and the article is edited there. The key
-stays in the maintainer's environment and never reaches CI. Review the draft on dev.to and publish it there.
+A second run updates the same draft while it is a draft; once it is published on dev.to the script refuses it,
+and the article is edited there. The key stays in the maintainer's environment and never reaches CI. Use one of
+the two ways for a post, not both: the task run after the import finds the imported draft by its canonical URL
+and writes over it, losing any tags or edits made there, and an import that runs after the task may leave a
+second draft.
 
 ## From the browser, each post approved before it is published
 
