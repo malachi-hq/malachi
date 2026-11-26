@@ -3,6 +3,8 @@ defmodule Malachi.RenderMjsTest do
   # (test/scripts/render_mjs.test.mjs). Drawing itself needs the browser and runs locally only.
   use ExUnit.Case, async: true
 
+  alias Malachi.Test.NodeUnit
+
   @script Path.expand("../../site/checks/render.mjs", __DIR__)
   @unit_tests Path.expand("render_mjs.test.mjs", __DIR__)
 
@@ -16,9 +18,7 @@ defmodule Malachi.RenderMjsTest do
   end
 
   test "its pure functions pass their unit tests", %{node: node} do
-    {output, status} = System.cmd(node, ["--test", @unit_tests], stderr_to_stdout: true)
-    assert status == 0, output
-    assert output =~ ~r/# fail 0/
+    NodeUnit.assert_pass(node, @unit_tests, tests: 3)
   end
 
   test "a usage error exits non-zero before any browser is needed", %{node: node} do
