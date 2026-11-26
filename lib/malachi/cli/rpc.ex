@@ -70,8 +70,11 @@ defmodule Malachi.CLI.Rpc do
   was started without `-proto_dist inet_tls` or without an options file. The protocol is fixed when a VM boots, so
   a task cannot switch to TLS once it runs; the message says how to start it.
   """
-  @spec check_transport(String.t() | nil, %{proto_dist: [String.t()], optfile: Path.t() | nil}) ::
-          :ok | {:error, String.t()}
+  @spec check_transport(String.t() | nil, %{
+          required(:proto_dist) => [String.t()],
+          required(:optfile) => Path.t() | nil,
+          optional(atom()) => term()
+        }) :: :ok | {:error, String.t()}
   def check_transport("true", %{proto_dist: protos, optfile: optfile}) do
     if "inet_tls" in protos and optfile not in [nil, ""],
       do: :ok,
