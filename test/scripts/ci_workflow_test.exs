@@ -247,7 +247,7 @@ defmodule Malachi.CiWorkflowTest do
 
       assert partition_problems(in_job(@ci, "test", ~s/--partitions "$TEST_PARTITIONS" /, "")) == [:not_partitioned]
 
-      assert partition_problems(in_job(@ci, "test", ~s/--export-coverage "partition-$MIX_TEST_PARTITION" /, "")) == [
+      assert partition_problems(in_job(@ci, "test", ~s/ --export-coverage "partition-$MIX_TEST_PARTITION"/, "")) == [
                :not_exported
              ]
 

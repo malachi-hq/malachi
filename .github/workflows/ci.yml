@@ -84,11 +84,12 @@ jobs:
           exit 1
       
       # No threshold here: a partition covers only the modules its tests reach, so the threshold applies to the
-      # merged report in the coverage job. --slowest-modules lists where this partition's time went.
+      # merged report in the coverage job. No --slowest-modules either: it turns on --trace, which runs one test
+      # module at a time, async ones included, and made each partition slower than the measure it was for.
       - name: 📊 Run tests with coverage
         env:
           MIX_TEST_PARTITION: ${{ matrix.partition }}
-        run: mix coveralls.json --partitions "$TEST_PARTITIONS" --export-coverage "partition-$MIX_TEST_PARTITION" --slowest-modules 30
+        run: mix coveralls.json --partitions "$TEST_PARTITIONS" --export-coverage "partition-$MIX_TEST_PARTITION"
 
       - name: 📤 Upload the partition's coverage
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
