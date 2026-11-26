@@ -117,6 +117,15 @@ defmodule Mix.Tasks.Malachi.LoadtestTest do
         end
       end
     end
+
+    test "the run reads MALACHI_CLIENT_TLS, refusing a value other than true or false before anything connects" do
+      :ok = LoadtestEnv.isolate()
+      System.put_env("MALACHI_CLIENT_TLS", "yes")
+
+      assert_raise Mix.Error, "MALACHI_CLIENT_TLS must be true or false", fn ->
+        Task.run(["--duration", "1"])
+      end
+    end
   end
 
   describe "against the test server" do

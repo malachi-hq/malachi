@@ -13,6 +13,7 @@ defmodule LoadtestJsTest do
   alias Malachi.DataPlaneRouter
   alias Malachi.Loadtest.Payload
   alias Malachi.TCPAcceptorPool
+  alias Malachi.Test.CertFixtures
   alias Malachi.Test.LoadtestProbes
   alias Malachi.Test.PollingHelper
   alias Malachi.Test.ReadBack
@@ -313,6 +314,49 @@ defmodule LoadtestJsTest do
       assert {output, 0} = run_js(ctx, args, stderr: false)
       assert %{"errors" => 0, "ops" => ops} = Jason.decode!(output)
       assert ops > 50
+    end
+  end
+
+  describe "over TLS (#385)" do
+    # A broker in the runner's process serving TLS only, with a certificate for localhost signed by a CA of the
+    # test's own: what the generator's TLS flags and MALACHI_CLIENT_TLS* reach, and what the run records.
+    setup %{tmp_dir: dir} do
+      ca = CertFixtures.ca!(dir)
+      server = CertFixtures.leaf!(ca, dir, "server", "localhost", ["DNS:localhost", "IP:127.0.0.1"])
+      %{tls: %{cert: server.cert, key: server.key}, ca: ca.cert}
+    end
+
+    @run ~w(--scenario produce --json --connections 1 --batch 2 --duration 1)
+
+    defp tls_run(ctx, args, env \\ %{}) do
+      against_fake(ctx, %{tls: ctx.tls, env: env}, @run ++ args)
+    end
+
+    defp command(run), do: Jason.decode!(run["stdout"])["meta"]["command"]
+
+    test "--tls with --cacert produces over a verified connection and records both flags", ctx do
+      run = tls_run(ctx, ["--tls", "--cacert", ctx.ca])
+      assert run["code"] == 0, run["stderr"]
+      assert command(run) =~ "--tls --cacert #{ctx.ca}"
+    end
+
+    test "a CA from the environment and --tls on the command line go together, as the help says", ctx do
+      run = tls_run(ctx, ["--tls"], %{"MALACHI_CLIENT_TLS_CACERT" => ctx.ca})
+      assert run["code"] == 0, run["stderr"]
+      assert command(run) =~ "--cacert #{ctx.ca}"
+    end
+
+    test "settings from the environment alone are recorded as flags, so the command reproduces the run", ctx do
+      run = tls_run(ctx, [], %{"MALACHI_CLIENT_TLS" => "true", "MALACHI_CLIENT_TLS_CACERT" => ctx.ca})
+      assert run["code"] == 0, run["stderr"]
+      assert command(run) =~ "--tls --cacert #{ctx.ca}"
+    end
+
+    test "without the CA the server is refused, with what to change", ctx do
+      run = tls_run(ctx, ["--tls"])
+      assert run["code"] == 1
+      assert run["stderr"] =~ "TLS verification failed"
+      assert run["stderr"] =~ "--cacert"
     end
   end
 

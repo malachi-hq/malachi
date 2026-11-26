@@ -225,7 +225,8 @@ class Stats {
   }
 }
 
-const cfg = config({ username: 'app', password: 'app123' });
+// TLS is resolved in main(), with the flags, which win over the MALACHI_CLIENT_TLS* variables.
+const cfg = config({ username: 'app', password: 'app123' }, { tlsFlags: true });
 
 function newClient() {
   return new MalachiClient({ host: cfg.host, port: cfg.port, timeout: 30000, tls: cfg.tls });

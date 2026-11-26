@@ -18,16 +18,18 @@ const colors = {
 };
 
 // Connection config shared by every CLI. A script overrides user/pass with its role default. `tls` is what
-// the MALACHI_CLIENT_TLS* variables ask for (./tls.js), null for plaintext; a CLI that takes TLS flags too
-// resolves it again with them (`tlsFrom`). A setting that cannot be honoured exits before anything connects.
-function config(defaults = {}) {
+// the MALACHI_CLIENT_TLS* variables ask for (./tls.js), null for plaintext. A CLI that takes TLS flags too
+// passes `{ tlsFlags: true }` and resolves `tls` itself with them (`tlsFrom`), since a flag can satisfy what a
+// variable alone would be refused for (a CA in the environment, --tls on the command line). A setting that
+// cannot be honoured exits before anything connects.
+function config(defaults = {}, { tlsFlags = false } = {}) {
   return {
     host: process.env.MALACHI_HOST || 'localhost',
     port: parseInt(process.env.MALACHI_PORT, 10) || 4040,
     topic: process.env.MALACHI_TOPIC || defaults.topic || 'events',
     username: process.env.MALACHI_USER || defaults.username,
     password: process.env.MALACHI_PASS || defaults.password,
-    tls: tlsFrom({}),
+    tls: tlsFlags ? null : tlsFrom({}),
   };
 }
 
