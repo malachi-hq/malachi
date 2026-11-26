@@ -32,16 +32,22 @@ defmodule Malachi.Release.Devto do
     else
       url = Blog.url(post, meta)
 
-      {:ok,
-       %{
-         "article" => %{
-           "title" => post.title,
-           "description" => post.summary,
-           "canonical_url" => url,
-           "published" => false,
-           "body_markdown" => body(source, post, meta, url)
-         }
-       }}
+      article = %{
+        "title" => post.title,
+        "description" => post.summary,
+        "canonical_url" => url,
+        "published" => false,
+        "body_markdown" => body(source, post, meta, url)
+      }
+
+      # A post's cover is the article's main image on dev.to, as it is the large image on the site.
+      article =
+        case Map.get(post, :cover) do
+          nil -> article
+          cover -> Map.put(article, "main_image", resolve("#{post.slug}/#{cover}", url))
+        end
+
+      {:ok, %{"article" => article}}
     end
   end
 

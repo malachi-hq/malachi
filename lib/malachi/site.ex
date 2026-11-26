@@ -1,5 +1,6 @@
 defmodule Malachi.Site do
   alias Malachi.Site.Blog
+  alias Malachi.Site.Comments
   alias Malachi.Site.Newsletter
 
   @moduledoc """
@@ -120,7 +121,8 @@ defmodule Malachi.Site do
       licenses: get_in(project, [:package, :licenses]),
       site_url: project[:site_url],
       main: get_in(project, [:docs, :main]),
-      newsletter: project[:newsletter]
+      newsletter: project[:newsletter],
+      blog_comments: project[:blog_comments]
     }
   end
 
@@ -186,6 +188,7 @@ defmodule Malachi.Site do
   def stage(root, config) do
     meta = metadata(config)
     newsletter = Newsletter.from_config!(config)
+    comments = Comments.from_config!(config)
     doc = Path.join(root, "doc")
     main = config.main <> ".html"
 
@@ -215,7 +218,7 @@ defmodule Malachi.Site do
     fonts = font_files!(root)
     # Before the sitemap, which lists every page in doc/, the blog's among them. The blog refuses a post it
     # cannot read before it writes anything.
-    :ok = Blog.stage(root, doc, meta, &write!(doc, &1, &2), newsletter)
+    :ok = Blog.stage(root, doc, meta, &write!(doc, &1, &2), newsletter, comments)
     sitemap_xml = sitemap(doc, meta)
 
     File.mkdir_p!(Path.join(doc, "fonts"))
@@ -282,7 +285,14 @@ defmodule Malachi.Site do
       staged_font_errors(root, doc) ++
       sitemap_errors(doc, meta) ++
       llms_errors(doc, meta) ++
-      Blog.errors(root, doc, meta, Keyword.put(opts, :newsletter, Newsletter.from_config!(config)))
+      Blog.errors(
+        root,
+        doc,
+        meta,
+        opts
+        |> Keyword.put(:newsletter, Newsletter.from_config!(config))
+        |> Keyword.put(:comments, Comments.from_config!(config))
+      )
   end
 
   @doc false

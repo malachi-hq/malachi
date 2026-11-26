@@ -1,7 +1,8 @@
 defmodule Malachi.Site.Newsletter do
   @moduledoc """
   The blog's newsletter form (issue #373): a plain HTML form that posts the reader's email to the newsletter
-  provider, with no script, cookie or pixel on the blog's pages, and the privacy note it links to.
+  provider, with no script of its own and no cookie or pixel on the blog's pages, and the privacy note it links
+  to.
 
   It is configured by the `newsletter:` key of the project in `mix.exs`, copied from the form code the provider
   generates. While the key is `nil` the blog has no form and no privacy note. When it is set:

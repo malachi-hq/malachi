@@ -32,6 +32,14 @@ defmodule Malachi.Release.DevtoTest do
     assert article["published"] == false
     assert article["body_markdown"] == "Text.\n"
     refute article["body_markdown"] =~ "title:"
+    refute Map.has_key?(article, "main_image")
+  end
+
+  test "a post's cover is the article's main image, at its absolute URL", %{tmp_dir: dir} do
+    {source, post} = post!(dir, "Text.\n", cover: "cover.png")
+    assert {:ok, %{"article" => article}} = Devto.article(source, post, @meta)
+    assert article["main_image"] == "https://example.test/malachi/blog/2026-11-16-v1-0-0/cover.png"
+    refute article["body_markdown"] =~ "cover"
   end
 
   test "a chart becomes its PNG on the site, the image the site publishes", %{tmp_dir: dir} do

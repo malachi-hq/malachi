@@ -175,6 +175,73 @@ defmodule Malachi.Site.BlogTest do
       assert verify(root) == []
     end
 
+    test "opens as Medium does: headline, sub headline, the author's photo and Follow, reading time, US date",
+         %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md", body: String.duplicate("word ", 500) <> "\n")
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+
+      [head] = Regex.run(~r{<header class="post-head">.*?</header>}s, page)
+      assert head =~ ~r{<h1>Release v1.2.3</h1>\s*<p class="lede">What v1.2.3 delivered.</p>\s*<div class="byline">}
+      assert head =~ ~s(<img class="avatar" src="authors/maintainer.png" width="44" height="44" alt="Maintainer">)
+
+      assert head =~
+               ~s(<span class="author">Maintainer</span> <a class="follow" href="https://www.linkedin.com/in/maintainer" rel="author noopener">Follow</a>)
+
+      assert head =~ ~s(3 min read · <time datetime="2026-11-16">Nov 16, 2026</time> · v1.2.3)
+      assert File.exists?(Path.join(root, "doc/blog/authors/maintainer.png"))
+
+      index = read(root, "doc/blog/index.html")
+      assert index =~ ~s(<time datetime="2026-11-16">Nov 16, 2026</time> · 3 min read · v1.2.3)
+      assert verify(root) == []
+    end
+
+    test "an author missing from authors.json gets the name alone, and the check reports it", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md", fields: [author: "Nobody"])
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+      assert page =~ ~s(<span class="author">Nobody</span></p>)
+      refute page =~ ~s(class="avatar")
+
+      assert ~s(site/blog/2026-11-16-v1-2-3.md names the author "Nobody", who is not in site/blog/authors.json) in verify(
+               root
+             )
+    end
+
+    test "a cover is the large image under the byline, the og:image and the feed's first image", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md", fields: [cover: "cover.png"], body: "[docs](../introduction.html)\n")
+      write(root, "site/blog/2026-11-16-v1-2-3/cover.svg", "<svg/>")
+      write(root, "site/blog/2026-11-16-v1-2-3/cover.png", SiteFixture.png(1200, 675))
+      stage!(root)
+      page = read(root, "doc/blog/2026-11-16-v1-2-3.html")
+
+      assert page =~
+               ~s(</header>\n<figure class="cover"><img src="2026-11-16-v1-2-3/cover.png" width="1200" height="675" alt="Release v1.2.3" fetchpriority="high" decoding="async"></figure>)
+
+      assert page =~
+               ~s(<meta property="og:image" content="https://example.test/malachi/blog/2026-11-16-v1-2-3/cover.png">)
+
+      assert page =~ ~s(<meta property="og:image:alt" content="Release v1.2.3">)
+      assert File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/cover.png"))
+      refute File.exists?(Path.join(root, "doc/blog/2026-11-16-v1-2-3/cover.svg"))
+
+      feed = read(root, "doc/blog/feed.xml")
+      assert feed =~ "&lt;img src=&quot;https://example.test/malachi/blog/2026-11-16-v1-2-3/cover.png&quot;"
+      assert feed =~ "href=&quot;https://example.test/malachi/introduction.html&quot;"
+      assert verify(root) == []
+    end
+
+    test "a cover that is not a lowercase <name>.png, or that is not rendered", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md", fields: [cover: "Cover.jpg"])
+      stage_error = assert_raise Mix.Error, fn -> stage!(root) end
+      assert stage_error.message =~ ~s(its cover "Cover.jpg" is a lowercase <name>.png beside the post)
+
+      post(root, "2026-11-16-v1-2-3.md", fields: [cover: "cover.png"])
+      write(root, "site/blog/2026-11-16-v1-2-3/cover.svg", "<svg/>")
+      stage!(root)
+      assert Enum.any?(verify(root), &(&1 =~ "shows site/blog/2026-11-16-v1-2-3/cover.png, which is not rendered"))
+    end
+
     test "escapes its front matter in every attribute and text", %{root: root} do
       post(root, "2026-11-16-v1-2-3.md", fields: [title: ~s(A "quoted" <b> & 'it'), summary: ~s(S"<x>)])
       stage!(root)
@@ -423,7 +490,7 @@ defmodule Malachi.Site.BlogTest do
       stage!(root)
       page = Path.join(root, "doc/blog/2026-11-16-v1-2-3.html")
       File.write!(page, File.read!(page) <> ~s(<script src="https://cdn.test/x.js"></script>))
-      assert "doc/blog/2026-11-16-v1-2-3.html loads a script; blog pages load none" in verify(root)
+      assert "doc/blog/2026-11-16-v1-2-3.html loads a script; this blog page loads none" in verify(root)
     end
 
     test "a staged page or index gone", %{root: root} do
@@ -496,6 +563,7 @@ defmodule Malachi.Site.BlogTest do
   end
 
   test "a site/blog that is not a folder cannot be listed, and says so", %{root: root} do
+    File.rm_rf!(Path.join(root, "site/blog"))
     write(root, "site/blog", "a file where the folder should be")
     error = assert_raise Mix.Error, fn -> Blog.read_all(root) end
     assert error.message =~ "site/blog: cannot be listed"

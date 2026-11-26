@@ -42,7 +42,10 @@ defmodule Malachi.Site.Blog do
       missing, unfinished (a placeholder or a `malachi-seed` block) or draws a chart.
   """
 
+  alias Malachi.Release.Devto
+  alias Malachi.Site.Authors
   alias Malachi.Site.Chart
+  alias Malachi.Site.Comments
   alias Malachi.Site.Markdown
   alias Malachi.Site.Newsletter
 
@@ -55,6 +58,9 @@ defmodule Malachi.Site.Blog do
   @feed_entries 20
   @file_name ~r/\A(\d{4}-\d{2}-\d{2})-([a-z0-9][a-z0-9-]*)\.md\z/
   @keys ~w(title date versions author summary)
+  @optional_keys ~w(cover)
+  @words_per_minute 238
+  @months ~w(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec)
   @version ~r/\A\d+\.\d+\.\d+\z/
   @lfs_pointer "version https://git-lfs.github.com/spec/"
 
@@ -67,6 +73,7 @@ defmodule Malachi.Site.Blog do
           versions: [String.t()],
           author: String.t(),
           summary: String.t(),
+          cover: String.t() | nil,
           html: String.t(),
           charts: [Markdown.chart()],
           images: [%{src: String.t(), alt: String.t()}],
@@ -154,13 +161,15 @@ defmodule Malachi.Site.Blog do
     |> Enum.reject(&(String.trim(&1) == ""))
     |> Enum.reduce_while({:ok, %{}}, fn line, {:ok, acc} ->
       case Regex.run(~r/\A([a-z]+):[ \t]*(.*?)[ \t]*\z/, line) do
-        [_, key, value] when key in @keys ->
+        [_, key, value] when key in @keys or key in @optional_keys ->
           if Map.has_key?(acc, key),
             do: {:halt, {:error, "its front matter has #{key} twice"}},
             else: {:cont, {:ok, Map.put(acc, key, value)}}
 
         [_, key, _] ->
-          {:halt, {:error, "its front matter has an unknown key #{key}; the keys are #{Enum.join(@keys, ", ")}"}}
+          {:halt,
+           {:error,
+            "its front matter has an unknown key #{key}; the keys are #{Enum.join(@keys ++ @optional_keys, ", ")}"}}
 
         nil ->
           {:halt, {:error, "its front matter line #{inspect(line)} is not key: value"}}
@@ -175,16 +184,26 @@ defmodule Malachi.Site.Blog do
   defp typed(map) do
     with :ok <- required(map),
          {:ok, date} <- date(map["date"]),
-         {:ok, versions} <- versions(map["versions"]) do
+         {:ok, versions} <- versions(map["versions"]),
+         {:ok, cover} <- cover(map["cover"]) do
       {:ok,
        %{
          title: map["title"],
          author: map["author"],
          summary: map["summary"],
          date: date,
-         versions: versions
+         versions: versions,
+         cover: cover
        }}
     end
+  end
+
+  defp cover(nil), do: {:ok, nil}
+
+  defp cover(name) do
+    if Regex.match?(@illustration_name, name),
+      do: {:ok, name},
+      else: {:error, "its cover #{inspect(name)} is a lowercase <name>.png beside the post"}
   end
 
   defp required(map) do
@@ -231,13 +250,25 @@ defmodule Malachi.Site.Blog do
   Raises when a post or the privacy note cannot be read or rendered: staging part of the blog would publish the
   rest without it.
   """
-  @spec stage(Path.t(), Path.t(), %{String.t() => String.t()}, (Path.t(), String.t() -> :ok), Newsletter.t() | nil) ::
-          :ok
-  def stage(root, doc, meta, write, newsletter \\ nil) do
+  @spec stage(
+          Path.t(),
+          Path.t(),
+          %{String.t() => String.t()},
+          (Path.t(), String.t() -> :ok),
+          Newsletter.t() | nil,
+          Comments.t() | nil
+        ) :: :ok
+  def stage(root, doc, meta, write, newsletter \\ nil, comments \\ nil) do
     posts =
       case Enum.split_with(read_all(root), &match?({:ok, _}, &1)) do
         {ok, []} -> Enum.map(ok, fn {:ok, post} -> post end)
         {_, failed} -> Mix.raise("the blog cannot be staged:\n" <> Enum.map_join(failed, "\n", &elem(&1, 1)))
+      end
+
+    authors =
+      case Authors.read(root) do
+        {:ok, authors} -> authors
+        {:error, message} -> Mix.raise("the blog cannot be staged:\n" <> message)
       end
 
     privacy =
@@ -251,9 +282,11 @@ defmodule Malachi.Site.Blog do
     File.rm_rf!(blog)
 
     for post <- posts do
-      write.(Path.join("blog", post.slug <> ".html"), page(root, post, meta, newsletter))
+      write.(Path.join("blog", post.slug <> ".html"), page(root, post, meta, newsletter, authors, comments))
       copy_images(root, blog, post)
     end
+
+    :ok = Authors.stage(root, doc, posts, authors)
 
     write.("blog/index.html", index(posts, meta, newsletter))
     if posts != [], do: write.("blog/feed.xml", feed(posts, meta))
@@ -281,8 +314,8 @@ defmodule Malachi.Site.Blog do
   """
   @spec illustrations(post()) :: [String.t()]
   def illustrations(post) do
-    post
-    |> own_images()
+    [Map.get(post, :cover) | own_images(post)]
+    |> Enum.reject(&is_nil/1)
     |> Enum.filter(&Regex.match?(@illustration_name, &1))
     |> Enum.uniq()
   end
@@ -381,8 +414,11 @@ defmodule Malachi.Site.Blog do
   def image_url(post, %{chart: chart, json: json}, meta),
     do: "#{meta["base_url"]}/blog/#{post.slug}/#{Chart.png_name(chart, json)}"
 
-  # The image of the post's link previews, as {url, {width, height}, alt}: its first chart, else its first
-  # illustration (at the size it is rendered at), else the kit's social preview.
+  # The image of the post's link previews, as {url, {width, height}, alt}: its cover, else its first chart, else
+  # its first illustration (at the size it is rendered at), else the kit's social preview.
+  defp og_image(%{cover: cover} = post, meta) when is_binary(cover),
+    do: {"#{meta["base_url"]}/blog/#{post.slug}/#{cover}", @illustration_size, post.title}
+
   defp og_image(post, meta) do
     case {post.charts, illustrations(post)} do
       {[first | _], _} ->
@@ -431,7 +467,7 @@ defmodule Malachi.Site.Blog do
     |> String.replace("<", "\\u003c")
   end
 
-  defp page(root, post, meta, newsletter) do
+  defp page(root, post, meta, newsletter, authors, comments) do
     url = url(post, meta)
 
     {img, {w, h}, alt} = og = og_image(post, meta)
@@ -463,18 +499,63 @@ defmodule Malachi.Site.Blog do
       main: """
       <article class="post">
       <header class="post-head">
-      <p class="post-meta"><time datetime="#{post.date}">#{post.date}</time> · #{versions_text(post.versions)} · #{e(post.author)}</p>
       <h1>#{e(post.title)}</h1>
       <p class="lede">#{e(post.summary)}</p>
+      #{byline(post, Map.get(authors, post.author))}
       </header>
+      #{cover_figure(root, post)}
       #{sized_html(root, post)}
       </article>
+      #{if comments, do: Comments.section(comments), else: ""}
       #{form(newsletter)}
       """
     )
   end
 
   defp versions_text(versions), do: Enum.map_join(versions, ", ", &"v#{&1}")
+
+  # As Medium shows it: the author's photo and name with a Follow link, then the reading time, the date and the
+  # releases. An author missing from authors.json gets the name alone; the check reports it.
+  defp byline(post, author) do
+    {photo, follow} =
+      case author do
+        %{photo: photo, follow: follow} ->
+          {~s(<img class="avatar" src="authors/#{e(photo)}" width="44" height="44" alt="#{e(post.author)}">\n),
+           ~s( <a class="follow" href="#{e(follow)}" rel="author noopener">Follow</a>)}
+
+        nil ->
+          {"", ""}
+      end
+
+    """
+    <div class="byline">
+    #{photo}<div class="byline-text">
+    <p class="byline-name"><span class="author">#{e(post.author)}</span>#{follow}</p>
+    <p class="post-meta">#{reading_minutes(post.html)} min read · <time datetime="#{post.date}">#{us_date(post.date)}</time> · #{versions_text(post.versions)}</p>
+    </div>
+    </div>
+    """
+  end
+
+  # The cover, the large image under the byline, at its PNG's size when the PNG says it.
+  defp cover_figure(_root, %{cover: nil}), do: ""
+
+  defp cover_figure(root, post) do
+    {w, h} = png_size(Path.join([root, @dir, post.slug, post.cover])) || @illustration_size
+
+    ~s(<figure class="cover"><img src="#{post.slug}/#{post.cover}" width="#{w}" height="#{h}" alt="#{e(post.title)}" fetchpriority="high" decoding="async"></figure>)
+  end
+
+  @doc "Minutes to read a post's HTML at #{@words_per_minute} words a minute, rounded up, at least 1."
+  @spec reading_minutes(String.t()) :: pos_integer()
+  def reading_minutes(html) do
+    words = html |> String.replace(~r/<[^>]*>/, " ") |> String.split() |> length()
+    max(1, ceil(words / @words_per_minute))
+  end
+
+  @doc "A date as US readers write it: `Nov 25, 2026`."
+  @spec us_date(Date.t()) :: String.t()
+  def us_date(date), do: "#{Enum.at(@months, date.month - 1)} #{date.day}, #{date.year}"
 
   defp index(posts, meta, newsletter) do
     items =
@@ -487,7 +568,7 @@ defmodule Malachi.Site.Blog do
             Enum.map_join(posts, "\n", fn post ->
               """
               <li><a href="#{post.slug}.html">#{e(post.title)}</a>
-              <p class="post-meta"><time datetime="#{post.date}">#{post.date}</time> · #{versions_text(post.versions)}</p>
+              <p class="post-meta"><time datetime="#{post.date}">#{us_date(post.date)}</time> · #{reading_minutes(post.html)} min read · #{versions_text(post.versions)}</p>
               <p>#{e(post.summary)}</p></li>
               """
             end)
@@ -607,7 +688,7 @@ defmodule Malachi.Site.Blog do
         <updated>#{post.date}T00:00:00Z</updated>
         <author><name>#{e(post.author)}</name></author>
         <summary>#{e(post.summary)}</summary>
-        <content type="html">#{e(post.html)}</content>
+        <content type="html">#{e(feed_html(post, meta))}</content>
         </entry>
         """
       end)
@@ -625,6 +706,23 @@ defmodule Malachi.Site.Blog do
     """
   end
 
+  # A post's HTML as a feed reader or an email shows it: its cover first, and every relative src or href made
+  # absolute from the post's URL, since neither has the page's address to resolve them from.
+  defp feed_html(post, meta) do
+    url = url(post, meta)
+
+    cover =
+      if post.cover,
+        do: ~s(<p><img src="#{post.slug}/#{post.cover}" alt="#{e(post.title)}"></p>\n),
+        else: ""
+
+    Regex.replace(~r/\b(src|href)="([^"]*)"/, cover <> post.html, fn _whole, attr, target ->
+      ~s(#{attr}="#{e(Devto.resolve(unescape_attr(target), url))}")
+    end)
+  end
+
+  defp unescape_attr(text), do: String.replace(text, "&amp;", "&")
+
   defp entry_id(post, host), do: "tag:#{host},#{post.date}:/blog/#{post.slug}"
 
   @doc """
@@ -638,6 +736,7 @@ defmodule Malachi.Site.Blog do
   def errors(root, doc, meta, opts \\ []) do
     pointers? = Keyword.get(opts, :lfs_pointers, false)
     newsletter = Keyword.get(opts, :newsletter)
+    comments = Keyword.get(opts, :comments)
     read = read_all(root)
     posts = for {:ok, post} <- read, do: post
 
@@ -645,8 +744,9 @@ defmodule Malachi.Site.Blog do
       Enum.flat_map(posts, &unfinished/1) ++
       duplicate_versions(posts) ++
       Enum.flat_map(posts, &image_errors(root, &1, pointers?)) ++
+      Authors.errors(root, posts, pointers?) ++
       Newsletter.source_errors(root, newsletter) ++
-      staged_errors(doc, posts, meta, newsletter)
+      staged_errors(doc, posts, meta, newsletter, comments)
   end
 
   defp unfinished(post) do
@@ -750,38 +850,37 @@ defmodule Malachi.Site.Blog do
     end
   end
 
-  defp staged_errors(doc, posts, meta, newsletter) do
-    # Each page, its URL, and whether it carries the newsletter's form: every page but the privacy note.
+  defp staged_errors(doc, posts, meta, newsletter, comments) do
+    # Each page, its URL, whether it carries the newsletter's form (every page but the privacy note) and whether
+    # it is a post's (the only pages with comments).
     pages =
-      for post <- posts, do: {"blog/#{post.slug}.html", url(post, meta), true}
+      for post <- posts, do: {"blog/#{post.slug}.html", url(post, meta), true, true}
 
     privacy =
       if newsletter,
-        do: [{"blog/privacy.html", "#{meta["base_url"]}/blog/privacy.html", false}],
+        do: [{"blog/privacy.html", "#{meta["base_url"]}/blog/privacy.html", false, false}],
         else: []
 
-    pages = [{"blog/index.html", "#{meta["base_url"]}/blog/index.html", true} | pages] ++ privacy
+    pages = [{"blog/index.html", "#{meta["base_url"]}/blog/index.html", true, false} | pages] ++ privacy
 
-    Enum.flat_map(pages, fn {rel, page_url, form?} ->
-      page_errors(doc, rel, page_url, meta, &Newsletter.form_errors(rel, &1, newsletter, form?))
+    Enum.flat_map(pages, fn {rel, page_url, form?, post?} ->
+      checks = fn html ->
+        Comments.script_errors(rel, html, comments, post?) ++ Newsletter.form_errors(rel, html, newsletter, form?)
+      end
+
+      page_errors(doc, rel, page_url, meta, checks)
     end) ++
       feed_errors(doc, posts)
   end
 
-  defp page_errors(doc, rel, page_url, meta, form_errors) do
+  defp page_errors(doc, rel, page_url, meta, checks) do
     case File.read(Path.join(doc, rel)) do
       {:ok, html} ->
-        script_errors(rel, html) ++ form_errors.(html) ++ link_errors(doc, rel, html, page_url, meta)
+        checks.(html) ++ link_errors(doc, rel, html, page_url, meta)
 
       {:error, _} ->
         ["doc/#{rel} is missing; stage the site again"]
     end
-  end
-
-  defp script_errors(rel, html) do
-    if Regex.match?(~r/<script\b[^>]*\bsrc\s*=/i, html),
-      do: ["doc/#{rel} loads a script; blog pages load none"],
-      else: []
   end
 
   @href ~r/\b(?:href|src)="([^"]*)"/
