@@ -169,14 +169,11 @@ defmodule CliJsTest do
   test "reading once, a member the group hands no range finishes with nothing read", ctx do
     {_, 0} = run(ctx, "producer.js", [ctx.topic, "3", "--create"])
     # a topic of one range: the group hands it to one member, the other gets none
-    idle =
-      Enum.find(for(i <- 1..100, do: "idle#{i}"), fn name ->
-        [{ctx.topic, 0}] |> Assignment.assign(["busy", name]) |> Map.fetch!(name) == []
-      end)
+    {busy_member, idle} = busy_and_idle(ctx.topic)
 
     busy =
       ctx
-      |> start("consumer.js", [ctx.topic, "--group", "q", "--member", "busy", "--follow"])
+      |> start("consumer.js", [ctx.topic, "--group", "q", "--member", busy_member, "--follow"])
       |> until_output(~r/\[3\]/)
 
     assert {out, 0} = run(ctx, "consumer.js", [ctx.topic, "--group", "q", "--member", idle])
@@ -184,6 +181,24 @@ defmodule CliJsTest do
     assert out =~ "the group handed this member no range"
     assert out =~ "Done. consumed=0"
     {_, 0} = interrupt(busy)
+  end
+
+  # Two member names, of which the group hands the topic's only range to the first and none to the second. The
+  # topic is new on every run, so which name wins changes: the busy member is the winner among a hundred
+  # candidates, which every other candidate loses to, so the pair always exists. Searching for a name that loses
+  # to a fixed one found none about once in a hundred runs, and the test then ran a member named nil.
+  defp busy_and_idle(topic) do
+    range = {topic, 0}
+    [first | rest] = candidates = for i <- 1..100, do: "m#{i}"
+
+    busy =
+      Enum.reduce(rest, first, fn name, winner ->
+        if [range] |> Assignment.assign([winner, name]) |> Map.fetch!(winner) == [range], do: winner, else: name
+      end)
+
+    idle = Enum.find(candidates, &(&1 != busy))
+    assert Assignment.assign([range], [busy, idle]) == %{busy => [range], idle => []}
+    {busy, idle}
   end
 
   for {script, follow} <- [{"consumer.js", ["--follow"]}, {"subscriber.js", []}] do
