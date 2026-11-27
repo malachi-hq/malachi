@@ -96,7 +96,31 @@ mix docs --warnings-as-errors
 mix coveralls
 ```
 
-Coverage aims at 100% on the files a change touches, and 80% is the floor.
+Coverage aims at 100% on the files a change touches, and 80% is the floor. CI fails below 85% on the
+whole suite (`minimum_coverage` in `coveralls.json`, the only place the threshold is set).
+
+### How CI runs the suite
+
+CI runs the suite once, split across `TEST_PARTITIONS` jobs (8) that run at the same time: `mix test
+--partitions` gives each test module to one partition, so together they run every test once. Each one
+exports its coverage, and the Coverage job merges the exports, applies the threshold and uploads the one
+report Codecov receives. Code Quality runs the checks that read the source rather than run it (warnings,
+formatting, design tokens, credo, unused dependencies, Hex advisories) and the docs build, and none of them
+hides a failure behind `continue-on-error` (#390). One partition runs locally as CI runs it:
+
+```bash
+MIX_TEST_PARTITION=3 mix test --partitions 8
+```
+
+A module runs whole inside one partition, so the slowest module sets the floor of the partition that gets
+it: a module of a few minutes is better split, and one that shares nothing with the running application is
+better async. Measured on the Linux runners for #390, from the runs of its pull request:
+
+| | Before | After |
+|---|---|---|
+| CI run, first job start to CI Summary | about 22 min | about 6 min 20 s |
+| The suite | one job of 1275 s (72 s async, 1203 s sync) | 8 partitions, the slowest 268 s to 291 s, then Coverage 66 s to 82 s |
+| Code Quality | 20 to 24 min, running the suite and Dialyzer a second time | about 1 min |
 
 Changes to durability, replication, storage or failover also run the chaos drills, which inject real
 faults into a 3-node cluster and certify that every acknowledged write survives:
