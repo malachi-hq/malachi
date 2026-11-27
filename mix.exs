@@ -381,7 +381,7 @@ defmodule Malachi.MixProject do
       # application needs keep alive, conditional requests and content negotiation, which Bandit and
       # Plug provide with bounded, configurable parsing. Pinned to patch level because this is the
       # first dependency that parses bytes straight off an untrusted socket.
-      {:bandit, "~> 1.14.1"},
+      {:bandit, "~> 1.15.0"},
       {:plug, "~> 1.20.3"},
 
       # Development and test dependencies - PINNED to patch-level
@@ -395,7 +395,7 @@ defmodule Malachi.MixProject do
       {:earmark_parser, "~> 1.4.46", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18.5", only: :test},
       {:mix_audit, "~> 2.1.5", only: [:dev, :test], runtime: false},
-      {:sobelow, "~> 0.18.1", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.19.0", only: [:dev, :test], runtime: false},
       {:benchee, "~> 1.5.0", only: :dev, runtime: false},
       {:benchee_html, "~> 1.0", only: :dev, runtime: false},
       {:stream_data, "~> 1.1", only: [:dev, :test], runtime: false}
