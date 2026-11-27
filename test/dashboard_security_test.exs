@@ -1,4 +1,6 @@
 defmodule Malachi.DashboardSecurityTest do
+  # Not async: the tests change the dashboard's application env (receive timeout, CORS, secure cookie, TLS),
+  # share its one port and its rate-limiter bucket for 127.0.0.1, and recreate the same two users.
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
