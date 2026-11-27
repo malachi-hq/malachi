@@ -25,10 +25,10 @@
 
 const { Router } = require('./lib/router');
 const { Consumer } = require('./lib/consumer');
-const { colors, config, waits, connOptions, parseArgs, fail, groupMemberOf, joinGroupAs } = require('./lib/cli');
+const { colors, config, connectTimeout, connOptions, parseArgs, fail, groupMemberOf, joinGroupAs } = require('./lib/cli');
 const readLanes = require('./lib/read_lanes');
 
-const cfg = { ...config({ username: 'consumer', password: 'consumer123' }), ...waits() };
+const cfg = { ...config({ username: 'consumer', password: 'consumer123' }), connectTimeout: connectTimeout() };
 
 async function run(topic, { group, member, window, max }) {
   console.log(colors.cyan('\nMalachi Subscriber (streaming)'));

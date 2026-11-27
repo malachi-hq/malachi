@@ -42,15 +42,21 @@ function msFromEnv(name, fallback, env = process.env) {
   return Number(raw);
 }
 
-// How long a run that reads once waits for a cluster it cannot reach, and how long each of its connects,
-// and then its authentication, may take: read by the CLIs that route (./consumer.js and ./subscriber.js,
-// which merge this into their config and hand the connect timeout to ./links.js through connOptions), and
-// by no other. Their defaults are what a person running one gets; the variables exist so their own tests
-// can wait seconds rather than tens of them (#390).
+// How long each connect, and then its authentication, may take, for the reading CLIs that connect through
+// ./links.js (./consumer.js and ./subscriber.js, which hand it on through connOptions). The default is what
+// a person running one gets; the variable exists so their own tests can wait seconds rather than tens of
+// them (#390).
+function connectTimeout(env = process.env) {
+  return msFromEnv('MALACHI_CONNECT_TIMEOUT_MS', 15000, env);
+}
+
+// The waits of ./consumer.js, whose run that reads once gives up on a cluster it cannot reach: that wait,
+// and the connect timeout above. ./subscriber.js streams until it is stopped, waits for the cluster as long
+// as it takes, and so reads only connectTimeout(); no other CLI reads either.
 function waits(env = process.env) {
   return {
     unreachableWaitMs: msFromEnv('MALACHI_UNREACHABLE_WAIT_MS', 10000, env),
-    connectTimeout: msFromEnv('MALACHI_CONNECT_TIMEOUT_MS', 15000, env),
+    connectTimeout: connectTimeout(env),
   };
 }
 
@@ -146,4 +152,4 @@ function printAssignment({ generation, ranges }) {
   console.log(colors.gray(`   generation ${generation % 2 ** 32}: ranges ${JSON.stringify([...ranges].sort((a, b) => a - b))}`));
 }
 
-module.exports = { colors, config, msFromEnv, waits, connOptions, parseArgs, fail, sleep, groupMemberOf, joinGroupAs };
+module.exports = { colors, config, msFromEnv, connectTimeout, waits, connOptions, parseArgs, fail, sleep, groupMemberOf, joinGroupAs };

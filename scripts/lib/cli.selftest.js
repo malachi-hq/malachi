@@ -13,7 +13,7 @@ const assert = require('assert');
 const path = require('path');
 const { spawn } = require('child_process');
 const { FakeBroker } = require('./testing/fake_broker');
-const { msFromEnv, waits } = require('./cli');
+const { msFromEnv, connectTimeout, waits } = require('./cli');
 
 // The CLIs started here wait this long for a cluster they cannot reach, and this long for each connect and its
 // authentication, rather than their defaults of 10 and 15 seconds (./cli.js, checked by the case "the waits
@@ -28,9 +28,10 @@ const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 const started = new Set();
 
 // A CLI started against `port`, its output gathered as it comes: `out()`, `exited` (resolves with the exit
-// code), `exitWithin(ms)` (the exit code, or a failure naming what the CLI printed once `ms` passed) and
-// `interrupt()` (SIGINT, as Ctrl-C).
-function start(script, args, port) {
+// code once the CLI has exited and its output is all read), `exitWithin(ms)` (the exit code, or a failure
+// naming what the CLI printed once `ms` passed) and `interrupt()` (SIGINT, as Ctrl-C). `env` is laid over
+// the environment every case gives its CLIs.
+function start(script, args, port, env = {}) {
   const child = spawn(process.execPath, [path.join(__dirname, '..', script), ...args], {
     env: {
       ...process.env,
@@ -40,12 +41,15 @@ function start(script, args, port) {
       MALACHI_PASS: 'p',
       MALACHI_UNREACHABLE_WAIT_MS: String(WAIT_MS),
       MALACHI_CONNECT_TIMEOUT_MS: String(CONNECT_MS),
+      ...env,
     },
   });
   let out = '';
   child.stdout.on('data', (d) => (out += d));
   child.stderr.on('data', (d) => (out += d));
-  const exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)));
+  // 'close', not 'exit': the CLI may have exited while its last output is still on its way, and a case
+  // reads that output as soon as this resolves
+  const exited = new Promise((resolve) => child.on('close', (code) => resolve(code)));
   started.add(child);
   exited.then(() => started.delete(child));
   const exitWithin = (ms) => {
@@ -216,6 +220,8 @@ check('--member without --group is refused by both group CLIs', async () => {
 
 check('the waits default to 10 s for an unreachable cluster and 15 s a connect, and refuse what is not a wait', async () => {
   assert.deepStrictEqual(waits({}), { unreachableWaitMs: 10000, connectTimeout: 15000 });
+  assert.strictEqual(connectTimeout({}), 15000);
+  assert.strictEqual(connectTimeout({ MALACHI_CONNECT_TIMEOUT_MS: '700', MALACHI_UNREACHABLE_WAIT_MS: 'soon' }), 700);
   assert.deepStrictEqual(waits({ MALACHI_UNREACHABLE_WAIT_MS: '', MALACHI_CONNECT_TIMEOUT_MS: '' }), {
     unreachableWaitMs: 10000,
     connectTimeout: 15000,
@@ -231,42 +237,51 @@ check('the waits default to 10 s for an unreachable cluster and 15 s a connect, 
   assert.strictEqual(msFromEnv('MALACHI_UNREACHABLE_WAIT_MS', 10000, { MALACHI_UNREACHABLE_WAIT_MS: '2147483647' }), 2147483647);
 });
 
-check('a CLI that does not route reads neither wait, so a value meant for the routing CLIs cannot stop it', async () => {
+check('the producer reads neither wait, so a value meant for the reading CLIs cannot stop it', async () => {
   const broker = await new FakeBroker().start();
   broker.setRoutes('t', [[0, 0, 16, 'self']]);
   try {
-    const child = spawn(process.execPath, [path.join(__dirname, '..', 'producer.js'), 't', '1'], {
-      env: {
-        ...process.env,
-        MALACHI_HOST: '127.0.0.1',
-        MALACHI_PORT: String(broker.port),
-        MALACHI_USER: 'u',
-        MALACHI_PASS: 'p',
-        MALACHI_UNREACHABLE_WAIT_MS: 'soon',
-        MALACHI_CONNECT_TIMEOUT_MS: 'soon',
-      },
-    });
-    let out = '';
-    child.stdout.on('data', (d) => (out += d));
-    child.stderr.on('data', (d) => (out += d));
-    const code = await new Promise((resolve) => child.on('exit', resolve));
-    assert.strictEqual(code, 0, out);
-    assert.match(out, /Appended 1 record\(s\)/);
+    const cli = start('producer.js', ['t', '1'], broker.port, { MALACHI_UNREACHABLE_WAIT_MS: 'soon', MALACHI_CONNECT_TIMEOUT_MS: 'soon' });
+    assert.strictEqual(await cli.exitWithin(40000), 0, cli.out());
+    assert.match(cli.out(), /Appended 1 record\(s\)/);
   } finally {
     broker.stop();
   }
 });
 
+check('the subscriber gives up a connect that is never answered after its connect timeout', async () => {
+  const silent = await mute();
+  try {
+    const started = Date.now();
+    const cli = start('subscriber.js', ['t'], silent.port);
+    // one address only: the routes are asked for there, and its authentication is left unanswered
+    assert.strictEqual(await cli.exitWithin(CONNECT_MS + 5000), 1);
+    const waited = Date.now() - started;
+    assert.match(cli.out(), /Error: metadata_unavailable/);
+    assert.ok(waited >= CONNECT_MS && waited < CONNECT_MS + 5000, `gave up after ${waited} ms`);
+  } finally {
+    silent.stop();
+  }
+});
+
+check('the subscriber reads no unreachable wait, so a value meant for the consumer cannot stop it', async () => {
+  const broker = await new FakeBroker().start();
+  broker.setRoutes('t', [[0, 0, 16, 'self']]);
+  broker.write('t', 0, ['first']);
+  const cli = start('subscriber.js', ['t'], broker.port, { MALACHI_UNREACHABLE_WAIT_MS: 'soon' });
+  try {
+    await untilOut(cli, /first/);
+    assert.doesNotMatch(cli.out(), /MALACHI_UNREACHABLE_WAIT_MS/);
+  } finally {
+    cli.kill();
+    broker.stop();
+  }
+});
+
 check('a CLI started with a wait that is not one exits non-zero and says which variable', async () => {
-  const child = spawn(process.execPath, [path.join(__dirname, '..', 'consumer.js'), 't'], {
-    env: { ...process.env, MALACHI_HOST: '127.0.0.1', MALACHI_PORT: String(await freePort()), MALACHI_UNREACHABLE_WAIT_MS: 'soon' },
-  });
-  let out = '';
-  child.stdout.on('data', (d) => (out += d));
-  child.stderr.on('data', (d) => (out += d));
-  const code = await new Promise((resolve) => child.on('exit', resolve));
-  assert.notStrictEqual(code, 0, out);
-  assert.match(out, /MALACHI_UNREACHABLE_WAIT_MS must be a positive number of milliseconds up to 2147483647/);
+  const cli = start('consumer.js', ['t'], await freePort(), { MALACHI_UNREACHABLE_WAIT_MS: 'soon' });
+  assert.notStrictEqual(await cli.exitWithin(40000), 0, cli.out());
+  assert.match(cli.out(), /MALACHI_UNREACHABLE_WAIT_MS must be a positive number of milliseconds up to 2147483647/);
 });
 
 async function selfTest() {
