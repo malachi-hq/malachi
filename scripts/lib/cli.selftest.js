@@ -16,7 +16,8 @@ const { FakeBroker } = require('./testing/fake_broker');
 const { msFromEnv, waits } = require('./cli');
 
 // The CLIs started here wait this long for a cluster they cannot reach, and this long for each connect and its
-// authentication, rather than their defaults of 10 and 15 seconds (./cli.js, checked in the last case): the
+// authentication, rather than their defaults of 10 and 15 seconds (./cli.js, checked by the case "the waits
+// default to 10 s ..."): the
 // cases prove how the waits behave, which shorter ones prove as well, in seconds rather than a minute and more.
 const WAIT_MS = 2000;
 const CONNECT_MS = 3000;
@@ -223,8 +224,36 @@ check('the waits default to 10 s for an unreachable cluster and 15 s a connect, 
     unreachableWaitMs: 2500,
     connectTimeout: 700,
   });
-  for (const bad of ['0', '-1', '1.5', '10s', ' 10', 'abc']) {
-    assert.throws(() => msFromEnv('MALACHI_UNREACHABLE_WAIT_MS', 10000, { MALACHI_UNREACHABLE_WAIT_MS: bad }), /positive number of milliseconds/, bad);
+  for (const bad of ['0', '-1', '1.5', '10s', ' 10', 'abc', '2147483648', '3000000000']) {
+    assert.throws(() => msFromEnv('MALACHI_UNREACHABLE_WAIT_MS', 10000, { MALACHI_UNREACHABLE_WAIT_MS: bad }), /positive number of milliseconds up to 2147483647/, bad);
+  }
+  // the longest wait a Node timer holds, and no longer: a timer past it would run after 1 ms
+  assert.strictEqual(msFromEnv('MALACHI_UNREACHABLE_WAIT_MS', 10000, { MALACHI_UNREACHABLE_WAIT_MS: '2147483647' }), 2147483647);
+});
+
+check('a CLI that does not route reads neither wait, so a value meant for the routing CLIs cannot stop it', async () => {
+  const broker = await new FakeBroker().start();
+  broker.setRoutes('t', [[0, 0, 16, 'self']]);
+  try {
+    const child = spawn(process.execPath, [path.join(__dirname, '..', 'producer.js'), 't', '1'], {
+      env: {
+        ...process.env,
+        MALACHI_HOST: '127.0.0.1',
+        MALACHI_PORT: String(broker.port),
+        MALACHI_USER: 'u',
+        MALACHI_PASS: 'p',
+        MALACHI_UNREACHABLE_WAIT_MS: 'soon',
+        MALACHI_CONNECT_TIMEOUT_MS: 'soon',
+      },
+    });
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (out += d));
+    const code = await new Promise((resolve) => child.on('exit', resolve));
+    assert.strictEqual(code, 0, out);
+    assert.match(out, /Appended 1 record\(s\)/);
+  } finally {
+    broker.stop();
   }
 });
 
@@ -237,7 +266,7 @@ check('a CLI started with a wait that is not one exits non-zero and says which v
   child.stderr.on('data', (d) => (out += d));
   const code = await new Promise((resolve) => child.on('exit', resolve));
   assert.notStrictEqual(code, 0, out);
-  assert.match(out, /MALACHI_UNREACHABLE_WAIT_MS must be a positive number of milliseconds/);
+  assert.match(out, /MALACHI_UNREACHABLE_WAIT_MS must be a positive number of milliseconds up to 2147483647/);
 });
 
 async function selfTest() {

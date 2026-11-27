@@ -8,7 +8,7 @@ defmodule CliSelftestJsTest do
   use ExUnit.Case, async: true
 
   @lib Path.expand("../../scripts/lib", __DIR__)
-  @selftests [{"cli.selftest.js", "passed 10 cli cases"}, {"group_member.selftest.js", "passed 23 group member cases"}]
+  @selftests [{"cli.selftest.js", "passed 11 cli cases"}, {"group_member.selftest.js", "passed 23 group member cases"}]
 
   setup_all do
     # A missing runtime fails loudly instead of skipping: a skipped client test reads as a passing one.

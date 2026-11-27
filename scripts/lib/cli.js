@@ -24,23 +24,29 @@ function config(defaults = {}) {
     topic: process.env.MALACHI_TOPIC || defaults.topic || 'events',
     username: process.env.MALACHI_USER || defaults.username,
     password: process.env.MALACHI_PASS || defaults.password,
-    ...waits(),
   };
 }
 
+// The longest wait a Node timer holds: setTimeout runs a longer one after 1 ms, with only a warning.
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 // A wait in milliseconds from the variable `name`, `fallback` when it is unset or empty. Anything but a
-// positive whole number is refused, never read as the fallback: a typo would otherwise wait the default
-// in silence.
+// positive whole number up to MAX_TIMER_MS is refused, never read as the fallback or cut short: a typo
+// would otherwise wait the default in silence, and too long a wait would end at once.
 function msFromEnv(name, fallback, env = process.env) {
   const raw = env[name];
   if (raw === undefined || raw === '') return fallback;
-  if (!/^[1-9][0-9]*$/.test(raw)) throw new Error(`${name} must be a positive number of milliseconds, not ${JSON.stringify(raw)}`);
+  if (!/^[1-9][0-9]*$/.test(raw) || Number(raw) > MAX_TIMER_MS) {
+    throw new Error(`${name} must be a positive number of milliseconds up to ${MAX_TIMER_MS}, not ${JSON.stringify(raw)}`);
+  }
   return Number(raw);
 }
 
-// How long a run that reads once waits for a cluster it cannot reach (./consumer.js), and how long each
-// connect, and then its authentication, may take (./client.js). Their defaults are what a person running a
-// CLI gets; the variables exist so the CLI's own tests can wait seconds rather than tens of them (#390).
+// How long a run that reads once waits for a cluster it cannot reach, and how long each of its connects,
+// and then its authentication, may take: read by the CLIs that route (./consumer.js and ./subscriber.js,
+// which merge this into their config and hand the connect timeout to ./links.js through connOptions), and
+// by no other. Their defaults are what a person running one gets; the variables exist so their own tests
+// can wait seconds rather than tens of them (#390).
 function waits(env = process.env) {
   return {
     unreachableWaitMs: msFromEnv('MALACHI_UNREACHABLE_WAIT_MS', 10000, env),
@@ -49,7 +55,8 @@ function waits(env = process.env) {
 }
 
 // What a routing client connects with (./links.js): the config's credentials, how long a request may wait
-// for its answer, and how long a connect and its authentication may take.
+// for its answer, and how long a connect and its authentication may take (the config's own, from waits(),
+// or the client's default when the config has none).
 function connOptions(cfg, timeout) {
   return { user: cfg.username, pass: cfg.password, timeout, connectTimeout: cfg.connectTimeout };
 }

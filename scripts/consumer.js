@@ -24,9 +24,9 @@
 
 const { Router } = require('./lib/router');
 const { Fetcher } = require('./lib/fetcher');
-const { colors, config, connOptions, parseArgs, fail, sleep, groupMemberOf, joinGroupAs } = require('./lib/cli');
+const { colors, config, waits, connOptions, parseArgs, fail, sleep, groupMemberOf, joinGroupAs } = require('./lib/cli');
 
-const cfg = config({ username: 'consumer', password: 'consumer123' });
+const cfg = { ...config({ username: 'consumer', password: 'consumer123' }), ...waits() };
 // How long one pass over the ranges may be held while following: split across them by the Fetcher, at
 // least 200 ms a range, so past 25 ranges a pass is held 200 ms a range.
 const FOLLOW_WAIT_MS = 5000;
