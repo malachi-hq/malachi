@@ -45,10 +45,44 @@ function tlsFrom(flags, env = process.env) {
   }
 }
 
-// What a routing client connects with (./links.js): the config's credentials and TLS settings, and how long
-// a request may wait for its answer.
+// The longest wait a Node timer holds: setTimeout runs a longer one after 1 ms, with only a warning.
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+// A wait in milliseconds from the variable `name`, `fallback` when it is unset or empty. Anything but a
+// positive whole number up to MAX_TIMER_MS is refused, never read as the fallback or cut short: a typo
+// would otherwise wait the default in silence, and too long a wait would end at once.
+function msFromEnv(name, fallback, env = process.env) {
+  const raw = env[name];
+  if (raw === undefined || raw === '') return fallback;
+  if (!/^[1-9][0-9]*$/.test(raw) || Number(raw) > MAX_TIMER_MS) {
+    throw new Error(`${name} must be a positive number of milliseconds up to ${MAX_TIMER_MS}, not ${JSON.stringify(raw)}`);
+  }
+  return Number(raw);
+}
+
+// How long each connect, and then its authentication, may take, for the reading CLIs that connect through
+// ./links.js (./consumer.js and ./subscriber.js, which hand it on through connOptions). The default is what
+// a person running one gets; the variable exists so their own tests can wait seconds rather than tens of
+// them (#390).
+function connectTimeout(env = process.env) {
+  return msFromEnv('MALACHI_CONNECT_TIMEOUT_MS', 15000, env);
+}
+
+// The waits of ./consumer.js, whose run that reads once gives up on a cluster it cannot reach: that wait,
+// and the connect timeout above. ./subscriber.js streams until it is stopped, waits for the cluster as long
+// as it takes, and so reads only connectTimeout(); no other CLI reads either.
+function waits(env = process.env) {
+  return {
+    unreachableWaitMs: msFromEnv('MALACHI_UNREACHABLE_WAIT_MS', 10000, env),
+    connectTimeout: connectTimeout(env),
+  };
+}
+
+// What a routing client connects with (./links.js): the config's credentials and TLS settings, how long a
+// request may wait for its answer, and how long a connect and its authentication may take (the config's own,
+// from waits(), or the client's default when the config has none).
 function connOptions(cfg, timeout) {
-  return { user: cfg.username, pass: cfg.password, tls: cfg.tls, timeout };
+  return { user: cfg.username, pass: cfg.password, tls: cfg.tls, timeout, connectTimeout: cfg.connectTimeout };
 }
 
 // Splits argv into positional args and a flag map. `--group g`/`--max 10` take the next token as a value;
@@ -137,4 +171,4 @@ function printAssignment({ generation, ranges }) {
   console.log(colors.gray(`   generation ${generation % 2 ** 32}: ranges ${JSON.stringify([...ranges].sort((a, b) => a - b))}`));
 }
 
-module.exports = { colors, config, tlsFrom, connOptions, parseArgs, fail, sleep, groupMemberOf, joinGroupAs };
+module.exports = { colors, config, tlsFrom, msFromEnv, connectTimeout, waits, connOptions, parseArgs, fail, sleep, groupMemberOf, joinGroupAs };

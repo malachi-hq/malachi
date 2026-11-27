@@ -445,13 +445,13 @@ defmodule Malachi.Metadata do
   same state, at the same `at_ms`, always yields the same result on every replica. On failure the
   state is returned unchanged with an `{:error, reason}` reply.
 
-  `at_ms` is the epoch ms the command was accepted at, and only `register_segment` reads it: it
-  becomes the new segment's `opened_at`. Inside ra it is the timestamp the leader wrote into the log
+  `at_ms` is the epoch ms the command was accepted at. `register_segment` reads it as the new segment's
+  `opened_at`, and `set_topic_hold` as the hold's `since_ms`. Inside ra it is the timestamp the leader wrote into the log
   entry (`Malachi.Cluster.MetadataMachine`), so every replica and every replay stamps the same value
   without the command carrying it. A cache applying a command it already submitted passes its own
   clock, and the next re-seed replaces that guess with the replicated value. `nil` (the two argument
   form, for callers with no clock) leaves `opened_at` unset, which `Malachi.Cluster.SegmentRoll`
-  treats as already due.
+  treats as already due, and refuses a hold with `:invalid_hold`, since no replica could store its time.
 
   `register_segment` requires the `segment_id` to be **globally unique** across the cluster
   (the broker-assigned contract). Within a vnode this is checked (`:segment_exists`), but

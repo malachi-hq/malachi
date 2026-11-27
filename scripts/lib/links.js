@@ -62,7 +62,13 @@ class Links {
   // null then. A TLS verification failure is thrown instead: it is the client's configuration, not a broker
   // that is down, and counting it as a connect failure to retry would hide why nothing connects.
   async connect({ host, port }) {
-    const client = new MalachiClient({ host, port, timeout: this.connOpts.timeout, tls: this.connOpts.tls });
+    const client = new MalachiClient({
+      host,
+      port,
+      timeout: this.connOpts.timeout,
+      connectTimeout: this.connOpts.connectTimeout,
+      tls: this.connOpts.tls,
+    });
     try {
       await client.connect(this.connOpts.user, this.connOpts.pass);
       return client;

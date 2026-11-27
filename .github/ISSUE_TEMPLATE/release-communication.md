@@ -13,7 +13,7 @@ before it is published.
 - [ ] Generate the post with `mix malachi.release.post vX.Y.Z` and write its narrative.
 - [ ] Open the post's pull request and merge it.
 - [ ] Comment the post's link on the release's Announcements discussion.
-- [ ] Send the dev.to draft with `mix malachi.release.post --devto site/blog/<post>.md`, then review and publish it on dev.to.
+- [ ] Review the dev.to draft the feed import made from the post, add its tags, and publish it on dev.to.
 
 ## From the browser, each post approved before it is published
 

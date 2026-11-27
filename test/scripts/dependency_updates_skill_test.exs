@@ -13,6 +13,8 @@ defmodule DependencyUpdatesSkillTest do
   # disagrees with the table would hand the skill a queue shaped differently from how it verifies it.
   use ExUnit.Case, async: true
 
+  alias Malachi.Test.WorkflowText
+
   @root Path.expand("../..", __DIR__)
   @skill Path.join(@root, ".claude/skills/dependency-updates/SKILL.md")
 
@@ -404,7 +406,7 @@ defmodule DependencyUpdatesSkillTest do
           else: Map.fetch!(@gate_commands, gate)
 
       if command do
-        steps = workflow_steps(Path.join(@root, ".github/workflows/#{workflow}"))
+        steps = WorkflowText.steps(File.read!(WorkflowText.path(workflow)))
 
         assert Enum.any?(steps, &(String.contains?(&1.run, command) and blocking?(&1))),
                "#{workflow} has no blocking step running #{inspect(command)} for #{gate}"
@@ -435,43 +437,6 @@ defmodule DependencyUpdatesSkillTest do
       [_, "!", key] -> entry[key] != true
       nil -> flunk("a gate step runs under a condition this test cannot read: #{condition}")
     end
-  end
-
-  defp workflow_steps(path) do
-    [document] = :yamerl_constr.file(String.to_charlist(path), [:str_node_as_binary])
-    {"jobs", jobs} = List.keyfind(document, "jobs", 0)
-
-    for {_job, settings} <- jobs,
-        job = Map.new(settings),
-        step <- Map.get(job, "steps", []),
-        step = Map.new(step) do
-      %{
-        run: step["run"] || "",
-        conditions: Enum.reject([job["if"], step["if"]], &is_nil/1),
-        continue_on_error:
-          Enum.filter([job["continue-on-error"], step["continue-on-error"]], &(&1 not in [nil, false])),
-        matrix: matrix_entries(job["strategy"])
-      }
-    end
-  end
-
-  # The entries a job runs for: every combination of its axes, plus its `include` entries, or one empty
-  # entry when it has no matrix. An `exclude` is not read, so a matrix with one fails the test instead
-  # of counting an entry that never runs.
-  defp matrix_entries(nil), do: [%{}]
-
-  defp matrix_entries(strategy) do
-    matrix = Map.new(Map.new(strategy)["matrix"] || [])
-    refute Map.has_key?(matrix, "exclude"), "a matrix exclude is not read"
-    {include, axes} = Map.pop(matrix, "include", [])
-
-    combinations =
-      Enum.reduce(axes, [%{}], fn {key, values}, acc ->
-        for entry <- acc, value <- values, do: Map.put(entry, key, value)
-      end)
-
-    combinations = if axes == %{} and include != [], do: [], else: combinations
-    combinations ++ Enum.map(include, &Map.new/1)
   end
 
   test "every dependency mix.exs declares has a tier in the gate table" do

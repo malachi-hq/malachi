@@ -33,9 +33,11 @@ defmodule Malachi.Cluster.MachineVersioningTest do
   alias Malachi.Cluster.RingTopology
   alias Malachi.Metadata
 
-  # {machine, pure module, how the pure module is applied without ra}
+  # {machine, pure module, how the pure module is applied without ra}. Metadata takes the clock since the legal
+  # hold (#349) stamps a hold with it: applied without one, the pure module refuses every hold the machine
+  # places, which the property below found only when it generated a hold on a topic it had created (#390).
   @machines [
-    {MetadataMachine, Metadata, :no_clock},
+    {MetadataMachine, Metadata, :clock},
     {LeaseMachine, Lease, :clock},
     {RingMachine, Ring, :no_clock},
     {UserMachine, UserRegistry, :clock},

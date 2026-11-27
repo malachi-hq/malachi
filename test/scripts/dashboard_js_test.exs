@@ -4,6 +4,8 @@ defmodule Malachi.DashboardJsTest do
   # site/checks/dashboard.mjs.
   use ExUnit.Case, async: true
 
+  alias Malachi.Test.NodeUnit
+
   @dir Path.expand("../../priv/static/dashboard", __DIR__)
   @unit_tests Path.expand("dashboard_js.test.cjs", __DIR__)
 
@@ -19,9 +21,6 @@ defmodule Malachi.DashboardJsTest do
   end
 
   test "the pure functions pass their unit tests", %{node: node} do
-    {output, status} = System.cmd(node, ["--test", @unit_tests], stderr_to_stdout: true)
-
-    assert status == 0, output
-    assert output =~ ~r/# fail 0/
+    NodeUnit.assert_pass(node, @unit_tests, tests: 9)
   end
 end

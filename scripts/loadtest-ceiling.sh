@@ -26,6 +26,7 @@
 #   CONNS_LADDER_<batch>="..." (that batch size's ladder; defaults below for 100, 512, 1024 and 4096)
 #   MARKER_TIMEOUT=300  MALACHI_USER=admin  MALACHI_PASS=admin123  MALACHI_PORT=4040
 #   MALACHI_DASHBOARD_PORT=4041  CURL=curl (the client the flush scrape uses)
+#   BOOT_POLL_S=1  BOOT_SETTLE_S=1.5 (how often a booting server's port is tried, and the wait once it opens)
 # Exit: 0 with a headline peak, 1 without one ($OUT is still written) or on a failed step, 2 on invalid
 # knobs.
 #
@@ -66,6 +67,21 @@ WARM="${WARM:-3}"
 # which took 25s at 512 connections on the CI runner, so this bounds a stuck connect phase rather than
 # a slow one.
 MARKER_TIMEOUT="${MARKER_TIMEOUT:-300}"
+# How often a booting server's port is tried, and how long to wait once it opens, in seconds: the port
+# opens before the auth and topic path is ready. The defaults are what a sweep runs with; the script's own
+# tests, whose server is a bare listener, try every tenth of a second and wait nothing (#390).
+BOOT_POLL_S="${BOOT_POLL_S:-1}"
+BOOT_SETTLE_S="${BOOT_SETTLE_S:-1.5}"
+for knob in BOOT_POLL_S BOOT_SETTLE_S; do
+  if ! [[ "${!knob}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "$knob must be a number of seconds, got '${!knob}'" >&2
+    exit 2
+  fi
+done
+if ! awk -v s="$BOOT_POLL_S" 'BEGIN { exit !(s > 0) }'; then
+  echo "BOOT_POLL_S must be above 0, got '$BOOT_POLL_S'" >&2
+  exit 2
+fi
 # The span sampled inside the measured window: one second short of DUR when DUR allows it. The window
 # ends when the generator stops measuring, and a generator that has already exited by the closing read
 # leaves its side unsampled.
@@ -231,10 +247,13 @@ boot_server() {
   MIX_ENV=dev ERL_AFLAGS="+S ${SRV_BUDGET}:${SRV_BUDGET} +sbwt none +sbwtdcpu none +sbwtdio none" \
     $srv_pin mix run --no-halt >> "$SERVER_LOG" 2>&1 &
   SERVER_PID=$!
-  for _ in $(seq 1 60); do
-    if port_open; then sleep 1.5; break; fi # extra settle so the auth/topic path is ready
+  # 60 tries at the default poll; the same 60 seconds at any other
+  local tries
+  tries=$(awk -v s="$BOOT_POLL_S" 'BEGIN { t = int(60 / s); print (t < 1 ? 1 : t) }')
+  for _ in $(seq 1 "$tries"); do
+    if port_open; then sleep "$BOOT_SETTLE_S"; break; fi # extra settle so the auth/topic path is ready
     if ! kill -0 "$SERVER_PID" 2> /dev/null; then echo "server died on boot; see $SERVER_LOG" >&2; return 1; fi
-    sleep 1
+    sleep "$BOOT_POLL_S"
   done
   port_open || { echo "server did not open :$MALACHI_PORT; see $SERVER_LOG" >&2; return 1; }
   # taskset/mix exec straight into the beam, so $! IS the server beam: sample and kill it directly.
