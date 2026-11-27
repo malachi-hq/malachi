@@ -43,6 +43,20 @@ defmodule PublishWorkflowsTest do
       assert jobs |> Map.keys() |> Enum.sort() == ["chaos", "commit-results", "loadtest", "publish"]
     end
 
+    test "a pull request sweeps the headline batch size alone, and a push to main every one", %{results: text} do
+      # The comment on a pull request shows the headline peak only; main's run is the curve the site publishes
+      # (#390). An empty BATCH_LADDER is the script's default ladder (test/scripts/loadtest_ceiling_test.exs).
+      {"loadtest", job} = List.keyfind(WorkflowText.yaml_jobs(text), "loadtest", 0)
+      [sweep] = for step <- job["steps"], step = Map.new(step), (step["run"] || "") =~ "loadtest-ceiling.sh", do: step
+      env = Map.new(sweep["env"])
+
+      assert env["BATCH_LADDER"] == "${{ github.event_name == 'pull_request' && '10' || '' }}"
+
+      # the pull request's ladder must hold the headline the script reports, or every pull request exits 2
+      script = File.read!(Path.expand("../../scripts/loadtest-ceiling.sh", __DIR__))
+      assert script =~ ~s[HEADLINE_BATCH="${HEADLINE_BATCH:-10}"]
+    end
+
     test "every job skips a push by the release App, so its commits never start another measurement",
          %{results_jobs: jobs} do
       # Either the job skips the App's pushes, or it runs on a pull request only, which the App never opens.

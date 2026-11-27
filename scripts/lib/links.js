@@ -60,7 +60,7 @@ class Links {
   // A new authenticated connection to `address`, destroyed again if it or its authentication fails;
   // null then.
   async connect({ host, port }) {
-    const client = new MalachiClient({ host, port, timeout: this.connOpts.timeout });
+    const client = new MalachiClient({ host, port, timeout: this.connOpts.timeout, connectTimeout: this.connOpts.connectTimeout });
     try {
       await client.connect(this.connOpts.user, this.connOpts.pass);
       return client;

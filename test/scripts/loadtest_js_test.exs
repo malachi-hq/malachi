@@ -319,8 +319,17 @@ defmodule LoadtestJsTest do
   describe "against a broker that stalls or refuses" do
     @fake Path.expand("../../scripts/lib/testing/run_against_fake.js", __DIR__)
 
-    defp against_fake(ctx, policy, args) do
-      {output, 0} = System.cmd(ctx.node, [@fake, Jason.encode!(policy), "--" | args])
+    # The generator's setup and drain waits, shortened from their 30 s and 15 s for the cases that wait one out
+    # (MALACHI_LOADTEST_SETUP_TIMEOUT_MS, MALACHI_LOADTEST_DRAIN_MS in scripts/loadtest.js, #390).
+    @setup_ms 3_000
+    @drain_ms 2_000
+    @short_waits [
+      {"MALACHI_LOADTEST_SETUP_TIMEOUT_MS", Integer.to_string(@setup_ms)},
+      {"MALACHI_LOADTEST_DRAIN_MS", Integer.to_string(@drain_ms)}
+    ]
+
+    defp against_fake(ctx, policy, args, env \\ []) do
+      {output, 0} = System.cmd(ctx.node, [@fake, Jason.encode!(policy), "--" | args], env: env)
       Jason.decode!(output)
     end
 
@@ -337,31 +346,48 @@ defmodule LoadtestJsTest do
       assert run["stderr"] =~ "permission_denied"
     end
 
-    @tag timeout: 120_000
     test "a prepopulate the broker never answers fails after one wait, not one wait per chunk", ctx do
       # twenty chunks of 1000 records against a window of 16 appends: the seventeenth waits for room, and that
-      # one wait of 30 seconds is the bound; one wait per chunk left would be two minutes
-      run = against_fake(ctx, %{append: "silent"}, ~w(--scenario fetch --prepopulate 20000 --duration 1 --json))
+      # one setup wait is the bound; one wait per chunk left would be four of them
+      args = ~w(--scenario fetch --prepopulate 20000 --duration 1 --json)
+      run = against_fake(ctx, %{append: "silent"}, args, @short_waits)
       assert run["code"] == 1
       assert run["stderr"] =~ "prepopulate_timeout"
-      assert run["elapsedMs"] < 60_000
+      assert run["elapsedMs"] >= @setup_ms and run["elapsedMs"] < 2 * @setup_ms + 2_000
     end
 
-    @tag timeout: 120_000
     test "an open loop whose fetches are never answered reports and exits, opening nothing after it closed", ctx do
-      run = against_fake(ctx, %{fetch: "silent"}, ~w(--scenario fetch --rate 20 --prepopulate 5 --duration 1 --json))
+      args = ~w(--scenario fetch --rate 20 --prepopulate 5 --duration 1 --json)
+      run = against_fake(ctx, %{fetch: "silent"}, args, @short_waits)
       assert run["code"] == 0
       assert %{"mode" => "open-loop", "ops" => 0} = Jason.decode!(run["stdout"])
-      # the 15 second drain, then out: no queued fetch reconnects after the readers closed
-      assert run["elapsedMs"] < 25_000
+      # the drain, then out: no queued fetch reconnects after the readers closed
+      assert run["elapsedMs"] < 1_000 + @drain_ms + 5_000
     end
 
-    @tag timeout: 120_000
-    test "an open loop whose appends are never answered ends 15 seconds after its window, and reports", ctx do
-      run = against_fake(ctx, %{append: "silent"}, ~w(--scenario produce --rate 50 --duration 1 --json))
+    test "an open loop whose appends are never answered ends a drain after its window, and reports", ctx do
+      run = against_fake(ctx, %{append: "silent"}, ~w(--scenario produce --rate 50 --duration 1 --json), @short_waits)
       assert run["code"] == 0
       assert %{"ops" => 0, "mode" => "open-loop"} = Jason.decode!(run["stdout"])
-      assert run["elapsedMs"] < 25_000
+      # the measured second and then the whole drain: the appends in flight are waited for, not dropped
+      assert run["elapsedMs"] >= 1_000 + @drain_ms and run["elapsedMs"] < 1_000 + @drain_ms + 5_000
+    end
+
+    test "a measured run waits 30 s at a setup step and 15 s for its drain, which only these cases shorten" do
+      script = File.read!(Path.expand("../../scripts/loadtest.js", __DIR__))
+      assert script =~ "msFromEnv('MALACHI_LOADTEST_DRAIN_MS', 15000)"
+      assert script =~ "msFromEnv('MALACHI_LOADTEST_SETUP_TIMEOUT_MS', 30000)"
+    end
+
+    test "a wait that is not one is refused before anything runs", ctx do
+      {output, code} =
+        System.cmd(ctx.node, [Path.expand("../../scripts/loadtest.js", __DIR__), "--duration", "1"],
+          env: [{"MALACHI_LOADTEST_DRAIN_MS", "soon"}],
+          stderr_to_stdout: true
+        )
+
+      assert code != 0
+      assert output =~ "MALACHI_LOADTEST_DRAIN_MS must be a positive number of milliseconds"
     end
   end
 

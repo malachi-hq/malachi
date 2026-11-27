@@ -24,9 +24,9 @@
 
 const { Router } = require('./lib/router');
 const { Fetcher } = require('./lib/fetcher');
-const { colors, config, connOptions, parseArgs, fail, sleep, groupMemberOf, joinGroupAs } = require('./lib/cli');
+const { colors, config, waits, connOptions, parseArgs, fail, sleep, groupMemberOf, joinGroupAs } = require('./lib/cli');
 
-const cfg = config({ username: 'consumer', password: 'consumer123' });
+const cfg = { ...config({ username: 'consumer', password: 'consumer123' }), ...waits() };
 // How long one pass over the ranges may be held while following: split across them by the Fetcher, at
 // least 200 ms a range, so past 25 ranges a pass is held 200 ms a range.
 const FOLLOW_WAIT_MS = 5000;
@@ -35,11 +35,11 @@ const FOLLOW_WAIT_MS = 5000;
 const RETRY_MS = 200;
 // Answers that mean no broker took the fetch (the range's broker, or every one the routes are read from):
 // waited out, as a broker that restarts comes back, and so is a group join no broker answers. A follower
-// waits as long as it takes; a run that reads once gives up once UNREACHABLE_WAIT_MS passed since the first
-// of those was asked, waiting then for the attempt still on its way, which may try several brokers in turn
-// (./client.js bounds each connect, and then its authentication, at 15 s; a request at its timeout).
+// waits as long as it takes; a run that reads once gives up once cfg.unreachableWaitMs (10 s unless
+// MALACHI_UNREACHABLE_WAIT_MS says otherwise, ./lib/cli.js) passed since the first of those was asked, waiting
+// then for the attempt still on its way, which may try several brokers in turn (each connect, and then its
+// authentication, bounded at cfg.connectTimeout, 15 s by default; a request at its timeout).
 const UNREACHABLE = new Set(['connect_failed', 'metadata_unavailable']);
-const UNREACHABLE_WAIT_MS = 10000;
 
 function printRecord(rec, n) {
   const value = rec.value.toString('utf8');
@@ -60,7 +60,7 @@ async function run(topic, { group, member, max, follow }) {
     startFrom: group ? { committed: group } : 'earliest',
   });
   // the join waits for the cluster as the reading does
-  const unreachableWaitMs = follow ? Infinity : UNREACHABLE_WAIT_MS;
+  const unreachableWaitMs = follow ? Infinity : cfg.unreachableWaitMs;
   const groupMember = group ? await joinGroupAs({ cfg, router, topic, group, member, reader: fetcher, waitMs: unreachableWaitMs }) : null;
   console.log(colors.green(`Connected (authenticated as ${cfg.username})\n`));
 

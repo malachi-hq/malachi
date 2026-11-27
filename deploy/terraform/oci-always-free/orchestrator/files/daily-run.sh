@@ -107,11 +107,13 @@ list_leftovers() {
 # after a destroy of all 28, and none were left). So the sweep after the destroy counts again every 30 seconds until
 # nothing is left or SWEEP_SETTLE_LIMIT is reached, and only a count still above zero then is a leak, reported with
 # the resources it found. A count that cannot be made returns at once, as in sweep. The sweep before the apply
-# stays a single count: it runs a day after the last destroy.
+# stays a single count: it runs a day after the last destroy. The limit starts after the first count, so all of it
+# goes to the recounts (#390): started before, a slow first count could use it up and leave none.
 sweep_after_destroy() {
-  local rc=0 deadline=$((SECONDS + SWEEP_SETTLE_LIMIT))
+  local rc=0 deadline
   sweep "after destroy" || rc=$?
   [ "$rc" -eq 1 ] || return "$rc"
+  deadline=$((SECONDS + SWEEP_SETTLE_LIMIT))
   log "OCI Search may still list what the destroy removed: counting again every 30 s, for up to ${SWEEP_SETTLE_LIMIT} s"
   while [ "$SECONDS" -lt "$deadline" ]; do
     sleep 30

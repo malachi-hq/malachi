@@ -349,8 +349,11 @@ check('a member that found no broker for a while heartbeats again once one is ba
     const back = await new FakeBroker().start(broker.port);
     brokers.push(back);
     back.group = broker.group;
+    // answered a little after the call arrives, as a loaded runner does: the member holds [0] again only
+    // once it has read the answer, so the case waits for that, not for the call reaching the broker (#390)
+    back.groupPolicy = () => ({ delayMs: 200 });
     await untilTrue(() => back.groupCalls.length >= 1, 3000);
-    assert.deepStrictEqual(seen.at(-1), [0]);
+    await untilTrue(() => JSON.stringify(seen.at(-1)) === '[0]', 3000);
   }),
 );
 

@@ -118,11 +118,17 @@ jobs:
       # ceiling and the headline batch size's peak is the flat result. loadtest-ceiling.sh boots, samples
       # both sides' CPU and tears down inside its own shell, so the whole run lives in one step and the
       # working tree stays clean (the recorded git ref names a real commit, not <sha>-dirty).
+      #
+      # A pull request sweeps the headline batch size alone: its comment shows that peak and nothing else,
+      # and the other four batch sizes took three quarters of a run of about 20 minutes (#390). A push to
+      # main sweeps every batch size (an empty BATCH_LADDER is the script's default), since its curve is
+      # what the site publishes.
       - name: 📊 Run the ${{ matrix.generator }} ceiling load test
         env:
           GENERATOR: ${{ matrix.generator }}
           SRV_CPUSET: '1,2,3'
           LT_CPUSET: '0'
+          BATCH_LADDER: ${{ github.event_name == 'pull_request' && '10' || '' }}
         run: |
           set -uo pipefail
           mkdir -p "$RUNNER_TEMP/results"
@@ -331,8 +337,8 @@ jobs:
             **Chaos certification**: ${chaosLine}
 
             Each generator ran on its own runner, server pinned to 3 cores and generator to 1, sweeping
-            batch sizes and, for each, connections until throughput plateaued; the row shows the headline
-            batch size's peak, and the published result carries every batch size. In the CPU column, srv near
+            connections at the headline batch size until throughput plateaued; the row shows its peak. The
+            other batch sizes are swept on main, and the published result carries every one. In the CPU column, srv near
             3 means the server's ceiling was found; gen near 1 means the single generator core capped
             first and the throughput is a lower bound on the server's ceiling.
 
