@@ -102,6 +102,14 @@ defmodule LoadtestCeilingTest do
       refute File.exists?(ctx.log)
     end
 
+    test "a batch ladder set to nothing is the default ladder, which main's run relies on", ctx do
+      # .github/workflows/results.yml passes BATCH_LADDER empty on a push to main and expects every batch size.
+      # A headline outside the default ladder shows which ladder was read, before anything boots.
+      assert {output, 2} = run_script(ctx, [{"HEADLINE_BATCH", "50"}], "export BATCH_LADDER=;")
+      assert output =~ "HEADLINE_BATCH 50 is not in BATCH_LADDER (10 100 512 1024 4096)"
+      refute File.exists?(ctx.log)
+    end
+
     test "a connection ladder set to nothing is refused, not replaced by the default", ctx do
       # Declared inside the shell: an empty value in System.cmd's env removes the variable instead of
       # setting it, which would test the unset case twice.
