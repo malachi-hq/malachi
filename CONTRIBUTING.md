@@ -114,15 +114,16 @@ MIX_TEST_PARTITION=3 mix test --partitions 8
 
 A module runs whole inside one partition, so the slowest module sets the floor of the partition that gets
 it: a module of a few minutes is better split, and one that shares nothing with the running application is
-better async. Measured on the Linux runners for #390: before, the last green run on main before the change
-(run 45717082251, one run); after, four attempts of one commit of its pull request (run 45912431193), so the
-spread between them is the noise of the runners:
+better async. Measured on the Linux runners for #390: before, the five green runs on main of the old
+single job suite (runs 45717082251, 45745739980, 45831056103, 45862513551 and 45865484130); after, four
+attempts of one commit of its pull request (run 45912431193). Each range is the spread between those runs,
+the noise of the runners:
 
-| | Before (1 run) | After (4 runs) |
+| | Before (5 runs) | After (4 runs) |
 |---|---|---|
-| CI run, first job start to CI Summary | 24 min | 6 min 3 s to 7 min 6 s |
-| The suite | one job of 1275 s (72 s async, 1203 s sync) | 8 partitions, the slowest 268 s to 291 s, then Coverage 66 s to 82 s |
-| Code Quality | 20 min 42 s, running the suite and Dialyzer a second time | 48 s to 67 s |
+| CI run, first job start to CI Summary | 23 min 51 s to 25 min 37 s | 6 min 3 s to 7 min 6 s |
+| The suite | one job of 21 min 47 s to 23 min 33 s (in the first run, 1275 s of tests: 72 s async, 1203 s sync) | 8 partitions, the slowest 268 s to 291 s, then Coverage 66 s to 82 s |
+| Code Quality | 20 min 42 s to 24 min 5 s, running the suite and Dialyzer a second time | 48 s to 67 s |
 
 Changes to durability, replication, storage or failover also run the chaos drills, which inject real
 faults into a 3-node cluster and certify that every acknowledged write survives:
