@@ -74,9 +74,12 @@ defmodule Malachi.Cluster.ScrubberTracingTest do
         peer_scrubber: fn _node -> peer_scrubber end
       )
 
-    # a clean pass exports nothing
+    # A clean pass exports nothing of the scrubber's. The exporter is the VM's one, so a span of other work
+    # that ends late (a stream a test before this one consumed) reaches this process too: only the scrubber's
+    # spans are refused. The span sent here stands for such a span, so the refusal is shown to skip it (#390).
+    send(self(), {:span, span(name: "malachi.consume")})
     assert %{damaged: []} = Scrubber.scrub_now(scrubber)
-    refute_receive {:span, _clean_pass_span}, 200
+    refute_receive {:span, span(name: "malachi.scrub" <> _)}, 200
 
     # now rot the local copy and let the repair run
     [log_file] = damaged_directory |> Layout.segment_directory(@segment) |> SegmentFilesHelper.log_files()
