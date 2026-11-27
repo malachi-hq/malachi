@@ -97,7 +97,9 @@ jobs:
           name: coverage-partition-${{ matrix.partition }}
           path: cover/partition-${{ matrix.partition }}.coverdata
           if-no-files-found: error
-          retention-days: 1
+          # A week, not a day: "Re-run failed jobs" reruns a failed partition and the Coverage job but not the
+          # partitions that passed, whose exports Coverage then reads from the first attempt.
+          retention-days: 7
 
   # One coverage report for the whole suite, from the partitions' exported data, and the threshold applied to it
   # (minimum_coverage in coveralls.json). Every partition must have exported: a missing one would lower the number
@@ -156,7 +158,10 @@ jobs:
         run: |
           found=$(find cover/partitions -name 'partition-*.coverdata' | wc -l)
           echo "found $found of $TEST_PARTITIONS partitions"
-          [ "$found" -eq "$TEST_PARTITIONS" ]
+          if [ "$found" -ne "$TEST_PARTITIONS" ]; then
+            echo "::error::Coverage needs every partition's export. Exports older than their retention are gone: re-run all jobs, not only the failed ones."
+            exit 1
+          fi
 
       - name: 📊 Merge the coverage and apply the threshold
         run: mix coveralls.multiple --type json --type local --import-cover cover/partitions --exclude test

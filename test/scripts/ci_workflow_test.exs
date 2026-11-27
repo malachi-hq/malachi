@@ -122,7 +122,8 @@ defmodule Malachi.CiWorkflowTest do
 
     [
       {:not_after_test, List.wrap(coverage["needs"]) != ["test"]},
-      {:no_count_check, not Enum.any?(steps, &(&1 =~ ~s/[ "$found" -eq "$TEST_PARTITIONS" ]/))},
+      {:no_count_check,
+       not Enum.any?(steps, &(&1 =~ ~s/if [ "$found" -ne "$TEST_PARTITIONS" ]; then/ and &1 =~ ~r/^\s*exit 1$/m))},
       {:no_merge, merge == nil},
       {:no_threshold, merge != nil and not (merge =~ "--type local")},
       {:no_report, merge != nil and not (merge =~ "--type json")},
@@ -281,12 +282,19 @@ defmodule Malachi.CiWorkflowTest do
       assert coverage_problems(in_job(@ci, "coverage", " --type local", "")) == [:no_threshold]
       assert coverage_problems(in_job(@ci, "coverage", " --exclude test", "")) == [:runs_tests]
 
-      assert coverage_problems(in_job(@ci, "coverage", ~s/[ "$found" -eq "$TEST_PARTITIONS" ]/, "true")) == [
+      assert coverage_problems(in_job(@ci, "coverage", ~s/[ "$found" -ne "$TEST_PARTITIONS" ]/, "false")) == [
                :no_count_check
              ]
 
       hidden = in_job(@ci, "coverage", "--exclude test\n", "--exclude test\n        continue-on-error: true\n")
       assert coverage_problems(hidden) == [:no_merge]
+    end
+
+    test "a partition's export outlives a re-run of the failed jobs a few days later" do
+      [upload] =
+        for step <- WorkflowText.steps(@ci), step.job == "test", (step.uses || "") =~ "upload-artifact", do: step
+
+      assert upload.with["retention-days"] >= 7
     end
 
     test "the threshold is coveralls.json's minimum_coverage, 85, and mix.exs sets none ExCoveralls would ignore" do
