@@ -37,9 +37,12 @@ defmodule Malachi.Test.WorkflowTextTest do
                [%{"lint" => true, "coverage" => true}]
     end
 
-    test "an include beside axes adds its entries to their combinations" do
-      assert WorkflowText.matrix_entries(strategy("    partition: [1, 2]\n    include:\n      - extra: true\n")) ==
-               [%{"partition" => 1}, %{"partition" => 2}, %{"extra" => true}]
+    test "an include beside axes is refused rather than counted as entries GitHub would merge" do
+      # GitHub adds `extra: true` to both partitions and runs two jobs; appending it as a third entry would
+      # count a job that never runs
+      assert_raise ArgumentError, "a matrix include beside axes is not read", fn ->
+        WorkflowText.matrix_entries(strategy("    partition: [1, 2]\n    include:\n      - extra: true\n"))
+      end
     end
 
     test "an axis given as an expression counts as one entry holding it" do

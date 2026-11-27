@@ -78,10 +78,12 @@ defmodule Malachi.Test.WorkflowText do
   end
 
   @doc """
-  The entries a job runs for, from its `strategy` as yamerl reads it: every combination of its axes, plus its
-  `include` entries, or one empty entry when it has no matrix. An axis given as an expression
-  (`${{ fromJSON(...) }}`) is only known when the workflow runs, so it counts as one entry holding the expression.
-  An `exclude` is not read, so a matrix with one raises instead of counting an entry that never runs.
+  The entries a job runs for, from its `strategy` as yamerl reads it: every combination of its axes, the
+  entries of an `include` that stands alone, or one empty entry when it has no matrix. An axis given as an
+  expression (`${{ fromJSON(...) }}`) is only known when the workflow runs, so it counts as one entry holding
+  the expression. An `exclude`, and an `include` beside axes, raise rather than be guessed at: GitHub drops
+  the combinations an exclude names and merges an include into the combinations it does not contradict, and
+  a reader that did neither would count jobs that never run.
   """
   @spec matrix_entries(list() | nil) :: [map()]
   def matrix_entries(nil), do: [%{}]
@@ -90,14 +92,14 @@ defmodule Malachi.Test.WorkflowText do
     matrix = Map.new(Map.new(strategy)["matrix"] || [])
     if Map.has_key?(matrix, "exclude"), do: raise(ArgumentError, "a matrix exclude is not read")
     {include, axes} = Map.pop(matrix, "include", [])
+    if include != [] and axes != %{}, do: raise(ArgumentError, "a matrix include beside axes is not read")
 
     combinations =
       Enum.reduce(axes, [%{}], fn {key, values}, acc ->
         for entry <- acc, value <- axis_values(values), do: Map.put(entry, key, value)
       end)
 
-    combinations = if axes == %{} and include != [], do: [], else: combinations
-    combinations ++ Enum.map(include, &Map.new/1)
+    if include == [], do: combinations, else: Enum.map(include, &Map.new/1)
   end
 
   defp axis_values(values) when is_list(values), do: values
