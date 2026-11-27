@@ -286,6 +286,16 @@ defmodule Malachi.CiWorkflowTest do
                :no_count_check
              ]
 
+      # the branch that finds a partition missing has to fail the job, not report it and go on
+      assert coverage_problems(
+               in_job(
+                 @ci,
+                 "coverage",
+                 "jobs, not only the failed ones.\"\n            exit 1\n",
+                 "jobs, not only the failed ones.\"\n            exit 0\n"
+               )
+             ) == [:no_count_check]
+
       hidden = in_job(@ci, "coverage", "--exclude test\n", "--exclude test\n        continue-on-error: true\n")
       assert coverage_problems(hidden) == [:no_merge]
     end
