@@ -42,10 +42,21 @@ defmodule Mix.Tasks.Malachi.LoadtestTest do
                %{token: "t", pass: "p", user: "flag", cert: "c.pem"}
     end
 
-    test "credential_vars/0 names exactly the variables credentials/2 reads" do
-      env = Map.new(Task.credential_vars(), &{&1, "v"})
-      assert Task.credential_vars() == ~w(MALACHI_USER MALACHI_PASS MALACHI_TOKEN)
-      assert Map.new(Task.credentials([], env)) == %{user: "v", pass: "v", token: "v"}
+    test "credential_vars/0 names exactly the variables credentials/2 and tls_settings/2 read" do
+      assert Task.credential_vars() ==
+               ~w(MALACHI_USER MALACHI_PASS MALACHI_TOKEN MALACHI_CLIENT_TLS MALACHI_CLIENT_TLS_INSECURE) ++
+                 ~w(MALACHI_CLIENT_TLS_CACERT MALACHI_CLIENT_TLS_CERT MALACHI_CLIENT_TLS_KEY)
+
+      env = Map.new(Task.credential_vars(), &{&1, "true"})
+      assert Map.new(Task.credentials([], env)) == %{user: "true", pass: "true", token: "true"}
+
+      assert Map.new(Task.tls_settings([], env)) == %{
+               tls: true,
+               insecure: true,
+               cacert: "true",
+               cert: "true",
+               key: "true"
+             }
     end
 
     test "each variable is read on its own" do
@@ -55,12 +66,64 @@ defmodule Mix.Tasks.Malachi.LoadtestTest do
     end
   end
 
+  describe "tls_settings/2" do
+    # The Node client's names (scripts/lib/tls.js), so one exported setting serves both generators.
+    test "reads the TLS settings from the Node client's variables" do
+      env = %{
+        "MALACHI_CLIENT_TLS" => "true",
+        "MALACHI_CLIENT_TLS_CACERT" => "ca.pem",
+        "MALACHI_CLIENT_TLS_CERT" => "c.pem",
+        "MALACHI_CLIENT_TLS_KEY" => "k.pem"
+      }
+
+      assert Map.new(Task.tls_settings([duration: 1], env)) ==
+               %{duration: 1, tls: true, cacert: "ca.pem", cert: "c.pem", key: "k.pem"}
+    end
+
+    test "a flag wins over its variable, --no-tls over MALACHI_CLIENT_TLS=true included" do
+      env = %{"MALACHI_CLIENT_TLS" => "true", "MALACHI_CLIENT_TLS_CACERT" => "env.pem"}
+      assert Task.tls_settings([tls: false, cacert: "flag.pem"], env) == [tls: false, cacert: "flag.pem"]
+    end
+
+    test "false is a value, and an empty variable counts as unset" do
+      assert Task.tls_settings([], %{"MALACHI_CLIENT_TLS" => "false"}) == [tls: false]
+      assert Task.tls_settings([], %{"MALACHI_CLIENT_TLS_INSECURE" => "false"}) == [insecure: false]
+
+      env = Map.new(~w(MALACHI_CLIENT_TLS MALACHI_CLIENT_TLS_INSECURE MALACHI_CLIENT_TLS_CACERT), &{&1, ""})
+      assert Task.tls_settings([], env) == []
+    end
+
+    for var <- ~w(MALACHI_CLIENT_TLS MALACHI_CLIENT_TLS_INSECURE), value <- ~w(yes 1 TRUE on) do
+      test "#{var}=#{value} is refused, as the Node client refuses it" do
+        assert_raise ArgumentError, "#{unquote(var)} must be true or false", fn ->
+          Task.tls_settings([], %{unquote(var) => unquote(value)})
+        end
+      end
+    end
+
+    test "the run's reproduce command holds the settings that came from the environment" do
+      opts = Task.tls_settings([], %{"MALACHI_CLIENT_TLS" => "true", "MALACHI_CLIENT_TLS_CACERT" => "ca.pem"})
+      command = Malachi.Loadtest.reproduce_command(opts)
+      assert command =~ "--tls"
+      assert command =~ "--cacert=ca.pem"
+    end
+  end
+
   describe "the flags" do
     for flag <- ~w(--pass --token) do
       test "#{flag} is refused before anything connects" do
         assert_raise OptionParser.ParseError, ~r/#{unquote(flag)} : Unknown option/, fn ->
           Task.run([unquote(flag), "secret", "--duration", "1"])
         end
+      end
+    end
+
+    test "the run reads MALACHI_CLIENT_TLS, refusing a value other than true or false before anything connects" do
+      :ok = LoadtestEnv.isolate()
+      System.put_env("MALACHI_CLIENT_TLS", "yes")
+
+      assert_raise Mix.Error, "MALACHI_CLIENT_TLS must be true or false", fn ->
+        Task.run(["--duration", "1"])
       end
     end
   end

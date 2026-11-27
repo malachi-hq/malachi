@@ -1,10 +1,8 @@
 (function(){
 "use strict";
-var root=document.documentElement,KEY="malachi-theme",mqDark=matchMedia("(prefers-color-scheme: dark)"),mqRM=matchMedia("(prefers-reduced-motion: reduce)");
-function pref(){try{return localStorage.getItem(KEY)||"system"}catch(e){return "system"}}
-function applyTheme(){var v=pref();root.classList.toggle("dark",v==="dark"||(v==="system"&&mqDark.matches));document.querySelectorAll('input[name="theme"]').forEach(function(i){i.checked=i.value===v})}
-document.addEventListener("change",function(e){if(e.target.name==="theme"){try{localStorage.setItem(KEY,e.target.value)}catch(_){}applyTheme()}});
-mqDark.addEventListener("change",applyTheme);
+/* The theme switch is theme.js, inlined into the page's head by Malachi.Site.Theme; the canvases below follow it by
+   watching the class it sets on the root element. */
+var root=document.documentElement,mqRM=matchMedia("(prefers-reduced-motion: reduce)");
 document.addEventListener("click",function(e){var b=e.target.closest("[data-copy]");if(!b)return;var t=document.getElementById(b.dataset.copy);if(!t||!navigator.clipboard)return;navigator.clipboard.writeText(t.textContent).then(function(){b.textContent="Copied";setTimeout(function(){b.textContent="Copy"},1600)})});
 function tabs(){document.querySelectorAll("[data-tabs]").forEach(function(box){var list=box.querySelector('[role="tablist"]'),btns=[].slice.call(list.querySelectorAll('[role="tab"]'));var panels=btns.map(function(b){var p=document.getElementById(b.getAttribute("aria-controls"));p.setAttribute("role","tabpanel");p.setAttribute("aria-labelledby",b.id);p.tabIndex=0;return p});
 list.hidden=false;box.classList.add("is-tabbed");
@@ -95,6 +93,6 @@ new MutationObserver(function(){colors();draw(running?acc/TICK:0)}).observe(root
 if("IntersectionObserver" in window)new IntersectionObserver(function(es){visible=es[0].isIntersecting;sync()}).observe(cv);
 var rt=0;new ResizeObserver(function(){clearTimeout(rt);rt=setTimeout(function(){var had=S.cols.length;layout();if(mqRM.matches||had<ncols){mode()}else draw(acc/TICK)},120)}).observe(cv);
 }
-function init(){applyTheme();tabs();whenNear(document.getElementById("thesis"),thesis)}
+function init(){tabs();whenNear(document.getElementById("thesis"),thesis)}
 if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",init);else init();
 })();

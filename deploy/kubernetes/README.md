@@ -50,19 +50,30 @@ Segment replicas should span distinct failure domains (zones). Two pieces make t
      --from-literal=app-pass="$(openssl rand -hex 16)"
    ```
 
-   The manifest also runs **inter-node distribution over mutual TLS** (`MALACHI_DIST_TLS`). Provide the CA
-   + a CA-signed node cert/key and the `ssl_dist` options file via the `malachi-dist-tls` Secret, generate
-   dev material with `bash scripts/generate-dist-certs.sh`, then:
+   A clustered node refuses to start on the placeholder cookie of the manifest, or on any cookie shorter than
+   20 bytes.
+
+   The manifest also runs **inter-node distribution over mutual TLS** (`MALACHI_DIST_TLS`), which a clustered
+   node requires. Provide the CA + a CA-signed node cert/key and the `ssl_dist` options file via the
+   `malachi-dist-tls` Secret. The connecting pod checks that the peer's certificate names the host it dialled,
+   each pod's name in the headless service, and OTP's default check takes no wildcard, so one certificate names
+   the three pods (issue it again when the StatefulSet grows, or give each pod its own, from cert-manager say).
+   Use a CA of its own for distribution, not the one that signs client certificates. With namespace `default`:
 
    ```sh
+   DIST_CERT_DIR=dist DIST_CONF_PREFIX=/etc/malachi/dist \
+   DIST_CERT_HOSTS=malachi-0.malachi-headless.default.svc.cluster.local,malachi-1.malachi-headless.default.svc.cluster.local,malachi-2.malachi-headless.default.svc.cluster.local \
+     bash scripts/generate-dist-certs.sh
    kubectl create secret generic malachi-dist-tls \
-     --from-file=ca.crt=priv/dist_cert/ca.crt \
-     --from-file=node.crt=priv/dist_cert/node.crt \
-     --from-file=node.key=priv/dist_cert/node.key \
-     --from-file=dist_tls.conf=priv/dist_cert/dist_tls.conf
+     --from-file=ca.crt=dist/ca.crt \
+     --from-file=node.crt=dist/node.crt \
+     --from-file=node.key=dist/node.key \
+     --from-file=dist_tls.conf=dist/dist_tls.conf
    ```
 
-   (Set the options-file paths to `/etc/malachi/dist/…`, the mount point in the pod.)
+   The pods bind epmd and the distribution port to their pod IP (`MALACHI_DIST_INTERFACE`), and the
+   `malachi-distribution` NetworkPolicy lets only the Malachi pods reach those two ports; it takes effect only
+   with a CNI that enforces NetworkPolicy.
 
 4. Apply:
 

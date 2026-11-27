@@ -42,7 +42,8 @@ const { Router } = require('./lib/router');
 const { Producer, recordBytes: framedRecordBytes } = require('./lib/producer');
 const { Fetcher } = require('./lib/fetcher');
 const { Consumer } = require('./lib/consumer');
-const { colors, config, msFromEnv, parseArgs, fail } = require('./lib/cli');
+const { colors, config, tlsFrom, msFromEnv, parseArgs, fail } = require('./lib/cli');
+const tlsSettings = require('./lib/tls');
 const payload = require('./lib/payload');
 const os = require('os');
 const path = require('path');
@@ -227,10 +228,11 @@ class Stats {
   }
 }
 
-const cfg = config({ username: 'app', password: 'app123' });
+// TLS is resolved in main(), with the flags, which win over the MALACHI_CLIENT_TLS* variables.
+const cfg = config({ username: 'app', password: 'app123' }, { tlsFlags: true });
 
 function newClient() {
-  return new MalachiClient({ host: cfg.host, port: cfg.port, timeout: 30000 });
+  return new MalachiClient({ host: cfg.host, port: cfg.port, timeout: 30000, tls: cfg.tls });
 }
 
 function connect() {
@@ -343,7 +345,7 @@ function connectWorker(scenario, i, opts) {
 }
 
 const newRouter = () => new Router({ host: cfg.host, port: cfg.port });
-const connOpts = () => ({ user: cfg.username, pass: cfg.password, timeout: 30000 });
+const connOpts = () => ({ user: cfg.username, pass: cfg.password, tls: cfg.tls, timeout: 30000 });
 
 // A reader connected to the broker of every range of the topic before the run, opening nothing (a consumer
 // opens its streams when the run starts, so every page pushed is pushed inside it).
@@ -574,7 +576,7 @@ async function prepopulate(opts) {
   const failures = [];
   const producer = new Producer(
     new Router({ host: cfg.host, port: cfg.port }),
-    { user: cfg.username, pass: cfg.password, timeout: 30000 },
+    { user: cfg.username, pass: cfg.password, tls: cfg.tls, timeout: 30000 },
     { maxInflight: 16, label: 'malachi-loadtest-prepopulate', onEvent: (e) => e.kind === 'failed' && failures.push(e.reason) },
   );
   try {
@@ -634,7 +636,7 @@ function buildMeta() {
   const cpus = os.cpus();
   return {
     timestamp: new Date().toISOString(),
-    command: [path.relative(REPO_ROOT, process.argv[1]), ...recordedArgs(process.argv.slice(2))].join(' '),
+    command: [path.relative(REPO_ROOT, process.argv[1]), ...recordedArgs(process.argv.slice(2)), ...tlsRecorded()].join(' '),
     git_ref: ref ? (dirty ? `${ref}-dirty` : ref) : null,
     git_ref_date: git(['show', '-s', '--format=%cI', 'HEAD']),
     malachi_version: malachiVersion(),
@@ -677,6 +679,13 @@ function markerProblem(marker) {
     return `directory "${dir}" does not exist or is not writable`;
   }
   return null;
+}
+
+// The TLS settings that came from the environment (MALACHI_CLIENT_TLS*), as the flags that ask for them: a
+// reproduction run with flags alone connects the same way. Paths only, never a file's contents. Mirrors the
+// Elixir generator, which records its TLS options whichever way they were given.
+function tlsRecorded() {
+  return cfg.tls ? cfg.tls.recorded : [];
 }
 
 // The arguments a reproduction needs: everything typed except --measure-marker and its value. The marker
@@ -906,11 +915,20 @@ ${colors.yellow('Options')}
   --measure-marker <path>  Create this (empty) file when the measured window begins, after every
                      connection authenticated and the warmup ended, so a harness can sample CPU over
                      that window alone. Its directory must exist. Not recorded in the JSON command.
+  --tls              Connect over TLS, verifying the server's certificate and host name (against Node's
+                     bundled CAs unless --cacert names one). --no-tls overrides MALACHI_CLIENT_TLS=true.
+  --cacert <pem>     TLS: the CA that signed the server's certificate
+  --cert <pem>       TLS: a client certificate, which also authenticates the connection (mtls_auth)
+                     in place of the user and password; needs --key
+  --key <pem>        TLS: the client certificate's key
+  --insecure         TLS: skip verifying the server, for a test server only; not with --cacert
   --self-test        Validate the latency histogram offline (no server) and exit
   -h, --help         Show this help
 
 ${colors.yellow('Environment')}
   MALACHI_HOST, MALACHI_PORT, MALACHI_USER, MALACHI_PASS
+  MALACHI_CLIENT_TLS, MALACHI_CLIENT_TLS_CACERT, MALACHI_CLIENT_TLS_CERT, MALACHI_CLIENT_TLS_KEY,
+  MALACHI_CLIENT_TLS_INSECURE (true or false; the flags above win over them)
 `);
 }
 
@@ -921,10 +939,11 @@ async function main() {
     'scenario', 'connections', 'duration', 'topic', 'batch', 'record-size',
     'keys', 'max', 'window', 'prepopulate', 'warmup', 'samples', 'rate', 'max-inflight',
     'connect-strategy', 'connect-concurrency', 'connect-stagger-ms', 'measure-marker', 'payload', 'payload-seed',
-    'pipeline', 'linger-ms', 'linger-bytes',
+    'pipeline', 'linger-ms', 'linger-bytes', ...tlsSettings.VALUE_FLAGS,
   ];
   const { flags } = parseArgs(process.argv.slice(2), valueFlags);
   if (flags.help) return help();
+  cfg.tls = tlsFrom(flags);
 
   // Every enum and every knob is checked before any connection opens, against the tables at the top.
   const enums = {};

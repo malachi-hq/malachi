@@ -87,10 +87,16 @@ apply_case() {
 }
 
 WORK="$(mktemp -d)"
+# This run's cookie and distribution certificates (#385), under the repository so the Docker host can mount them.
+# shellcheck source=scripts/cluster_dist_lib.sh
+. scripts/cluster_dist_lib.sh
+mkdir -p tmp/dist || exit 1
+DIST_DIR="$(mktemp -d "$PWD/tmp/dist/run.XXXXXX")" || exit 1
 # The cluster is torn down from the trap rather than at the end, because several paths (a failed
 # recreate, a cluster that never converges) exit early and would otherwise leave three containers and
 # their volumes running, which the NEXT benchmark then measures against.
-trap 'rm -rf "$WORK"; $COMPOSE down -v >/dev/null 2>&1' EXIT
+trap 'rm -rf "$WORK" "$DIST_DIR"; $COMPOSE down -v >/dev/null 2>&1' EXIT
+cluster_dist_setup "$DIST_DIR" || exit 1
 
 echo "Building images..."
 $COMPOSE build >/dev/null 2>&1 || { echo "build failed"; exit 1; }

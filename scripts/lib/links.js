@@ -7,8 +7,9 @@
  * when there is none), with a per-topic backoff once a read fails, and counts of what routing did (`stats`),
  * for a routing client to hold and route through.
  *
- * Connections are ./client.js MalachiClients, authenticated with `connOpts` ({ user, pass, timeout });
- * host and port come from the routes (./router.js).
+ * Connections are ./client.js MalachiClients, authenticated with `connOpts` ({ user, pass, tls, timeout }),
+ * every one over TLS when `tls` is set, the brokers the routes name as much as the bootstrap one; host and port
+ * come from the routes (./router.js).
  */
 
 const { MalachiClient, MalachiError } = require('./client');
@@ -58,14 +59,22 @@ class Links {
   }
 
   // A new authenticated connection to `address`, destroyed again if it or its authentication fails;
-  // null then.
+  // null then. A TLS verification failure is thrown instead: it is the client's configuration, not a broker
+  // that is down, and counting it as a connect failure to retry would hide why nothing connects.
   async connect({ host, port }) {
-    const client = new MalachiClient({ host, port, timeout: this.connOpts.timeout, connectTimeout: this.connOpts.connectTimeout });
+    const client = new MalachiClient({
+      host,
+      port,
+      timeout: this.connOpts.timeout,
+      connectTimeout: this.connOpts.connectTimeout,
+      tls: this.connOpts.tls,
+    });
     try {
       await client.connect(this.connOpts.user, this.connOpts.pass);
       return client;
-    } catch (_refused) {
+    } catch (err) {
       client.destroy();
+      if (err && err.tlsVerification) throw err;
       return null;
     }
   }
@@ -86,7 +95,14 @@ class Links {
 
     const opening = this.connect(address);
     this.conns.set(key, opening);
-    const client = await opening;
+    let client;
+    try {
+      client = await opening;
+    } catch (err) {
+      // a TLS verification failure: forgotten, so the next call tries again rather than rethrow it held
+      if (this.conns.get(key) === opening) this.conns.delete(key);
+      throw err;
+    }
     // closed while it connected: closeAll took the map already, so this one is closed here
     if (client && this.closed) {
       client.close();

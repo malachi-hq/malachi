@@ -29,6 +29,8 @@ const API = {
   deleteUser: 9,
   changePassword: 10,
   listUsers: 11,
+  // the client certificate presented at the TLS handshake authenticates the connection (Malachi.Wire mtls_auth)
+  mtlsAuth: 12,
   // admin per-topic ACL management (require the admin permission)
   grantAcl: 14,
   revokeAcl: 15,

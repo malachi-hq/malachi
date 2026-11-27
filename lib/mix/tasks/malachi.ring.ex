@@ -127,7 +127,7 @@ defmodule Mix.Tasks.Malachi.Ring do
     prints the durable vnode ring recorded for the cluster: version, vnodes and their placements.
     the recorded ring outranks MALACHI_LOG_VNODES at boot, so this is what a node actually routes by.
 
-    connection: --node (or $MALACHI_NODE, default malachi@127.0.0.1), --cookie (or $RELEASE_COOKIE)
+    #{Rpc.connection_usage()}
     """
   end
 end

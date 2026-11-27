@@ -30,6 +30,43 @@ defmodule WorkflowHardeningTest do
     |> MapSet.new()
   end
 
+  # The top-level `permissions:` block (column 0, before `jobs:`), up to the next top-level key, or nil.
+  defp top_level_permissions(text) do
+    [head | _] = String.split(text, ~r/^jobs:/m, parts: 2)
+
+    case Regex.run(~r/^permissions:[^\n]*\n?(?:(?:[ \t]+[^\n]*|)\n)*/m, head) do
+      [block] -> block |> String.split("\n") |> Enum.reject(&(&1 =~ ~r/^\s*(#.*)?$/)) |> Enum.join("\n")
+      nil -> nil
+    end
+  end
+
+  describe "the token's default permissions" do
+    # Scorecard's Token-Permissions check flags a workflow with no top-level block: the token then gets the
+    # repository's default, which can be write. A job that needs more grants it to itself.
+    test "every workflow declares a read-only top-level permissions block before its jobs" do
+      for file <- workflow_files() do
+        block = top_level_permissions(File.read!(file))
+        assert block, "#{Path.basename(file)} has no top-level permissions: block before jobs:"
+        refute block =~ ~r/write/, "#{Path.basename(file)} grants a write at the top level:\n#{block}"
+      end
+    end
+
+    test "Pages reads the repository at the top level and nothing more" do
+      assert top_level_permissions(read("pages.yml")) == "permissions:\n  contents: read"
+    end
+
+    test "the reader finds a block, misses an absent one, and sees a write" do
+      assert top_level_permissions("on: push\npermissions:\n  contents: read\n\njobs:\n  a:\n") ==
+               "permissions:\n  contents: read"
+
+      assert top_level_permissions("on: push\njobs:\n  a:\n    permissions:\n      contents: read\n") == nil
+      assert top_level_permissions("permissions: write-all\njobs:\n") =~ "write"
+
+      assert top_level_permissions("permissions:\n  # a comment\n  contents: write\nconcurrency: x\njobs:\n") ==
+               "permissions:\n  contents: write"
+    end
+  end
+
   describe "StepSecurity Harden-Runner" do
     test "every job in every workflow starts with Harden-Runner" do
       for file <- workflow_files() do

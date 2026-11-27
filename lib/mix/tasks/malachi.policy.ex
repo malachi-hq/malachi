@@ -205,7 +205,7 @@ defmodule Mix.Tasks.Malachi.Policy do
       mix malachi.policy get <topic>
 
     fields: #{Enum.map_join(Policy.fields(), ", ", & &1.name)}
-    connection: --node (or $MALACHI_NODE, default malachi@127.0.0.1), --cookie (or $RELEASE_COOKIE)
+    #{Rpc.connection_usage()}
     """
   end
 end

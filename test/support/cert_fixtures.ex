@@ -41,4 +41,69 @@ defmodule Malachi.Test.CertFixtures do
     {_out, 0} = System.cmd("openssl", args, stderr_to_stdout: true)
     %{certfile: certfile, keyfile: keyfile}
   end
+
+  # P-256 keys: generated in milliseconds, where an RSA key can take a second.
+  @ec_key ~w(-newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes)
+
+  @doc """
+  Generates a throwaway private CA under `dir`, as `<name>.pem` and `<name>-key.pem`, valid one day, and returns
+  their paths. A private CA is the shape `--cacert` is for, and what `scripts/generate-dist-certs.sh` produces; a
+  self-signed leaf cannot stand in, since OTP refuses a self-signed peer even when it is named as the CA.
+  """
+  @spec ca!(Path.t(), String.t()) :: %{cert: Path.t(), key: Path.t()}
+  def ca!(dir, name \\ "ca") do
+    File.mkdir_p!(dir)
+    cert = Path.join(dir, "#{name}.pem")
+    key = Path.join(dir, "#{name}-key.pem")
+
+    openssl!(
+      ["req", "-x509" | @ec_key] ++ ["-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=Malachi Test CA #{name}"]
+    )
+
+    %{cert: cert, key: key}
+  end
+
+  @doc """
+  Generates under `dir` a certificate signed by `ca` (from `ca!/2`), as `<name>.pem` and `<name>-key.pem`, for the
+  common name `cn` and the subject alternative names `sans` (`"DNS:localhost"`, `"IP:127.0.0.1"`), which is what
+  host name verification reads. Returns their paths.
+  """
+  @spec leaf!(%{cert: Path.t(), key: Path.t()}, Path.t(), String.t(), String.t(), [String.t()]) ::
+          %{cert: Path.t(), key: Path.t()}
+  def leaf!(ca, dir, name, cn, sans) do
+    File.mkdir_p!(dir)
+    cert = Path.join(dir, "#{name}.pem")
+    key = Path.join(dir, "#{name}-key.pem")
+    csr = Path.join(dir, "#{name}.csr")
+    ext = Path.join(dir, "#{name}.ext")
+
+    openssl!(["req" | @ec_key] ++ ["-keyout", key, "-out", csr, "-subj", "/CN=#{cn}"])
+    File.write!(ext, "subjectAltName=#{Enum.join(sans, ",")}\n")
+
+    openssl!(
+      ~w(x509 -req -in #{csr} -CA #{ca.cert} -CAkey #{ca.key} -CAcreateserial -out #{cert} -days 1 -extfile #{ext})
+    )
+
+    File.rm!(csr)
+    File.rm!(ext)
+    %{cert: cert, key: key}
+  end
+
+  @doc """
+  A private CA and one server certificate signed by it under `dir`: for `cn`, with `sans` (by default `DNS:<cn>`).
+  Returns the paths of the CA certificate, the server certificate and its key.
+  """
+  @spec ca_signed!(Path.t(), String.t(), [String.t()] | nil) :: %{ca: Path.t(), cert: Path.t(), key: Path.t()}
+  def ca_signed!(dir, cn \\ "localhost", sans \\ nil) do
+    ca = ca!(dir)
+    leaf = leaf!(ca, dir, "server", cn, sans || ["DNS:#{cn}"])
+    %{ca: ca.cert, cert: leaf.cert, key: leaf.key}
+  end
+
+  defp openssl!(args) do
+    case System.cmd("openssl", args, stderr_to_stdout: true) do
+      {_out, 0} -> :ok
+      {out, status} -> raise "openssl #{hd(args)} exited #{status}: #{out}"
+    end
+  end
 end

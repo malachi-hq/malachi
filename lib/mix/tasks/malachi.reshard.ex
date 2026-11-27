@@ -103,7 +103,7 @@ defmodule Mix.Tasks.Malachi.Reshard do
     grows the metadata sharding to the target count (one vnode split at a time, lease-gated).
     re-run the same target to resume an interrupted reshard; shrinking is not supported.
 
-    connection: --node (or $MALACHI_NODE, default malachi@127.0.0.1), --cookie (or $RELEASE_COOKIE)
+    #{Rpc.connection_usage()}
     """
   end
 end

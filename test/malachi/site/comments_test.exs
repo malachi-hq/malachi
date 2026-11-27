@@ -123,7 +123,8 @@ defmodule Malachi.Site.CommentsTest do
     test "a post ends with its comments, the index has none, and the check passes", %{tmp_dir: root, config: config} do
       :ok = Site.stage(root, config)
       assert File.read!(Path.join(root, "doc/blog/2026-11-16-a.html")) =~ ~s(<section class="comments")
-      refute File.read!(Path.join(root, "doc/blog/index.html")) =~ "<script"
+      # the index runs the theme switch inline (#385), and loads no script
+      refute File.read!(Path.join(root, "doc/blog/index.html")) =~ ~r/<script\b[^>]*\bsrc\s*=/
       assert Site.verify(root, config) == []
     end
 

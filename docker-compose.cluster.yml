@@ -21,7 +21,10 @@ x-malachi-node: &malachi-node
   build:
     context: .
     dockerfile: benchmark/Dockerfile.loadtest
-  entrypoint: ["elixir", "--sname", "malachi", "--cookie", "malachi_bench", "-S", "mix", "run", "--no-halt"]
+  # The cookie and TLS distribution come from the harness, a fresh pair per run (scripts/cluster_dist_lib.sh): a
+  # clustered node refuses a committed cookie and plaintext distribution it did not opt into (#385). The cookie is
+  # read from the environment by the shell, so this file holds none.
+  entrypoint: ["sh", "-c", "exec elixir --sname malachi --cookie \"$$MALACHI_COOKIE\" -S mix run --no-halt"]
   cpuset: "${SRV_CPUSET:-4,5,6,7}"
   # Cluster-formation race: the first node to reach BrokerServer.init tries to form the shared ra group
   # while its peers' BEAMs are still booting, times out (no quorum), and exits. Restarting on failure is
@@ -37,6 +40,13 @@ x-malachi-node: &malachi-node
     ERL_FLAGS: "${SRV_ERL_FLAGS:-+S 4:4}"
     MALACHI_TCP_PORT: "4040"
     MALACHI_DASHBOARD_PORT: "4041"
+    # Distribution, set per run by scripts/cluster_dist_lib.sh: the cookie, TLS on (or false for the plaintext
+    # baseline of an A/B), and the VM options that start TLS distribution with the options file mounted at /dist.
+    # ELIXIR_ERL_OPTIONS rather than ERL_FLAGS, which SRV_ERL_FLAGS above owns. `docker exec` inherits these, so an
+    # operator task run inside a node reaches the cluster the same way.
+    MALACHI_COOKIE: "${MALACHI_COOKIE:?run the cluster through a harness, which sources scripts/cluster_dist_lib.sh}"
+    MALACHI_DIST_TLS: "${MALACHI_DIST_TLS:?run the cluster through a harness, which sources scripts/cluster_dist_lib.sh}"
+    ELIXIR_ERL_OPTIONS: "${MALACHI_DIST_ERL_OPTIONS?run the cluster through a harness, which sources scripts/cluster_dist_lib.sh}"
     # Parameterized (default epmd) so the config-deploy chaos drill can push a config that fails
     # fast at boot (runtime.exs raises on an unknown strategy) to a single node and roll it back.
     MALACHI_CLUSTER_STRATEGY: "${MALACHI_CLUSTER_STRATEGY:-epmd}"
@@ -120,6 +130,7 @@ services:
       MALACHI_ADVERTISED_HOST: malachi1
     volumes:
       - malachi-chaos-1:/data
+      - "${MALACHI_DIST_DIR:?run the cluster through a harness, which sources scripts/cluster_dist_lib.sh}:/dist:ro"
 
   malachi2:
     <<: *malachi-node
@@ -131,6 +142,7 @@ services:
       MALACHI_ADVERTISED_HOST: malachi2
     volumes:
       - malachi-chaos-2:/data
+      - "${MALACHI_DIST_DIR:?run the cluster through a harness, which sources scripts/cluster_dist_lib.sh}:/dist:ro"
 
   malachi3:
     <<: *malachi-node
@@ -142,6 +154,7 @@ services:
       MALACHI_ADVERTISED_HOST: malachi3
     volumes:
       - malachi-chaos-3:/data
+      - "${MALACHI_DIST_DIR:?run the cluster through a harness, which sources scripts/cluster_dist_lib.sh}:/dist:ro"
 
   loadtest:
     build:

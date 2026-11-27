@@ -38,3 +38,11 @@
 .newsletter button{justify-self:start;font:inherit;font-weight:var(--weight-semibold);padding:var(--space-2) var(--space-4);border:0;border-radius:var(--radius-md);background:var(--primary);color:var(--primary-foreground);cursor:pointer}
 .comments{max-width:72ch;margin:0 auto var(--space-10)}
 .comments h2{font-size:var(--text-xl);margin:0 0 var(--space-4)}
+/* Charts in the dark theme (#385). The SVG keeps its light colours as attributes, which the PNG render reads with no
+   page CSS; under .dark these rules take over, since a CSS property beats a presentation attribute. */
+.dark .chart .chart-bg{fill:var(--card)}
+.dark .chart .chart-title,.dark .chart .chart-value{fill:var(--foreground)}
+.dark .chart .chart-unit,.dark .chart .chart-label,.dark .chart .chart-gap-label{fill:var(--muted-foreground)}
+.dark .chart .chart-axis{stroke:var(--border)}
+.dark .chart .chart-bar{fill:var(--chart-1)}
+.dark .chart .chart-gap{stroke:var(--muted-foreground)}

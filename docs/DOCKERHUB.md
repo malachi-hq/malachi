@@ -159,8 +159,12 @@ throughput, authentication, replication and the integrity scrub.
 For three nodes at replication factor 3 on durable volumes, with the same two:
 
 ```bash
+. scripts/cluster_dist_lib.sh && cluster_dist_setup "$PWD/tmp/dist/durable"   # a cookie and TLS certificates for this cluster
 docker compose -f docker-compose.cluster-durable.yml up -d
 ```
+
+The nodes refuse a committed cookie and plaintext distribution between them, so the setup line exports a random
+cookie and writes the certificates the compose file mounts; every call makes new ones, for all three nodes at once.
 
 Both stacks are local examples in the same sense as the quick start above, and for the same reasons:
 they carry placeholder credentials that anyone can read in the repository, they set

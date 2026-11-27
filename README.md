@@ -129,7 +129,9 @@ For a multi-node deploy, set `MALACHI_CLUSTER_STRATEGY` to have [libcluster](htt
 discover and connect peers over Erlang distribution automatically (run each node distributed, e.g.
 `--sname`/`--name`). This is connectivity-only: SWIM and the `ra` control plane still take their initial
 member set from `MALACHI_LOG_NODES`, and membership changes ride on the rebalancing coordinator. Absent
-the variable, nothing changes (single-node, no distribution required).
+the variable, nothing changes (single-node, no distribution required). A clustered node, one with a strategy here
+or more than one `MALACHI_LOG_NODES`, needs its own `RELEASE_COOKIE` and TLS distribution: see
+[Inter-node TLS](#inter-node-tls-erlang-distribution).
 
 - `gossip`: UDP multicast, near-zero config (dev/LAN). Tune with `MALACHI_CLUSTER_GOSSIP_PORT`,
   `MALACHI_CLUSTER_GOSSIP_SECRET`, `MALACHI_CLUSTER_GOSSIP_MULTICAST_ADDR`.
@@ -396,6 +398,11 @@ No default credentials ship. If you have not set `MALACHI_ADMIN_PASS`, Malachi *
 | `MALACHI_AUTO_REBALANCE_STABILIZATION` | 3 | Consecutive stable reconciles before an auto-commit (absorbs flaps) |
 | `MALACHI_SHUTDOWN_GRACE_MS` | 5000 | Drain window on shutdown after the acceptor quiesces, before closing connections |
 | `MALACHI_CLUSTER_STRATEGY` | _(unset)_ | Node discovery: `gossip`, `kubernetes`, or `epmd` (see below) |
+| `RELEASE_COOKIE` | _(drawn once per node on a single node)_ | Erlang distribution cookie; required on a clustered node, a random secret of at least 20 bytes |
+| `MALACHI_DIST_TLS` | _(unset)_ | `true` runs Erlang distribution over mutual TLS (required on a clustered node); `false` accepts plaintext explicitly |
+| `MALACHI_DIST_TLS_OPTFILE` | _(unset)_ | The `ssl_dist` options file TLS distribution reads ([example](rel/dist_tls.conf.example)) |
+| `MALACHI_DIST_INTERFACE` | _(unset)_ | IPv4 address epmd and the distribution port bind to (loopback stays open for epmd) |
+| `MALACHI_COOKIE_DIR` | `${TMPDIR:-/tmp}/malachi-cookie-<uid>` | Where a single node keeps its cookie (`COOKIE-<node name>`), drawn on its first start and kept after, for `rpc`, `remote` and `stop`; delete the file to draw a new one |
 | `MALACHI_CLUSTER_KUBERNETES_SELECTOR` | _(unset)_ | k8s pod selector, e.g. `app=malachi` (kubernetes strategy) |
 | `MALACHI_CLUSTER_KUBERNETES_NODE_BASENAME` | _(unset)_ | k8s node basename, e.g. `malachi` (kubernetes strategy) |
 | `MALACHI_MAX_FRAME_SIZE` | 16777216 | Max request frame bytes (also `:max_frame_size` app env) |
@@ -443,22 +450,35 @@ docker run \
 
 #### 3. Connect with TLS Client (Node.js)
 
-```javascript
-const tls = require('tls');
+The reference Node client (`scripts/`) verifies the server's certificate and host name, and sends
+nothing, credentials included, before that verification succeeds. Name the CA that signed the server's
+certificate, or leave it out to trust Node's bundled CAs:
 
-const client = tls.connect({
-  host: 'localhost',
-  port: 4040,
-  rejectUnauthorized: false  // For self-signed certs (dev only)
-}, () => {
-  console.log('TLS connected');
-  client.write(JSON.stringify({
-    action: 'auth',
-    username: 'producer',
-    password: 'producer123'
-  }) + '\n');
-});
+```bash
+cd scripts
+MALACHI_CLIENT_TLS=true MALACHI_CLIENT_TLS_CACERT=/certs/ca.crt node producer.js
 ```
+
+From code, resolve the same settings and pass them to the client:
+
+```javascript
+const { MalachiClient } = require('./lib/client');
+const { resolveTls } = require('./lib/tls');
+
+async function main() {
+  const tls = resolveTls({ tls: true, cacert: '/certs/ca.crt' });
+  const client = await new MalachiClient({ host: 'localhost', port: 4040, tls }).connect('producer', 'producer123');
+  // ... use the client, then:
+  client.close();
+}
+
+main();
+```
+
+`MALACHI_CLIENT_TLS_CERT` and `MALACHI_CLIENT_TLS_KEY` (`--cert`/`--key` in `loadtest.js`) present a client
+certificate, which then authenticates the connection by mTLS in place of the password.
+`MALACHI_CLIENT_TLS_INSECURE=true` skips verifying the server: for a development server only, since the
+connection is then encrypted but anyone on the path can read and rewrite it.
 
 ### Production TLS Setup
 
@@ -479,25 +499,58 @@ For production, use certificates from:
 ### Inter-node TLS (Erlang distribution)
 
 The sections above secure the **client** connection (port 4040). In a multi-node cluster the nodes also
-talk to each other over **Erlang distribution** (the `ra` control plane and segment replication), by
-default that traffic is plaintext, guarded only by the distribution cookie. Set `MALACHI_DIST_TLS=true`
-to run distribution over **mutual TLS** instead: each node presents a CA-signed certificate and verifies
-its peers, so the inter-node traffic is encrypted *and* authenticated.
+talk to each other over **Erlang distribution** (the `ra` control plane and segment replication). A clustered
+node runs it over **mutual TLS** by default, and refuses to start otherwise: each node presents a certificate the
+cluster's CA signed, verifies its peers against that CA and against the host it dialled, and needs a cookie of its
+own deployment.
 
 ```sh
-# generate a dev CA + node cert + a ready ssl_dist options file
-bash scripts/generate-dist-certs.sh
+# a CA, a node certificate for the hosts the nodes reach each other by, and a ready ssl_dist options file
+DIST_CERT_HOSTS=malachi1,malachi2,malachi3 bash scripts/generate-dist-certs.sh
 
 # run a release with inter-node TLS (the script prints this line with real paths)
+RELEASE_COOKIE="$(openssl rand -hex 32)" \
 MALACHI_DIST_TLS=true \
 MALACHI_DIST_TLS_OPTFILE=$PWD/priv/dist_cert/dist_tls.conf \
   bin/malachi start
 ```
 
-`MALACHI_DIST_TLS_OPTFILE` points at an [`ssl_dist` options file](rel/dist_tls.conf.example) (server +
-client cert/key/CA, `verify_peer`); the release's `rel/env.sh.eex` translates the flag into
-`-proto_dist inet_tls`. A node without TLS cannot join a TLS cluster: the handshake rejects it. The
-[Kubernetes example](deploy/kubernetes/README.md) wires this up (the `malachi-dist-tls` Secret + the two env vars).
+`MALACHI_DIST_TLS_OPTFILE` points at an [`ssl_dist` options file](rel/dist_tls.conf.example) (server + client
+cert/key/CA, `verify_peer` both ways, `fail_if_no_peer_cert` on the server); the release's `rel/env.sh.eex`
+translates the flag into `-proto_dist inet_tls`. What a clustered node checks before it starts:
+
+- `RELEASE_COOKIE` is set, is not a value committed to this repository, is not the release's baked one (the
+  published image ships none), and has at least 20 bytes. All the nodes of a cluster share it.
+- Distribution runs over TLS with an options file that verifies the peers both ways, and the distribution CA is
+  not `MALACHI_TLS_CACERTFILE`: give distribution a CA of its own, since any certificate it signs can join.
+- `MALACHI_DIST_TLS=false` is the only way to run plaintext distribution, and every boot warns about it.
+
+The release checks the cookie, that TLS is on and the terms of the options file before its VM starts, so those
+refusals happen before the node listens. Reading the options file whole and comparing its CA with
+`MALACHI_TLS_CACERTFILE` happen once the VM runs, after its distribution port has opened, and refuse the node then.
+
+A refused node exits with status 78 and one line saying what to set; under systemd, `RestartPreventExitStatus=78`
+keeps it from restarting into the same refusal. The cookie still reaches the VM as a process argument, so it shows
+in `ps` on the host.
+
+A single node needs none of this: without `RELEASE_COOKIE` it draws a random cookie on its first start and keeps it
+where `bin/malachi rpc`, `remote` and `stop` read it (`MALACHI_COOKIE_DIR`, one file per node name); delete that file
+to draw a new one. In the image `/tmp` is a tmpfs, so a recreated container draws a new one anyway. `MALACHI_DIST_INTERFACE` binds epmd and the
+distribution port to one IPv4 address, for a host whose other interfaces are public; the
+[Kubernetes example](deploy/kubernetes/README.md) binds them to the pod IP and lets only its own pods reach them.
+
+The operator tasks (`mix malachi.user`, `acl`, `ring`, `reshard`, ...) reach a TLS node from a VM started with TLS
+distribution too: run them with `MALACHI_DIST_TLS=true` and
+`ELIXIR_ERL_OPTIONS="-proto_dist inet_tls -ssl_dist_optfile <options file>"`.
+
+**Upgrading a plaintext cluster.** A node without TLS cannot join a TLS cluster, nor the reverse, so the move takes
+a full stop and start: set the same `RELEASE_COOKIE`, `MALACHI_DIST_TLS=true` and options file on every node, stop
+them all, and start them all. `MALACHI_DIST_TLS=false` keeps a cluster on plaintext meanwhile.
+
+**Changing a refused cookie.** A cluster running on a cookie this release refuses (the Kubernetes example's
+placeholder, a value from this repository, or one under 20 bytes) has to change it on every node at once, since
+nodes on different cookies cannot talk: set the new `RELEASE_COOKIE` everywhere, stop them all, and start them all.
+That holds whether the cluster moves to TLS at the same time or stays on plaintext with `MALACHI_DIST_TLS=false`.
 
 ## 🔐 Dashboard Security
 

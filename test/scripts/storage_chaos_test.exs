@@ -18,7 +18,7 @@ defmodule StorageChaosTest do
 
   setup_all do
     # Missing tools fail loudly instead of skipping: a skipped harness test reads as a passing one.
-    for tool <- ~w(bash jq awk sed uptime) do
+    for tool <- ~w(bash jq awk sed uptime openssl) do
       System.find_executable(tool) || flunk("#{tool} is required to test scripts/docker-storage-chaos.sh")
     end
 
@@ -29,7 +29,7 @@ defmodule StorageChaosTest do
     root = Path.join(dir, "tree")
     File.mkdir_p!(Path.join(root, "scripts"))
 
-    for name <- ~w(docker-storage-chaos.sh chaos_lib.sh) do
+    for name <- ~w(docker-storage-chaos.sh chaos_lib.sh cluster_dist_lib.sh generate-dist-certs.sh) do
       File.cp!(Path.join(@scripts, name), Path.join([root, "scripts", name]))
     end
 

@@ -42,6 +42,23 @@ MALACHI_ADVERTISED_HOST=10.0.0.1    # this node as clients reach it: required wi
 For Kubernetes use a **StatefulSet**, not a Deployment: each pod needs a stable name so
 `MALACHI_LOG_NODES` stays meaningful across restarts.
 
+### Securing distribution
+
+The nodes talk to each other over Erlang distribution, and a clustered node refuses to start unless that is safe:
+
+```bash
+RELEASE_COOKIE="$(openssl rand -hex 32)"           # the same on every node, a secret of this deployment
+MALACHI_DIST_TLS=true                              # mutual TLS between the nodes
+MALACHI_DIST_TLS_OPTFILE=/etc/malachi/dist/dist_tls.conf
+MALACHI_DIST_INTERFACE=10.0.0.1                    # optional: epmd and distribution on the private address only
+```
+
+The certificate of each node must name the host the others dial it by (here `10.0.0.1`, or a DNS name):
+`DIST_CERT_HOSTS=10.0.0.1,10.0.0.2,10.0.0.3 scripts/generate-dist-certs.sh` writes one certificate for all three.
+Give distribution a CA of its own. `MALACHI_DIST_TLS=false` accepts plaintext distribution explicitly, with a
+warning on every boot; moving a cluster from plaintext to TLS takes a full stop and start, since the two cannot talk.
+The README's Inter-node TLS section lists every check.
+
 ## What gets replicated, and how
 
 Two planes, replicated by different mechanisms, which is the design's central decision:

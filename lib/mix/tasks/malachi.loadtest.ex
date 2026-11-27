@@ -50,6 +50,11 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     * `--tls` verifies the server's certificate and hostname against `--cacert`, or against the system
       trust store when none is given. `--insecure` skips that verification: development only, since it
       makes the connection encrypted but unauthenticated and therefore open to interception.
+    * the TLS settings can also come from the environment, under the names the Node client reads
+      (`scripts/lib/tls.js`): `MALACHI_CLIENT_TLS` and `MALACHI_CLIENT_TLS_INSECURE` (`true` or `false`),
+      `MALACHI_CLIENT_TLS_CACERT`, `MALACHI_CLIENT_TLS_CERT` and `MALACHI_CLIENT_TLS_KEY` (paths). A flag
+      wins over its variable (`--no-tls` over `MALACHI_CLIENT_TLS=true`), an empty variable counts as
+      unset, and the recorded command holds them as flags.
     * `--payload` constant | json | random (default constant): what the record values are. constant is
       one repeated byte, as every published series so far; json is a seeded, event-like JSON document of
       exactly `--record-size` bytes (at least #{Malachi.Loadtest.Payload.min_json_size()}); random is seeded
@@ -122,8 +127,11 @@ defmodule Mix.Tasks.Malachi.Loadtest do
         Keyword.replace_lazy(opts, flag, &enum!(flag, choices, &1))
       end)
 
+    env = System.get_env()
+
     opts
-    |> credentials(System.get_env())
+    |> credentials(env)
+    |> tls_settings(env)
     |> Malachi.Loadtest.run()
   rescue
     # Both are conditions with a one-line explanation, not bugs: a SetupError is operational (the server
@@ -137,12 +145,17 @@ defmodule Mix.Tasks.Malachi.Loadtest do
   # Each credential the run may take from the environment, and the variable it comes from.
   @credential_vars [user: "MALACHI_USER", pass: "MALACHI_PASS", token: "MALACHI_TOKEN"]
 
+  # Each TLS setting the run may take from the environment, under the Node client's names (scripts/lib/tls.js):
+  # the switches, then the paths.
+  @tls_switch_vars [tls: "MALACHI_CLIENT_TLS", insecure: "MALACHI_CLIENT_TLS_INSECURE"]
+  @tls_path_vars [cacert: "MALACHI_CLIENT_TLS_CACERT", cert: "MALACHI_CLIENT_TLS_CERT", key: "MALACHI_CLIENT_TLS_KEY"]
+
   @doc """
-  The environment variables `credentials/2` reads, the one list the task and its tests share
+  The environment variables `credentials/2` and `tls_settings/2` read, the one list the task and its tests share
   (`Malachi.Test.LoadtestEnv` clears exactly these).
   """
   @spec credential_vars() :: [String.t()]
-  def credential_vars, do: Keyword.values(@credential_vars)
+  def credential_vars, do: Keyword.values(@credential_vars ++ @tls_switch_vars ++ @tls_path_vars)
 
   @doc """
   The credentials the run authenticates with, added to `opts` from `env` (a map of environment
@@ -153,6 +166,32 @@ defmodule Mix.Tasks.Malachi.Loadtest do
   @spec credentials(keyword(), %{optional(String.t()) => String.t()}) :: keyword()
   def credentials(opts, env) do
     Enum.reduce(@credential_vars, opts, fn {key, var}, opts ->
+      case Map.get(env, var, "") do
+        "" -> opts
+        value -> Keyword.put_new(opts, key, value)
+      end
+    end)
+  end
+
+  @doc """
+  The TLS settings, added to `opts` from `env` where no flag gave them: `:tls` and `:insecure` from
+  `MALACHI_CLIENT_TLS` and `MALACHI_CLIENT_TLS_INSECURE`, which must read `true` or `false`, and `:cacert`,
+  `:cert` and `:key` from the path variables. An empty variable counts as unset. Raises `ArgumentError` on
+  any other switch value, as the Node client refuses it.
+  """
+  @spec tls_settings(keyword(), %{optional(String.t()) => String.t()}) :: keyword()
+  def tls_settings(opts, env) do
+    opts =
+      Enum.reduce(@tls_switch_vars, opts, fn {key, var}, opts ->
+        case Map.get(env, var, "") do
+          "" -> opts
+          "true" -> Keyword.put_new(opts, key, true)
+          "false" -> Keyword.put_new(opts, key, false)
+          _other -> raise ArgumentError, "#{var} must be true or false"
+        end
+      end)
+
+    Enum.reduce(@tls_path_vars, opts, fn {key, var}, opts ->
       case Map.get(env, var, "") do
         "" -> opts
         value -> Keyword.put_new(opts, key, value)

@@ -158,7 +158,7 @@ defmodule Mix.Tasks.Malachi.User do
     """
     usage:
     #{String.replace(@commands, ~r/^/m, "  ")}
-    connection: --node (or $MALACHI_NODE, default malachi@127.0.0.1), --cookie (or $RELEASE_COOKIE)
+    #{Rpc.connection_usage()}
     """
   end
 end

@@ -4,9 +4,12 @@
 %% MALACHI_DIST_TLS=true). Each node presents `node.crt` (signed by the shared `ca.crt`) and verifies its
 %% peers against `ca.crt`, so encryption AND authentication, not just the distribution cookie.
 %%
-%% Note: inet_tls_dist verifies the peer certificate chains to the CA; it does not check the hostname, so a
-%% single CA-signed node certificate works for every node in the cluster. Generate a dev CA + node cert with
-%% scripts/generate-dist-certs.sh.
+%% The connecting node checks the peer's certificate against the CA AND against the host it dialled (OTP passes
+%% the host part of the node name as the TLS server name), so the certificate must name every host the nodes
+%% reach each other by: one certificate per node, or one that names them all. OTP's default check matches names
+%% exactly, so a wildcard name never matches. Use a CA of its own for distribution, not the one that signs
+%% client certificates: any certificate this CA signed can join the cluster. Generate a CA and a node certificate
+%% for given hosts with DIST_CERT_HOSTS=... scripts/generate-dist-certs.sh.
 [
   {server, [
     {certfile, "/etc/malachi/dist/node.crt"},

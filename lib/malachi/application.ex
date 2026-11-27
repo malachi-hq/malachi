@@ -30,6 +30,7 @@ defmodule Malachi.Application do
   alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.Cluster.ClusterFlagsMachine
   alias Malachi.Cluster.ClusterFlagsServer
+  alias Malachi.Cluster.DistGuard
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.HealCoordinator
   alias Malachi.Cluster.LeaseHolder
@@ -103,6 +104,10 @@ defmodule Malachi.Application do
     # Before membership gossips it: a node with peers that would advertise an address no client can
     # reach is refused here rather than routing every client to itself.
     :ok = ensure_advertised_address()
+
+    # Before the cluster forms: a clustered node on a cookie anyone can read, or on distribution that does not verify
+    # its peers, is refused (rel/env.sh.eex refuses the same in a release, before its VM listens).
+    :ok = ensure_distribution_safe()
 
     port = Application.get_env(:malachi, :tcp_port, 4040)
     dashboard_port = Application.get_env(:malachi, :dashboard_port, 4041)
@@ -1164,9 +1169,46 @@ defmodule Malachi.Application do
       Application.get_env(:malachi, :advertised_port),
       Application.get_env(:malachi, :tcp_port, 4040),
       node(),
-      Application.get_env(:malachi, :log_cluster) != nil and length(configured_nodes()) > 1
+      peers?()
     )
   end
+
+  @doc """
+  Whether this node's control plane has peers: a `MALACHI_LOG_CLUSTER` with more than one `MALACHI_LOG_NODES`.
+  """
+  @spec peers?() :: boolean()
+  def peers?, do: Application.get_env(:malachi, :log_cluster) != nil and length(configured_nodes()) > 1
+
+  @doc """
+  Whether this node is clustered: it has peers (`peers?/0`) or a discovery strategy (`MALACHI_CLUSTER_STRATEGY`).
+  """
+  @spec clustered?() :: boolean()
+  def clustered? do
+    peers?() or (Application.get_env(:malachi, :cluster_topology) || %{})[:strategy] != nil
+  end
+
+  @doc """
+  The startup gate over Erlang distribution (`Malachi.Cluster.DistGuard`, on `DistGuard.facts/1` unless given):
+  refuses the start, through `Malachi.StartupRefusal`, when a clustered node runs on a cookie anyone can read or on
+  distribution that does not verify its peers. The message never holds the cookie.
+  """
+  @spec ensure_distribution_safe(:ok | {:error, DistGuard.reason()}, (non_neg_integer() -> any())) :: :ok | any()
+  def ensure_distribution_safe(checked \\ DistGuard.check(DistGuard.facts(clustered?())), halt_fun \\ &System.halt/1) do
+    case checked do
+      :ok -> :ok
+      {:error, reason} -> StartupRefusal.refuse!(dist_refusal(reason), halt_fun)
+    end
+  end
+
+  defp dist_refusal(:cookie_baked), do: I18n.t(:dist_refused_cookie_baked)
+  defp dist_refusal(:cookie_committed), do: I18n.t(:dist_refused_cookie_committed)
+  defp dist_refusal(:cookie_short), do: I18n.t(:dist_refused_cookie_short, min_bytes: DistGuard.min_cookie_bytes())
+  defp dist_refusal(:dist_tls_invalid), do: I18n.t(:dist_refused_tls_invalid)
+  defp dist_refusal(:dist_plaintext), do: I18n.t(:dist_refused_plaintext)
+  defp dist_refusal(:dist_tls_no_optfile), do: I18n.t(:dist_refused_tls_no_optfile)
+  defp dist_refusal(:dist_tls_unreadable), do: I18n.t(:dist_refused_tls_unreadable)
+  defp dist_refusal(:dist_tls_unverified), do: I18n.t(:dist_refused_tls_unverified)
+  defp dist_refusal(:dist_ca_shared), do: I18n.t(:dist_refused_ca_shared)
 
   @doc """
   The startup gate over the advertised address (`advertised_address/0` unless given): refuses the start,

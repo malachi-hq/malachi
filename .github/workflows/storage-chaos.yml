@@ -13,6 +13,8 @@ on:
     paths:
       - scripts/docker-storage-chaos.sh
       - scripts/chaos_lib.sh
+      - scripts/cluster_dist_lib.sh
+      - scripts/generate-dist-certs.sh
       - scripts/chaos_checker.exs
       - docker-compose.cluster.yml
       - docker-compose.storage-full.yml

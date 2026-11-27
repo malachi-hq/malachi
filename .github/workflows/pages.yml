@@ -10,6 +10,9 @@ on:
     branches: [main]
     paths: ['site/blog/**']
   workflow_dispatch:
+# Read-only by default; each job grants itself what it needs (deploy holds pages and id-token).
+permissions:
+  contents: read
 concurrency:
   group: pages
   cancel-in-progress: false

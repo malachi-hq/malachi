@@ -74,6 +74,10 @@ packages:
 runcmd:
   # The node must resolve its own FQDN before it starts: that name is its Erlang identity. Fail loudly if not.
   - ["sh", "-c", "for i in $(seq 1 60); do getent hosts ${node_fqdn} && exit 0; sleep 5; done; echo ${node_fqdn} did not resolve >&2; exit 1"]
+  # The container runs on the host network, so epmd and the distribution port would listen on every interface. They
+  # bind to the address the node's FQDN resolves to, its private one, which is how the peers reach it (#385); the
+  # network security list limits who may connect. The address is only known once the instance runs.
+  - ["sh", "-c", "ip=$(getent ahostsv4 ${node_fqdn} | awk 'NR == 1 { print $1 }') && [ -n \"$ip\" ] && echo MALACHI_DIST_INTERFACE=$ip >> /etc/malachi/malachi.env"]
   - ["sh", "-c", "mkdir -p /var/lib/malachi/ra /var/lib/malachi/log && chown -R 1000:1000 /var/lib/malachi /etc/malachi/dist /etc/malachi/client"]
   - ["systemctl", "enable", "--now", "docker"]
   - ["sh", "-c", "docker run -d --name malachi --restart unless-stopped --network host --env-file /etc/malachi/malachi.env -v /etc/malachi/dist:/etc/malachi/dist:ro -v /etc/malachi/client:/etc/malachi/client:ro -v /var/lib/malachi:/var/lib/malachi hectorcardoso/malachi:${image_tag}"]

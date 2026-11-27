@@ -29,6 +29,38 @@ permission. Host, port and credentials come from the environment, not from flags
 MALACHI_HOST=localhost MALACHI_PORT=4040 MALACHI_USER=app MALACHI_PASS=app123
 ```
 
+## TLS
+
+```bash
+node loadtest.js --tls --cacert ca.pem
+node loadtest.js --tls --cacert ca.pem --cert client.pem --key client-key.pem   # mTLS instead of the password
+MALACHI_CLIENT_TLS=true MALACHI_CLIENT_TLS_CACERT=ca.pem node loadtest.js       # the same, from the environment
+```
+
+The flags mirror `mix malachi.loadtest`, and `MALACHI_CLIENT_TLS`, `MALACHI_CLIENT_TLS_CACERT`,
+`MALACHI_CLIENT_TLS_CERT`, `MALACHI_CLIENT_TLS_KEY` and `MALACHI_CLIENT_TLS_INSECURE` set the same
+settings for every Node CLI (the producer, consumer and admin ones read only the environment). A flag
+wins over its variable, `--no-tls` included, and an empty variable counts as unset. Both generators read
+these variables, so one exported setting serves the two.
+
+`--tls` authenticates the server as well as encrypting the connection: its certificate is checked against
+`--cacert`, or Node's bundled CAs when none is named, and the host name you connect to (each broker the
+cluster advertises included) has to match it. Nothing is written to the socket before that check passes. A
+failed check stops the run with what to change, rather than counting as a broker that is down.
+
+A client certificate (`--cert` with `--key`) authenticates the connection by mTLS, in place of the user and
+password. `--insecure` skips verifying the server: for a development server only. The client refuses
+before connecting rather than guessing:
+
+- a CA, certificate, key or `--insecure` without `--tls`;
+- `--insecure` together with `--cacert`;
+- a certificate without its key, or a key without its certificate;
+- a file it cannot read;
+- a switch variable other than `true` or `false`.
+
+A JSON run records the TLS settings that came from the environment as flags in its reproduce command
+(paths only), so the command alone connects the same way.
+
 ## The four scenarios
 
 ```bash

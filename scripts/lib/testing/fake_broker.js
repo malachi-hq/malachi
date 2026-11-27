@@ -15,6 +15,7 @@
  */
 
 const net = require('net');
+const tls = require('tls');
 const zlib = require('zlib');
 const wire = require('../wire');
 
@@ -98,6 +99,7 @@ class FakeBroker {
     this.log = new Map(); // `${topic}/${range}` -> the values appended there, in order
     this.consumes = []; // every consume opened: { id, topic, range, start }
     this.acks = []; // every consume_ack: { stream, position, window }
+    this.auths = []; // every authentication: { kind: 'password', user } or { kind: 'mtls', peer } (peer: the CN)
     // what an open_consume is answered: 'ok', { refuse: reason }, 'silent', { delayMs } (answered that many
     // ms later), or { dropAfterMs } (answered, its first page pushed, and the connection closed that many ms
     // later, once)
@@ -123,9 +125,16 @@ class FakeBroker {
     this.groupPolicy = () => 'ok';
   }
 
-  // Listens on `port`, or on any free one: a test that stops a broker starts it again on its port.
-  async start(port = 0) {
-    this.server = net.createServer((socket) => this._accept(socket));
+  // Listens on `port`, or on any free one: a test that stops a broker starts it again on its port. With `tls`
+  // ({ key, cert, ca, requestCert }, PEM contents) it serves TLS only, asking for a client certificate signed
+  // by `ca` when `requestCert` is set, as the server's mTLS listener does.
+  async start(port = 0, { tls: tlsOpts = null } = {}) {
+    this.server = tlsOpts
+      ? tls.createServer(
+          { key: tlsOpts.key, cert: tlsOpts.cert, ca: tlsOpts.ca, requestCert: Boolean(tlsOpts.requestCert), rejectUnauthorized: Boolean(tlsOpts.requestCert) },
+          (socket) => this._accept(socket),
+        )
+      : net.createServer((socket) => this._accept(socket));
     await new Promise((resolve) => this.server.listen(port, '127.0.0.1', resolve));
     this.port = this.server.address().port;
     this.address = { host: '127.0.0.1', port: this.port };
@@ -206,7 +215,14 @@ class FakeBroker {
   _request(socket, apiKey, corr, payload) {
     const reply = (code, body) => socket.write(responseFrame(corr, code, body));
     reply.socket = socket;
+    if (apiKey === wire.API.mtlsAuth) {
+      const peer = typeof socket.getPeerCertificate === 'function' ? socket.getPeerCertificate() : null;
+      if (!peer || !peer.subject) return reply(wire.ERROR, str('no_client_certificate'));
+      this.auths.push({ kind: 'mtls', peer: peer.subject.CN });
+      return reply(wire.OK, str('token'));
+    }
     if (apiKey === wire.API.auth) {
+      this.auths.push({ kind: 'password', user: new Reader(payload).str() });
       if (this.authDelayMs > 0) return setTimeout(() => reply(wire.OK, str('token')), this.authDelayMs);
       return reply(wire.OK, str('token'));
     }

@@ -13,7 +13,7 @@ defmodule ChaosLibTest do
 
   setup_all do
     # Missing tools fail loudly instead of skipping: a skipped harness test reads as a passing one.
-    for tool <- ~w(bash awk sed jq) do
+    for tool <- ~w(bash awk sed jq openssl) do
       System.find_executable(tool) || flunk("#{tool} is required to test scripts/chaos_lib.sh")
     end
 
@@ -23,7 +23,10 @@ defmodule ChaosLibTest do
   setup %{tmp_dir: dir} do
     root = Path.join(dir, "tree")
     File.mkdir_p!(Path.join(root, "scripts"))
-    File.cp!(Path.join(@scripts, "chaos_lib.sh"), Path.join([root, "scripts", "chaos_lib.sh"]))
+
+    for script <- ~w(chaos_lib.sh cluster_dist_lib.sh generate-dist-certs.sh),
+        do: File.cp!(Path.join(@scripts, script), Path.join([root, "scripts", script]))
+
     File.cp!(Path.join(@scripts, "../mix.exs"), Path.join(root, "mix.exs"))
 
     stubs = Path.join(dir, "stubs")
@@ -274,7 +277,7 @@ defmodule ChaosLibTest do
       assert output =~ "the stream keys are on"
       assert output =~ "failed=0"
 
-      assert ("exec malachi-cluster-1 sh -c cd /app && elixir --sname chaoscli --cookie malachi_bench -S mix " <>
+      assert ("exec malachi-cluster-1 sh -c cd /app && elixir --sname chaoscli --cookie \"$MALACHI_COOKIE\" -S mix " <>
                 "malachi.flag enable producer_streams --node malachi@malachi1") in docker_calls(ctx)
     end
 
@@ -289,7 +292,7 @@ defmodule ChaosLibTest do
     test "node_task runs the mix task inside the node, short-named, against that node", ctx do
       assert {_output, 0} = drive(ctx, "node_task 2 'malachi.ring --show'")
 
-      assert ("exec malachi-cluster-2 sh -c cd /app && elixir --sname chaoscli --cookie malachi_bench -S mix " <>
+      assert ("exec malachi-cluster-2 sh -c cd /app && elixir --sname chaoscli --cookie \"$MALACHI_COOKIE\" -S mix " <>
                 "malachi.ring --show --node malachi@malachi2") in docker_calls(ctx)
     end
 
@@ -411,7 +414,7 @@ defmodule ChaosLibTest do
                docker_calls(ctx),
                &(&1 =~ "run --rm --no-deps -v " and
                    &1 =~
-                     "--entrypoint sh loadtest -c cd /app && elixir --sname chaoschk --cookie malachi_bench -S mix " <>
+                     "--entrypoint sh loadtest -c cd /app && elixir --sname chaoschk --cookie \"$MALACHI_COOKIE\" -S mix " <>
                        "run --no-start /chaos_scripts/chaos_checker.exs control-plane " <>
                        "malachi@malachi1,malachi@malachi2,malachi@malachi3 --project all")
              )

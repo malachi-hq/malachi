@@ -34,7 +34,7 @@ function usage() {
 }
 
 async function connect() {
-  const client = new MalachiClient({ host: cfg.host, port: cfg.port });
+  const client = new MalachiClient({ host: cfg.host, port: cfg.port, tls: cfg.tls });
   await client.connect(cfg.username, cfg.password);
   return client;
 }

@@ -2,6 +2,7 @@ defmodule Malachi.Site do
   alias Malachi.Site.Blog
   alias Malachi.Site.Comments
   alias Malachi.Site.Newsletter
+  alias Malachi.Site.Theme
 
   @moduledoc """
   Stages the landing page at the root of the published documentation site, and the files that go with it.
@@ -22,9 +23,10 @@ defmodule Malachi.Site do
   `verify/2` checks a staged tree and returns the problems among these checks: the landing page is in place, fully
   filled, references no font on this site that the site does not ship, every font the source ships is staged,
   `robots.txt`, `sitemap.xml` and `llms.txt` are present, and every URL in `sitemap.xml` and every Markdown link to this site
-  in `llms.txt` resolves to a file in `doc/`. A link to a directory resolves when that directory has an `index.html`.
+  in `llms.txt` resolves to a file in `doc/`, and so does every `<a href>` on the landing page that links to this
+  site (the docs and the blog among them). A link to a directory resolves when that directory has an `index.html`.
   It does not compare the page with `mix.exs`, so run stage again after the version or the licence changes.
-  Not checked: the landing page's own links other than fonts, fonts on other hosts, bare URLs in `llms.txt`,
+  Not checked: fonts on other hosts, bare URLs in `llms.txt`,
   code examples, HTML links in `llms.txt`, and links to other sites, including other paths on this host, which belong to
   other sites. Fonts
   under `/fonts/` on this host are checked, and so is every font this site serves, whichever folder holds it.
@@ -204,7 +206,9 @@ defmodule Malachi.Site do
       )
     end
 
-    landing = root |> read!(@landing_source) |> fill(meta) |> stage_paths() |> with_marker()
+    # The theme switch is the blog's too (Malachi.Site.Theme), so the landing page takes it from the same source.
+    theme = Theme.placeholders(Theme.script!(root))
+    landing = root |> read!(@landing_source) |> fill(Map.merge(meta, theme)) |> stage_paths() |> with_marker()
 
     llms =
       root
@@ -277,6 +281,7 @@ defmodule Malachi.Site do
     doc = Path.join(root, "doc")
 
     index_errors(doc, meta) ++
+      landing_link_errors(doc, meta) ++
       image_meta_errors(doc, meta) ++
       social_preview_errors(doc, Keyword.get(opts, :lfs_pointers, false)) ++
       page_errors(doc) ++
@@ -300,6 +305,25 @@ defmodule Malachi.Site do
   # in doc/ or names another site. The same reading of a URL as the sitemap and llms.txt checks.
   @spec link_errors(Path.t(), map(), String.t(), String.t()) :: [String.t()]
   def link_errors(doc, meta, url, where), do: unresolved(doc, meta, url, where)
+
+  @anchor_href ~r/<a\b[^>]*?\bhref\s*=\s*"([^"]*)"/i
+
+  # Every link on the landing page to this site resolves in doc/ (a directory through its index.html), so a link to
+  # the docs or the blog cannot point at a page the build never wrote. Fragments and other sites are passed over, as
+  # unresolved/4 reads them.
+  defp landing_link_errors(doc, meta) do
+    case File.read(Path.join(doc, "index.html")) do
+      {:ok, html} ->
+        @anchor_href
+        |> Regex.scan(html, capture: :all_but_first)
+        |> List.flatten()
+        |> Enum.uniq()
+        |> Enum.flat_map(&unresolved(doc, meta, &1, "doc/index.html"))
+
+      {:error, _} ->
+        []
+    end
+  end
 
   # Every og:image and twitter:image on the landing page names a file staged in doc/, or another site's.
   defp image_meta_errors(doc, meta) do
@@ -439,7 +463,7 @@ defmodule Malachi.Site do
   # A font is a reference with a font extension that resolves to this site, whichever folder holds it, and every file
   # under fonts/ must be staged. A font outside fonts/ that is missing is reported, as is a font this check cannot
   # place, or one that names a font outside this site's path under /fonts/. Any other reference, outside fonts/, is
-  # passed over, and the page's own links are not checked by any other function.
+  # passed over here; the page's `<a href>` links are landing_link_errors/2's.
   defp font_errors(doc, html, meta) do
     @reference
     |> Regex.scan(html, capture: :all_but_first)

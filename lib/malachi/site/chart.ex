@@ -16,6 +16,11 @@ defmodule Malachi.Site.Chart do
   LinkedIn). Its file is `<name>-<hash>.png` beside the post, where the hash is `hash/1` of the block's JSON
   text: a post whose numbers change needs a new image, and the site check reports the old one as stale. The
   hash is of the data rather than of the SVG, so restyling the chart does not invalidate every published image.
+
+  Every element carries its light colours as `fill` and `stroke` attributes, which the PNG render reads with no page
+  CSS, and a `chart-*` class (`chart-bg`, `chart-title`, `chart-unit`, `chart-axis`, `chart-bar`, `chart-value`,
+  `chart-gap`, `chart-gap-label`, `chart-label`) through which the blog's stylesheet recolours it under the dark
+  theme (#385). The SVG holds no `<style>` of its own, which inline would apply to the whole page.
   """
 
   @width 1200
@@ -141,10 +146,10 @@ defmodule Malachi.Site.Chart do
     """
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 #{@width} #{@height}" width="#{@width}" height="#{@height}" role="img" aria-label="#{escape(title)}">
     <title>#{escape(title)}</title>
-    <rect width="#{@width}" height="#{@height}" fill="#ffffff"/>
-    <text x="#{left}" y="56" font-family="system-ui, sans-serif" font-size="34" font-weight="700" fill="#111827">#{escape(title)}</text>
-    <text x="#{left}" y="92" font-family="system-ui, sans-serif" font-size="22" fill="#4b5563">#{escape(unit)}</text>
-    <line x1="#{left}" y1="#{base_y}" x2="#{@width - right}" y2="#{base_y}" stroke="#d1d5db" stroke-width="2"/>
+    <rect class="chart-bg" width="#{@width}" height="#{@height}" fill="#ffffff"/>
+    <text class="chart-title" x="#{left}" y="56" font-family="system-ui, sans-serif" font-size="34" font-weight="700" fill="#111827">#{escape(title)}</text>
+    <text class="chart-unit" x="#{left}" y="92" font-family="system-ui, sans-serif" font-size="22" fill="#4b5563">#{escape(unit)}</text>
+    <line class="chart-axis" x1="#{left}" y1="#{base_y}" x2="#{@width - right}" y2="#{base_y}" stroke="#d1d5db" stroke-width="2"/>
     #{Enum.join(bars, "\n")}
     </svg>
     """
@@ -154,8 +159,8 @@ defmodule Malachi.Site.Chart do
     h = plot_h * 0.25
 
     """
-    <rect x="#{num(x)}" y="#{num(base_y - h)}" width="#{num(bar_w)}" height="#{num(h)}" fill="none" stroke="#9ca3af" stroke-width="2" stroke-dasharray="8 6"/>
-    <text x="#{num(center)}" y="#{num(base_y - h - 14)}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="20" fill="#6b7280">not measured</text>
+    <rect class="chart-gap" x="#{num(x)}" y="#{num(base_y - h)}" width="#{num(bar_w)}" height="#{num(h)}" fill="none" stroke="#9ca3af" stroke-width="2" stroke-dasharray="8 6"/>
+    <text class="chart-gap-label" x="#{num(center)}" y="#{num(base_y - h - 14)}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="20" fill="#6b7280">not measured</text>
     #{label_text(label, center, base_y)}
     """
   end
@@ -164,14 +169,14 @@ defmodule Malachi.Site.Chart do
     h = if max > 0, do: plot_h * value / max, else: 0
 
     """
-    <rect x="#{num(x)}" y="#{num(base_y - h)}" width="#{num(bar_w)}" height="#{num(h)}" rx="4" fill="#3b5bdb"/>
-    <text x="#{num(center)}" y="#{num(base_y - h - 14)}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">#{escape(format_value(value))}</text>
+    <rect class="chart-bar" x="#{num(x)}" y="#{num(base_y - h)}" width="#{num(bar_w)}" height="#{num(h)}" rx="4" fill="#3b5bdb"/>
+    <text class="chart-value" x="#{num(center)}" y="#{num(base_y - h - 14)}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">#{escape(format_value(value))}</text>
     #{label_text(label, center, base_y)}
     """
   end
 
   defp label_text(label, center, base_y) do
-    ~s(<text x="#{num(center)}" y="#{num(base_y + 40)}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="22" fill="#374151">#{escape(label)}</text>)
+    ~s(<text class="chart-label" x="#{num(center)}" y="#{num(base_y + 40)}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="22" fill="#374151">#{escape(label)}</text>)
   end
 
   @doc "A value as the chart prints it: an integer with thousands separators, anything else to one decimal."

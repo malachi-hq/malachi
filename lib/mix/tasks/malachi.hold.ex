@@ -103,7 +103,7 @@ defmodule Mix.Tasks.Malachi.Hold do
       mix malachi.hold release <topic>
       mix malachi.hold show <topic>
 
-    connection: --node (or $MALACHI_NODE, default malachi@127.0.0.1), --cookie (or $RELEASE_COOKIE)
+    #{Rpc.connection_usage()}
     """
   end
 end

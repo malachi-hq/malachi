@@ -35,7 +35,7 @@ function record(i, key) {
 }
 
 async function createTopic(topic) {
-  const client = new MalachiClient({ host: cfg.host, port: cfg.port });
+  const client = new MalachiClient({ host: cfg.host, port: cfg.port, tls: cfg.tls });
   await client.connect(cfg.username, cfg.password);
   try {
     await client.createTopic(topic);
@@ -47,7 +47,7 @@ async function createTopic(topic) {
 function newProducer() {
   return new Producer(
     new Router({ host: cfg.host, port: cfg.port }),
-    { user: cfg.username, pass: cfg.password, timeout: ANSWER_TIMEOUT_MS },
+    { user: cfg.username, pass: cfg.password, tls: cfg.tls, timeout: ANSWER_TIMEOUT_MS },
     { maxInflight: 16, label: 'malachi-producer-cli' },
   );
 }
@@ -104,7 +104,7 @@ async function produceContinuous(topic, key, create) {
   let errors = 0;
   const producer = new Producer(
     new Router({ host: cfg.host, port: cfg.port }),
-    { user: cfg.username, pass: cfg.password, timeout: ANSWER_TIMEOUT_MS },
+    { user: cfg.username, pass: cfg.password, tls: cfg.tls, timeout: ANSWER_TIMEOUT_MS },
     {
       label: 'malachi-producer-cli',
       onEvent: (e) => {

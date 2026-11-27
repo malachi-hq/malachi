@@ -233,8 +233,14 @@ Prometheus's network namespace on purpose: sessions are bound to the IP that cre
 ### Durable cluster, observable
 
 ```bash
+. scripts/cluster_dist_lib.sh && cluster_dist_setup "$PWD/tmp/dist/durable"   # a cookie and TLS certificates for this cluster
 docker compose -f docker-compose.cluster-durable.yml up -d
 ```
+
+The nodes refuse a committed cookie and plaintext distribution (#385), so `cluster_dist_setup` exports a random
+`MALACHI_COOKIE` and writes the distribution certificates the compose file mounts at `/dist`. Every call makes a
+new cookie and new certificates: keep the shell that set them up for the cluster's `docker compose` commands, or
+set up again and recreate all three nodes together (`up -d --force-recreate`).
 
 Three brokers forming one replicated control plane at replication factor 3, each on its own named
 volume, plus the same Jaeger and Prometheus. Restart the whole thing and the data is still there,
@@ -350,7 +356,7 @@ endpoint.
 | **User** | `malachi` (UID 1000) |
 | **Workdir** | `/app` |
 | **JIT Compilation** | Enabled (`+JPperf true`) |
-| **Runtime Dependencies** | `libssl3` and `libcrypto3` (copied from the builder), `libstdc++`, `libgcc`, `ncurses-libs` |
+| **Runtime Dependencies** | `libssl3` and `libcrypto3` `>=3.5.9-r1` (copied from the builder), `zlib>=1.4-r0`, `libstdc++`, `libgcc`, `ncurses-libs` |
 
 ---
 

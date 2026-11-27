@@ -6,6 +6,7 @@ defmodule Malachi.Site.BlogTest do
   alias Malachi.Site
   alias Malachi.Site.Blog
   alias Malachi.Site.Chart
+  alias Malachi.Site.Theme
   alias Malachi.Test.SiteFixture
 
   import SiteFixture, only: [write: 3]
@@ -171,7 +172,9 @@ defmodule Malachi.Site.BlogTest do
       assert data["url"] == "https://example.test/malachi/blog/2026-11-16-v1-2-3.html"
       assert data["image"]["url"] == "https://example.test/malachi/kit/social-preview.png"
       assert data["publisher"]["name"] == "MalachiHQ"
-      assert length(Regex.scan(~r/<script\b/, page)) == 1
+      # one structured data block, beside the inline theme switch (#385), whatever the post's text holds
+      assert length(Regex.scan(~r/<script type="application\/ld\+json">/, page)) == 1
+      assert length(Regex.scan(~r/<script\b/, page)) == 2
       assert verify(root) == []
     end
 
@@ -539,6 +542,105 @@ defmodule Malachi.Site.BlogTest do
       errors = verify(root)
       assert "doc/blog/2026-11-16-v1-2-3.html is missing; stage the site again" in errors
       assert "doc/blog/index.html is missing; stage the site again" in errors
+    end
+  end
+
+  describe "the theme switch (#385)" do
+    defp theme(root), do: Theme.script!(root)
+
+    defp edit_page(root, rel, fun) do
+      path = Path.join(root, rel)
+      File.write!(path, fun.(File.read!(path)))
+    end
+
+    @page "doc/blog/2026-11-16-v1-2-3.html"
+
+    test "every blog page carries the theme script before its stylesheets, and the switch, once each", %{root: root} do
+      charted_post(root)
+      stage!(root)
+      head = Theme.head(theme(root))
+      toggle = Theme.toggle()
+
+      for rel <- [@page, "doc/blog/index.html"] do
+        html = read(root, rel)
+        assert [_] = Regex.scan(~r/#{Regex.escape(head)}/, html), "#{rel} lacks the theme head"
+        assert [_] = Regex.scan(~r/#{Regex.escape(toggle)}/, html), "#{rel} lacks the theme switch"
+        [before_css | _] = String.split(html, ~s(<link rel="stylesheet"), parts: 2)
+        assert before_css =~ head, "#{rel} loads a stylesheet before the theme script"
+      end
+
+      assert verify(root) == []
+    end
+
+    test "an inline script other than the switch is reported", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md")
+      stage!(root)
+      edit_page(root, @page, &(&1 <> "<script>alert(1)</script>"))
+      assert verify(root) == ["#{@page} runs an inline script other than the theme switch"]
+    end
+
+    test "a script element in any case, an inline SVG's included, is read as one", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md")
+      stage!(root)
+      edit_page(root, @page, &(&1 <> "<svg><SCRIPT type=\"text/javascript\">x()</SCRIPT></svg>"))
+      assert verify(root) == ["#{@page} runs an inline script other than the theme switch"]
+    end
+
+    test "a script that is never closed is reported", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md")
+      stage!(root)
+      edit_page(root, @page, &(&1 <> "<script>x()"))
+      assert "#{@page} has a script element that is never closed" in verify(root)
+    end
+
+    test "a page without the switch, or with it twice, is reported", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md")
+      stage!(root)
+      script = "<script>" <> theme(root) <> "</script>"
+
+      edit_page(root, @page, &String.replace(&1, script, ""))
+      assert verify(root) == ["#{@page} does not carry the theme switch exactly once"]
+
+      edit_page(root, @page, &(&1 <> script <> script))
+      assert verify(root) == ["#{@page} does not carry the theme switch exactly once"]
+    end
+
+    test "a switch that drifted from theme.js is another script", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md")
+      stage!(root)
+      SiteFixture.write_theme(root, "/* a newer switch */")
+
+      assert verify(root) |> Enum.sort() == [
+               "doc/blog/2026-11-16-v1-2-3.html does not carry the theme switch exactly once",
+               "doc/blog/2026-11-16-v1-2-3.html runs an inline script other than the theme switch",
+               "doc/blog/index.html does not carry the theme switch exactly once",
+               "doc/blog/index.html runs an inline script other than the theme switch"
+             ]
+    end
+
+    test "an event handler attribute or a javascript: URL is reported", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md")
+      stage!(root)
+
+      edit_page(root, @page, &(&1 <> ~s|<img src="x.png" alt="" onerror="x()">|))
+      assert "#{@page} has an event handler attribute (on...=)" in verify(root)
+
+      edit_page(root, @page, &String.replace(&1, ~s| onerror="x()"|, ""))
+      edit_page(root, @page, &(&1 <> ~s|<a href=" javascript:x()">x</a>|))
+      assert "#{@page} has a javascript: URL" in verify(root)
+    end
+
+    test "text about events or javascript: in a post is not an attribute", %{root: root} do
+      post(root, "2026-11-16-v1-2-3.md", body: "Set onload=1 in `href=\"javascript:x\"` and read on.\n")
+      stage!(root)
+      assert verify(root) == []
+    end
+
+    test "staging without theme.js raises, and the check names it", %{root: root} do
+      File.rm!(Path.join(root, Theme.source()))
+      assert_raise File.Error, ~r/theme\.js/, fn -> stage!(root) end
+
+      assert "#{Theme.source()} cannot be read, so no blog page's script can be checked against it" in verify(root)
     end
   end
 

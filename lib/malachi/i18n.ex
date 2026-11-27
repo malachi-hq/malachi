@@ -575,6 +575,58 @@ defmodule Malachi.I18n do
       "en_US" =>
         "this node has peers (MALACHI_LOG_NODES) but MALACHI_ADVERTISED_HOST is not set: clients would have no address to reach it at"
     },
+    dist_refused_cookie_baked: %{
+      "pt_BR" =>
+        "este nó está em cluster e usa o cookie de distribuição gravado na release, igual em toda cópia da mesma imagem: defina RELEASE_COOKIE com um segredo aleatório deste deployment, por exemplo openssl rand -hex 32",
+      "en_US" =>
+        "this node is clustered and runs on the distribution cookie baked into the release, the same in every copy of the image: set RELEASE_COOKIE to a random secret of this deployment, for example openssl rand -hex 32"
+    },
+    dist_refused_cookie_committed: %{
+      "pt_BR" =>
+        "este nó está em cluster e o cookie de distribuição é um valor commitado no repositório do Malachi, que qualquer um pode ler: defina RELEASE_COOKIE com um segredo aleatório, por exemplo openssl rand -hex 32",
+      "en_US" =>
+        "this node is clustered and its distribution cookie is a value committed to the Malachi repository, which anyone can read: set RELEASE_COOKIE to a random secret, for example openssl rand -hex 32"
+    },
+    dist_refused_cookie_short: %{
+      "pt_BR" =>
+        "este nó está em cluster e o cookie de distribuição tem menos de %{min_bytes} bytes: defina RELEASE_COOKIE com um segredo aleatório, por exemplo openssl rand -hex 32",
+      "en_US" =>
+        "this node is clustered and its distribution cookie is shorter than %{min_bytes} bytes: set RELEASE_COOKIE to a random secret, for example openssl rand -hex 32"
+    },
+    dist_refused_tls_invalid: %{
+      "pt_BR" => "MALACHI_DIST_TLS deve ser true, false ou não definido",
+      "en_US" => "MALACHI_DIST_TLS must be true, false or unset"
+    },
+    dist_refused_plaintext: %{
+      "pt_BR" =>
+        "este nó está em cluster e a distribuição Erlang não usa TLS: rode com MALACHI_DIST_TLS=true e MALACHI_DIST_TLS_OPTFILE (veja rel/dist_tls.conf.example), ou defina MALACHI_DIST_TLS=false para aceitar a distribuição em texto puro",
+      "en_US" =>
+        "this node is clustered and its Erlang distribution does not run over TLS: run with MALACHI_DIST_TLS=true and MALACHI_DIST_TLS_OPTFILE (see rel/dist_tls.conf.example), or set MALACHI_DIST_TLS=false to accept plaintext distribution"
+    },
+    dist_refused_tls_no_optfile: %{
+      "pt_BR" =>
+        "este nó está em cluster e a distribuição TLS não tem arquivo de opções: passe -ssl_dist_optfile, ou MALACHI_DIST_TLS_OPTFILE numa release",
+      "en_US" =>
+        "this node is clustered and its TLS distribution has no options file: pass -ssl_dist_optfile, or MALACHI_DIST_TLS_OPTFILE in a release"
+    },
+    dist_refused_tls_unreadable: %{
+      "pt_BR" =>
+        "este nó está em cluster e o arquivo de opções da distribuição TLS não pôde ser lido como uma lista com server e client",
+      "en_US" =>
+        "this node is clustered and the options file of its TLS distribution could not be read as a list with server and client"
+    },
+    dist_refused_tls_unverified: %{
+      "pt_BR" =>
+        "este nó está em cluster e a distribuição TLS não verifica os peers: o arquivo de opções precisa de verify_peer e fail_if_no_peer_cert no server e de verify_peer no client",
+      "en_US" =>
+        "this node is clustered and its TLS distribution does not verify its peers: the options file needs verify_peer and fail_if_no_peer_cert on the server side and verify_peer on the client side"
+    },
+    dist_refused_ca_shared: %{
+      "pt_BR" =>
+        "este nó está em cluster e a CA da distribuição é a mesma de MALACHI_TLS_CACERTFILE, que assina certificados de clientes: qualquer um deles entraria no cluster; use uma CA própria para a distribuição",
+      "en_US" =>
+        "this node is clustered and its distribution CA is the one in MALACHI_TLS_CACERTFILE, which signs client certificates: any of them could join the cluster; give distribution a CA of its own"
+    },
     advertised_host_loopback: %{
       "pt_BR" =>
         "este nó tem peers (MALACHI_LOG_NODES) mas MALACHI_ADVERTISED_HOST=%{host} é um endereço de loopback ou não especificado: um cliente em outra máquina discaria para si mesmo",

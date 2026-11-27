@@ -37,4 +37,10 @@ run "every_node_user_data_fits_the_oci_metadata_limit_with_headroom" {
     # nonsensitive() Terraform would hide the whole message.
     error_message = "A node's user_data is too large: ${jsonencode({ for k, n in oci_core_instance.node : k => nonsensitive(length(n.metadata["user_data"])) })} bytes; OCI refuses metadata above 32,000 at launch."
   }
+
+  # Erlang distribution binds to the node's private address, resolved from its FQDN once the instance runs (#385).
+  assert {
+    condition     = alltrue([for n in oci_core_instance.node : strcontains(nonsensitive(base64decode(n.metadata["user_data"])), "echo MALACHI_DIST_INTERFACE=$ip >> /etc/malachi/malachi.env")])
+    error_message = "A node's cloud-init does not bind Erlang distribution to its private address."
+  }
 }

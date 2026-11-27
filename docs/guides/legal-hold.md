@@ -38,8 +38,8 @@ mix malachi.hold show orders
 mix malachi.hold release orders
 ```
 
-Connection options are `--node` (or `$MALACHI_NODE`) and `--cookie` (or `$RELEASE_COOKIE`), as for every
-`mix malachi.*` task.
+Connection options are `--node` (or `$MALACHI_NODE`) and the cookie in `$RELEASE_COOKIE` (or `--cookie`, which
+shows in `ps` and the shell history), as for every `mix malachi.*` task.
 
 On the wire the keys are 36 (`set_topic_hold`, the topic and a reason), 37 (`release_topic_hold`) and 38
 (`get_topic_hold`), all `admin` only. The hold records **who placed it** (the session's user on the wire,

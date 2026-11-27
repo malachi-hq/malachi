@@ -47,6 +47,11 @@
 # Knobs (env): DUR WARM CONNS BATCH RSIZE PAYLOAD TOPICS RFS SRV_CPUSET LT_CPUSET, and
 #   MALACHI_USER, MALACHI_PASS  the dashboard login for the flush scrape (default admin / admin123)
 #   REAL_DISK            0 or 1, see above
+#   DIST_MODES           the Erlang distribution each case runs on, in order: tls (the default, what a clustered node
+#                        requires), plain (the explicit MALACHI_DIST_TLS=false baseline), or both, "tls plain" or
+#                        "plain tls", for the A/B of what TLS distribution costs replication (#385). Every mode runs
+#                        every RF on fresh clusters, with its own cookie and certificates (scripts/cluster_dist_lib.sh);
+#                        a rotation of the order across repetitions is the caller's, as for REAL_DISK.
 #   DISK_PREALLOC_BYTES  preallocation in disk mode, 1..67108864 (the broker clamps it to the 64MB
 #                        segment size, and the disk check relies on that bound)
 #   CASE_TIMEOUT         seconds one load generator run may take, setup included (default 300); a run
@@ -87,6 +92,7 @@ payload_args=()
 if [ "$PAYLOAD" != constant ]; then payload_args+=(--payload "$PAYLOAD"); fi
 TOPICS="${TOPICS:-64}"
 RFS="${RFS:-1 3}"
+DIST_MODES="${DIST_MODES-tls}"
 # Only an unset REAL_DISK means tmpfs: an empty one (a blank CI variable, say) is refused below rather
 # than silently running the mode nobody asked for.
 REAL_DISK="${REAL_DISK-0}"
@@ -112,6 +118,16 @@ for rf in $RFS; do
     1 | 2 | 3) ;;
     *) usage_error "RFS entries must be 1, 2 or 3 (the cluster has three nodes), got '$rf'" ;;
   esac
+done
+[ -n "${DIST_MODES// /}" ] || usage_error "DIST_MODES is empty"
+seen_dist=" "
+for dist in $DIST_MODES; do
+  case "$dist" in
+    tls | plain) ;;
+    *) usage_error "DIST_MODES entries must be tls or plain, got '$dist'" ;;
+  esac
+  case "$seen_dist" in *" $dist "*) usage_error "DIST_MODES names $dist twice" ;; esac
+  seen_dist="$seen_dist$dist "
 done
 case "$REAL_DISK" in
   0 | 1) ;;
@@ -151,7 +167,13 @@ fi
 
 # Private scratch dir (not a predictable /tmp path a local attacker could pre-create as a symlink).
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# This run's cookie and distribution certificates (#385), under the repository so the Docker host can mount them.
+# shellcheck source=scripts/cluster_dist_lib.sh
+. scripts/cluster_dist_lib.sh
+mkdir -p tmp/dist || exit 1
+DIST_DIR="$(mktemp -d "$PWD/tmp/dist/run.XXXXXX")" || exit 1
+trap 'rm -rf "$WORK" "$DIST_DIR"' EXIT
+cluster_dist_setup "$DIST_DIR" || exit 1
 NODES="malachi1 malachi2 malachi3"
 LOADTEST_CONTAINER="malachi-cluster-loadtest-$$"
 # Created by the generator, inside its own container, the moment the measured window opens.
@@ -421,8 +443,8 @@ record_case() {
     --arg outcome "$outcome" --argjson prealloc_bytes "$MALACHI_SEGMENT_PREALLOC_BYTES" \
     --argjson du_bytes "$du_bytes" --argjson nodes "$MOUNTS_JSON" --arg host "$HOST" \
     --arg docker "$DOCKER_DESC" --arg docker_root_backing "$BACKING" --argjson smoke "$SMOKE" \
-    --arg mid_window_cpu "$cpu" --argjson loadtest "$loadtest" --argjson flush "$flush" \
-    '{data_mode: $data_mode, rf: $rf, regime_label: $regime_label, outcome: $outcome,
+    --arg mid_window_cpu "$cpu" --argjson loadtest "$loadtest" --argjson flush "$flush" --arg dist "$DIST" \
+    '{data_mode: $data_mode, dist: $dist, rf: $rf, regime_label: $regime_label, outcome: $outcome,
       prealloc_bytes: $prealloc_bytes, du_bytes: $du_bytes, nodes: $nodes, host: $host, docker: $docker,
       docker_root_backing: $docker_root_backing, smoke_test: ($smoke == 1),
       mid_window_cpu: (if $mid_window_cpu == "" then null else $mid_window_cpu end), loadtest: $loadtest,
@@ -440,6 +462,12 @@ fail_case() {
   FAILED=1
 }
 
+for DIST in $DIST_MODES; do
+# Each distribution mode on its own cookie and certificates, which the nodes of every case below mount.
+rm -rf "$DIST_DIR" && mkdir -p "$DIST_DIR" || exit 1
+if [ "$DIST" = tls ]; then DIST_TLS=1; else DIST_TLS=0; fi
+DIST_TLS="$DIST_TLS" cluster_dist_setup "$DIST_DIR" || exit 1
+echo "== Erlang distribution: $DIST =="
 for rf in $RFS; do
   teardown "$rf"
   RF="$rf" $COMPOSE up -d --force-recreate malachi1 malachi2 malachi3 > "$WORK/up.log" 2>&1
@@ -564,10 +592,11 @@ for rf in $RFS; do
   record_case "$rf" "$outcome" "$json" "$du_bytes" "$cpu" "$flush"
   teardown "$rf"
 done
+done
 
 echo
 if [ "$FAILED" != "0" ]; then
   echo "done, WITH FAILED CASES (see above)"
   exit 1
 fi
-echo "done ($DATA_MODE; target: 1M rec/s aggregate at RF=1; the three servers share SRV_CPUSET=$SRV_CPUSET)"
+echo "done ($DATA_MODE, distribution $DIST_MODES; target: 1M rec/s aggregate at RF=1; the three servers share SRV_CPUSET=$SRV_CPUSET)"

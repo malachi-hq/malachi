@@ -25,34 +25,49 @@ def show: if .median == null then "n/a" else "\(.median) (\(.min) to \(.max))" e
 
 def flush_us(q): if .flush.all[q] == null then null else .flush.all[q] * 1e6 | round end;
 
-def verdict($name; $tmpfs; $disk):
-  if $tmpfs.median == null or $disk.median == null then "\($name): not comparable, one mode has no result"
-  elif $tmpfs.runs < 2 or $disk.runs < 2 then
-    "\($name): a single run of a mode has no noise floor, no difference is claimed (tmpfs \($tmpfs | show), disk \($disk | show))"
-  elif $disk.max < $tmpfs.min or $tmpfs.max < $disk.min then
-    "\($name): ranges are disjoint (tmpfs \($tmpfs | show), disk \($disk | show))"
-  else "\($name): ranges overlap, no difference is claimed (tmpfs \($tmpfs | show), disk \($disk | show))"
+# The two arms of a comparison, $an and $bn by name: a difference only from disjoint ranges of at least two runs each.
+def verdict($name; $an; $a; $bn; $b):
+  "(\($an) \($a | show), \($bn) \($b | show))" as $both
+  | if $a.median == null or $b.median == null then "\($name): not comparable, one mode has no result"
+    elif $a.runs < 2 or $b.runs < 2 then "\($name): a single run of a mode has no noise floor, no difference is claimed \($both)"
+    elif $b.max < $a.min or $a.max < $b.min then "\($name): ranges are disjoint \($both)"
+    else "\($name): ranges overlap, no difference is claimed \($both)"
+    end;
+
+def verdict($name; $tmpfs; $disk): verdict($name; "tmpfs"; $tmpfs; "disk"; $disk);
+
+# The distribution a case ran on (#385): TLS or plaintext. A case recorded before the field existed ran plaintext.
+def dist: .dist // "plain";
+
+# The change of the median from $a to $b, in percent, or null.
+def change($a; $b):
+  if $a.median == null or $b.median == null or $a.median == 0 then null
+  else (($b.median - $a.median) / $a.median * 1000 | round) / 10
   end;
 
 map(select(.outcome | startswith("ok"))) as $measured
 | map(select(.outcome | startswith("ok") | not)) as $failed
-| [
+# An A/B of the distribution (DIST_MODES with both): every label then names it too.
+| (($measured + $failed) | map(dist) | unique | length > 1) as $ab
+| def mode_label: if $ab then "\(.data_mode), \(dist)" else .data_mode end;
+  def dist_label: if $ab then " (\(dist))" else "" end;
+  [
     "| RF | data | runs | rec/s, median (min to max) | p50 ms | p99 ms | flush p50 us | flush p99 us | filesystem |",
     "|---|---|---|---|---|---|---|---|---|"
   ]
   + [
-      $measured | group_by([.rf, .data_mode])[]
-      | "| \(.[0].rf) | \(.[0].data_mode) | \(length) | \(spread(.loadtest.records_per_s) | show) "
+      $measured | group_by([.rf, .data_mode, dist])[]
+      | "| \(.[0].rf) | \(.[0] | mode_label) | \(length) | \(spread(.loadtest.records_per_s) | show) "
         + "| \(spread(.loadtest.latency_ms.p50) | show) | \(spread(.loadtest.latency_ms.p99) | show) "
         + "| \(spread(flush_us("p50")) | show) | \(spread(flush_us("p99")) | show) "
         + "| \([.[].nodes[].fstype] | unique | join(", ")) |"
     ]
   + ["", "Disk against tmpfs, per RF (a difference counts only when the min to max ranges are disjoint):"]
   + [
-      $measured | group_by(.rf)[]
+      $measured | group_by([dist, .rf])[]
       | map(select(.data_mode == "tmpfs")) as $tmpfs
       | map(select(.data_mode == "disk")) as $disk
-      | "- RF \(.[0].rf): "
+      | "- RF \(.[0].rf)\(.[0] | dist_label): "
         + verdict("rec/s"; $tmpfs | spread(.loadtest.records_per_s); $disk | spread(.loadtest.records_per_s))
         + "; "
         + verdict("p99 ms"; $tmpfs | spread(.loadtest.latency_ms.p99); $disk | spread(.loadtest.latency_ms.p99))
@@ -62,6 +77,19 @@ map(select(.outcome | startswith("ok"))) as $measured
         + verdict("flush p99 us"; $tmpfs | spread(flush_us("p99")); $disk | spread(flush_us("p99")))
     ]
   + (if ($measured | length) == 0 then ["- no case produced a result"] else [] end)
+  + (if $ab | not then []
+     else ["", "TLS against plaintext distribution, per RF and data mode (#385; the change is of the median):"]
+       + [
+           $measured | group_by([.rf, .data_mode])[]
+           | (map(select(dist == "plain")) | spread(.loadtest.records_per_s)) as $plain_rate
+           | (map(select(dist == "tls")) | spread(.loadtest.records_per_s)) as $tls_rate
+           | "- RF \(.[0].rf), \(.[0].data_mode): "
+             + verdict("rec/s"; "plain"; $plain_rate; "tls"; $tls_rate)
+             + ", median change \(change($plain_rate; $tls_rate) // "n/a")%; "
+             + verdict("p99 ms"; "plain"; map(select(dist == "plain")) | spread(.loadtest.latency_ms.p99);
+                 "tls"; map(select(dist == "tls")) | spread(.loadtest.latency_ms.p99))
+         ]
+     end)
   + [
       "",
       "Host: \(map(.host) | unique | join("; "))",
@@ -71,9 +99,9 @@ map(select(.outcome | startswith("ok"))) as $measured
   + ([$measured[] | select(.flush.all == null)] as $unflushed
      | if ($unflushed | length) == 0 then []
        else ["", "Measured cases without flush latency:"]
-         + [$unflushed[] | "- RF \(.rf), \(.data_mode): \(.flush.error // "not scraped")"]
+         + [$unflushed[] | "- RF \(.rf), \(mode_label): \(.flush.error // "not scraped")"]
        end)
   + (if ($failed | length) == 0 then []
-     else ["", "Failed cases:"] + [$failed[] | "- RF \(.rf), \(.data_mode): \(.outcome)"]
+     else ["", "Failed cases:"] + [$failed[] | "- RF \(.rf), \(mode_label): \(.outcome)"]
      end)
   | .[]

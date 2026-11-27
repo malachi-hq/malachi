@@ -141,6 +141,40 @@ defmodule DockerClusterSummaryTest do
     end
   end
 
+  describe "the distribution A/B (#385)" do
+    defp on(kase, dist), do: Map.put(kase, "dist", dist)
+
+    test "with both modes, labels every row and compares TLS with plaintext per RF and data mode", ctx do
+      lines =
+        summarize!(ctx, [
+          on(kase("tmpfs", 3, 100_000, 20), "plain"),
+          on(kase("tmpfs", 3, 104_000, 21), "plain"),
+          on(kase("tmpfs", 3, 80_000, 30), "tls"),
+          on(kase("tmpfs", 3, 84_000, 31), "tls")
+        ])
+
+      assert Enum.any?(lines, &String.starts_with?(&1, "| 3 | tmpfs, plain | 2 | 102000 (100000 to 104000) |"))
+      assert Enum.any?(lines, &String.starts_with?(&1, "| 3 | tmpfs, tls | 2 | 82000 (80000 to 84000) |"))
+      assert "TLS against plaintext distribution, per RF and data mode (#385; the change is of the median):" in lines
+
+      assert ("- RF 3, tmpfs: rec/s: ranges are disjoint (plain 102000 (100000 to 104000), tls 82000 (80000 to 84000)), " <>
+                "median change -19.6%; p99 ms: ranges are disjoint (plain 20.5 (20 to 21), tls 30.5 (30 to 31))") in lines
+    end
+
+    test "with one mode, the summary reads as it always has", ctx do
+      lines = summarize!(ctx, [on(kase("tmpfs", 1, 300_000, 5), "tls"), on(kase("disk", 1, 250_000, 7), "tls")])
+      assert Enum.any?(lines, &String.starts_with?(&1, "| 1 | tmpfs | 1 |"))
+      refute Enum.any?(lines, &(&1 =~ "TLS against plaintext"))
+      assert Enum.any?(lines, &String.starts_with?(&1, "- RF 1: rec/s:"))
+    end
+
+    test "a case recorded before the field existed counts as plaintext, which it ran on", ctx do
+      lines = summarize!(ctx, [kase("tmpfs", 3, 100_000, 20), on(kase("tmpfs", 3, 80_000, 30), "tls")])
+      assert Enum.any?(lines, &String.starts_with?(&1, "| 3 | tmpfs, plain | 1 |"))
+      assert Enum.any?(lines, &(&1 =~ "a single run of a mode has no noise floor"))
+    end
+  end
+
   defp flushed(kase, p50, p99), do: put_in(kase, ["flush", "all"], %{"p50" => p50, "p99" => p99, "flushes" => 10})
 
   defp kase(mode, rf, rate, p99) do
