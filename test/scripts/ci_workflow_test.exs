@@ -61,9 +61,17 @@ defmodule Malachi.CiWorkflowTest do
     script = Enum.map_join(summary["steps"], "\n", &(Map.new(&1)["run"] || ""))
 
     for {id, _job} <- jobs, id != summary_id do
+      check =
+        Regex.run(
+          ~r/#{Regex.escape(~s/if [ "${{ needs.#{id}.result }}" != "success" ]; then/)}\n(.*?)\n\s*fi\n/s,
+          script
+        )
+
       cond do
         id not in needs -> {id, :not_needed}
-        not String.contains?(script, ~s/if [ "${{ needs.#{id}.result }}" != "success" ]; then/) -> {id, :not_checked}
+        check == nil -> {id, :not_checked}
+        # the branch must fail the step: a check that echoes and goes on, or exits 0, passes every result
+        not Regex.match?(~r/^\s*exit 1\s*$/m, Enum.at(check, 1)) -> {id, :does_not_fail}
         true -> nil
       end
     end
@@ -180,6 +188,15 @@ defmodule Malachi.CiWorkflowTest do
 
       tampered = in_job(@ci, "summary", "needs: [test, coverage, docker, quality,", "needs: [test, coverage, docker,")
       assert unchecked_jobs(tampered) == [{"quality", :not_needed}]
+
+      quality_fails = ~s/echo "❌ Code quality checks failed!"\n            exit 1\n/
+
+      for passes <- ["true", "exit 0"] do
+        tampered =
+          in_job(@ci, "summary", quality_fails, ~s/echo "❌ Code quality checks failed!"\n            #{passes}\n/)
+
+        assert unchecked_jobs(tampered) == [{"quality", :does_not_fail}], passes
+      end
     end
 
     test "the required check keeps its name, which rulesets and release.yml's verify-ci look for" do
