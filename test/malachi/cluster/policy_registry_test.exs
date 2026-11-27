@@ -92,11 +92,10 @@ defmodule Malachi.Cluster.PolicyRegistryTest do
                PolicyMachine.apply(%{machine_version: 2}, command, state)
     end
 
-    # Live from the first field added after the store (#199 onwards): at the version just below the one
-    # that introduced it, the machine must refuse it by name. That only holds while the machine hands the
-    # registry the effective version of the entry rather than this build's own. With every field at 3
-    # today there is no such version yet, and the pure half of the rule is proved in
-    # Malachi.Cluster.PolicyTest with an injected table.
+    # Every field added after the store (`retention.segment_max_age_ms` at 6, `retention.max_records` at 12):
+    # at the version just below the one that introduced it, the machine must refuse it by name. That only
+    # holds while the machine hands the registry the effective version of the entry rather than this
+    # build's own.
     test "every field newer than the store is refused by the machine one version below its own" do
       for %{name: name, path: path, since: since} <- Policy.fields(), since > 3 do
         policy = put_in(%{}, Enum.map(path, &Access.key(&1, %{})), 1)
@@ -104,6 +103,20 @@ defmodule Malachi.Cluster.PolicyRegistryTest do
 
         assert {_state, ^refused} =
                  PolicyMachine.apply(%{machine_version: since - 1}, {:define_policy, "p", policy}, PolicyRegistry.new())
+      end
+    end
+
+    test "a record count bound is refused at 11 with the store unchanged, and stored at 12" do
+      state = PolicyRegistry.new()
+
+      for value <- [1_000, 0, nil] do
+        command = {:define_policy, "lastn", %{retention: %{max_records: value}}}
+
+        assert {^state, {:error, {:unsupported_policy_field, "retention.max_records", 12, 11}}} =
+                 PolicyMachine.apply(%{machine_version: 11}, command, state)
+
+        assert {stored, :ok} = PolicyMachine.apply(%{machine_version: 12}, command, state)
+        assert PolicyRegistry.get(stored, "lastn") == %{retention: %{max_records: value}}
       end
     end
   end
